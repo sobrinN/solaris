@@ -1,22 +1,57 @@
 ---
 name: talking-head-shorts
-description: Pacing, jump-cut, punch-in zoom, smart 9:16 framing, and B-roll cutaway rules for vertical talking-head shorts, Reels, and TikToks.
+description: Cuts and paces vertical 9:16 talking-head shorts, Reels, and TikToks in Solaris using breath-safe jump cuts, 0–3s retention hooks, alternating punch-in zooms, smart 9:16 reframing, and B-roll J/L cutaways. Use when editing speaker-led footage, podcast clips, creator reels, or removing silences on V1/V2. Not for faceless slideshows or non-Solaris editors.
 ---
 
-# Talking-Head Shorts Craft
+# Solaris Talking-Head Shorts Craft
 
-1. **0–3s Retention Hook**:
-   - Start immediately on the speaker's first spoken word or strongest visual beat (`source_in_sec` aligned to first speech onset).
-   - Pair the hook with a `106%–112%` punch-in (`timeline.set_transform` with `scale: 1.08`) or a bold chapter title card.
+Use this skill whenever the primary spine is a human speaker on `V1` (typically `vertical9x16`, `1080×1920`, 30fps).
 
-2. **Breath-Safe Jump Cuts (`razor`)**:
-   - Read `silences` from `media.get_manifest`.
-   - Cut silences longer than `0.25s`, leaving a **`0.12s` breath-safe pad** before and after words so cuts feel crisp rather than clipped.
-   - Alternate scale (`1.00` ↔ `1.08`–`1.14`) across consecutive jump cuts to disguise edits cleanly.
+## 1. Pre-Cut Inspection
 
-3. **Smart `9:16` Reframing**:
-   - When `canvas.aspect_preset` is `vertical9x16` and source video is `16:9`, keep the speaker centered (`transform.x: 0.0`, `scale >= 1.0`) and verify eyes sit in the upper third via `preview.capture_frame`.
+1. Call `media.get_manifest` for the A-roll asset. Read `silences`, `transcript`, `duration_sec`, and `integrated_lufs`.
+2. If `has_audio: true` and `transcript` is empty, call `media.transcribe` before planning cuts.
+3. Call `media.extract_keyframes` at `[0.5, mid]` to verify speaker eye-line, headroom, and framing before deciding `scale` and `x/y` offsets.
 
-4. **B-Roll Cadence**:
-   - Place B-roll inserts on `V2` every `3.0–5.0s` for `1.5–3.0s` each while keeping A-roll audio continuous underneath (J/L cut feel).
-   - Mute or attenuate (`gain_db: -99`) B-roll clip audio unless intentional SFX/ambience is needed.
+## 2. 0–3s Retention Hook
+
+- **Frame 0 starts on speech or motion**: Set the opening `V1` clip's `source_in_sec` directly to the first spoken word onset (minus `0.08–0.12s` breath lead) so there is zero dead air and zero lead gap (`start_sec: 0.0`).
+- **Visual emphasis**: Pair the opening `0.0–2.5s` hook with either:
+  - A **`1.08–1.12` punch-in** via `timeline.set_transform` on `v1`, OR
+  - A bold `chapter-title-solar` card placed on `g1` (`gfx.place`) and positioned clear of the speaker's face via `timeline.set_transform(track_id="g1", y=-0.25, scale=0.92)`.
+
+## 3. Breath-Safe Jump-Cut Math (`V1`)
+
+Remove dead pauses while keeping delivery natural—never chop consonants or leave `> 0.40s` gaps on `V1`:
+
+1. Read `silences` (`[{ start_sec, end_sec, duration_sec }]`) from `media.get_manifest`.
+2. **Cut threshold**: Remove any silence with `duration_sec > 0.25`.
+3. **Breath-safe pad**: Keep **`0.12s`** before speech resumes and **`0.12s`** after a phrase ends (minimum `0.24s` kept around a trimmed silence) so cuts breathe cleanly without robotic clicks.
+4. **Contiguous timeline placement**:
+   - **Building fresh**: Place each kept speech segment sequentially on `v1` with `timeline.place_clip`, setting each clip's `start_sec` to the exact end (`prev_start + prev_duration`) of the previous clip so there are **0.0s V1 gaps**.
+   - **Refining an existing clip**: Use `timeline.split_clip` at the silence boundaries, `timeline.delete_clip` on the dead middle segment, and `timeline.trim_clip` (`new_start_sec`) to ripple subsequent clips closed.
+5. **Disguise jump cuts with alternating punch-ins**:
+   - Alternate `scale` across consecutive `V1` clips: `1.00` → `1.08` → `1.00` → `1.12` via `timeline.set_transform`.
+   - Keep `scale` between `1.00` and `1.15` (higher values soften 1080p footage noticeably).
+   - Keep slight `0.05s` `fade_in_sec` / `fade_out_sec` via `audio.set_mix` on hard-trimmed speech clips to prevent audio clicks.
+
+## 4. Smart `9:16` Reframing
+
+- When `canvas.aspect_preset` is `vertical9x16` and raw A-roll is `16:9` landscape:
+  - Keep the speaker centered horizontally (`x: 0.0`) unless `media.extract_keyframes` shows an off-center composition—adjust `x` in `[-0.18, +0.18]` to keep eyes centered.
+  - Keep eyes in the **upper third** of the frame so `T1` captions (`y: 0.20`) sit cleanly over the chest/torso, never across the mouth or chin.
+  - Verify framing with `preview.capture_frame` at `0.5s` and after the first punch-in cut.
+
+## 5. B-Roll Cutaway Cadence (`V2`) & J/L Cuts
+
+- Insert `V2` cutaways (screen recordings, product footage, or `ken_burns: true` stills) every **`3.0–5.0s`** for **`1.5–3.0s`** each so no talking-head stretch stalls visually.
+- **Keep A-roll audio continuous**: Place `V2` directly over the `V1` spine (`V1` audio continues seamlessly underneath—authentic J/L cut momentum).
+- **Silence B-roll scratch audio**: Always pass `gain_db: -99` on `timeline.place_clip` for `V2` cutaways (or set via `audio.set_mix`) unless intentional SFX/ambience is part of the shot.
+
+## 6. BANNED Talking-Head Defaults
+
+- Leaving `> 0.35s` silences or throat-clearing at `0.0s`.
+- Leaving uncovered gaps `> 0.40s` between `V1` segments (causes black flashes and fails QA).
+- Using the exact same `scale: 1.0` on 4+ back-to-back jump cuts without a punch-in or B-roll cover.
+- Placing `G1` cards at `y: 0.0` (blocks speaker's face) or `y: 0.20` (collides with `T1` captions).
+- Leaving unmuted `V2` camera scratch audio clashing with the speaker.

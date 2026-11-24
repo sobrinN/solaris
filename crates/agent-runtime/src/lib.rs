@@ -17,7 +17,10 @@ pub use openrouter::{
     MediaUrlRef, MessageContent, OpenRouterClient, OpenRouterConfig, OpenRouterModel,
     ProviderPreferences, ToolCall, ToolDefinition,
 };
-pub use skills::{SkillDoc, get_skill, install_skills_to_dir, list_skills, skills_for_role};
+pub use skills::{
+    SkillDoc, SkillResourceDoc, get_skill, get_skill_resource, install_skills_to_dir,
+    list_skill_resources, list_skills, skills_for_role,
+};
 pub use stt::transcribe_audio_openrouter;
 pub use swarm::{SwarmRunRequest, run_qa_pass, run_swarm};
 pub use tools::{

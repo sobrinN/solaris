@@ -1,0 +1,4 @@
+interface:
+  display_name: "Solaris Color & Look"
+  short_description: "Log-to-Rec.709 recovery, Lift/Gamma/Gain balancing, and brand LUT blending"
+  default_prompt: "Inspect the project's footage color profile and brand LUT, apply a balanced filmic grade, and verify skin tones and highlights with captured frames."

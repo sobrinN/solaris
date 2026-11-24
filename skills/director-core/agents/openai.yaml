@@ -1,0 +1,4 @@
+interface:
+  display_name: "Solaris Director Core"
+  short_description: "Directs 7-track Solaris timelines end-to-end with shotlists, QA, and export"
+  default_prompt: "Inspect my Solaris project, media manifests, and brand playbook, propose a tight numbered shotlist plan, and assemble a release-ready cut."

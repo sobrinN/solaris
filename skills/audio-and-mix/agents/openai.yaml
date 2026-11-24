@@ -1,0 +1,4 @@
+interface:
+  display_name: "Solaris Audio & Mix"
+  short_description: "-14 LUFS voice normalization, -18 dB sidechain music ducking, and clean fades"
+  default_prompt: "Normalize speech to -14 LUFS, balance the A2 music bed with -18 dB sidechain ducking, mute B-roll scratch audio, and add clean fades."

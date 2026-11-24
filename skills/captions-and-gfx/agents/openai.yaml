@@ -1,0 +1,4 @@
+interface:
+  display_name: "Solaris Captions & GFX"
+  short_description: "Safe-zone word captions, 5 starter GFX assets, and seekable GSAP overlays"
+  default_prompt: "Generate word-synced social safe-zone captions on T1 and add brand-tokenized GFX callouts on G1 with zero caption overlap."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Solaris Talking-Head Shorts"
+  short_description: "Breath-safe jump cuts, 0-3s hooks, punch-in zooms, and 9:16 B-roll pacing"
+  default_prompt: "Cut this talking-head footage into a tight 9:16 short with a 0-3s hook, breath-safe jump cuts, alternating punch-ins, and B-roll cutaways."

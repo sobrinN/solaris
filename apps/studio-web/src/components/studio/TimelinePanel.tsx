@@ -135,6 +135,11 @@ export function TimelinePanel({
   const safeFps = Math.max(1, Math.round(fps));
   const timelineSpan = Math.max(20, Math.ceil(totalDurationSec + 4));
   const playheadPct = Math.min(100, Math.max(0, (playheadSec / timelineSpan) * 100));
+  const rulerStepSec = timelineSpan <= 25 ? 2 : timelineSpan <= 60 ? 5 : 10;
+  const rulerTicks: number[] = [];
+  for (let s = 0; s <= timelineSpan; s += rulerStepSec) {
+    rulerTicks.push(s);
+  }
 
   const seekFromPointer = (el: HTMLDivElement, clientX: number) => {
     const rect = el.getBoundingClientRect();
@@ -328,6 +333,51 @@ export function TimelinePanel({
 
       {/* Tracks */}
       <div className="relative flex flex-col divide-y divide-areia/[0.06] overflow-x-auto">
+        {/* Timecode Ruler */}
+        <div className="flex h-6 items-stretch bg-void/75">
+          <div className="sticky left-0 z-20 flex w-40 shrink-0 items-center justify-between border-r border-areia/10 bg-void/95 px-2.5 text-[10px] font-medium uppercase tracking-[0.12em] text-areia/45 backdrop-blur-sm">
+            <span>Tracks</span>
+            <span className="tabular-nums text-areia/35">{tracks.length}</span>
+          </div>
+          <div
+            style={zoom > 1 ? { minWidth: `${Math.round(zoom * 100)}%` } : undefined}
+            onPointerDown={(e) => {
+              if (e.button !== 0) return;
+              e.currentTarget.setPointerCapture(e.pointerId);
+              seekFromPointer(e.currentTarget, e.clientX);
+            }}
+            onPointerMove={(e) => {
+              if (e.buttons === 1) {
+                seekFromPointer(e.currentTarget, e.clientX);
+              }
+            }}
+            className="relative min-w-0 flex-1 cursor-pointer select-none"
+          >
+            {rulerTicks.map((sec) => {
+              const pct = (sec / timelineSpan) * 100;
+              return (
+                <div
+                  key={sec}
+                  className="pointer-events-none absolute top-0 bottom-0 flex flex-col justify-between"
+                  style={{ left: `${pct}%` }}
+                >
+                  <span className="h-1.5 w-px bg-areia/25" />
+                  <span className="tabular-nums -translate-x-1/2 pb-0.5 text-[10px] text-areia/40">
+                    {sec === 0 ? "" : `${sec}s`}
+                  </span>
+                </div>
+              );
+            })}
+            {/* Playhead Cap */}
+            <div
+              className="pointer-events-none absolute top-0 bottom-0 z-10 -translate-x-1/2"
+              style={{ left: `${playheadPct}%` }}
+            >
+              <div className="mx-auto h-2.5 w-2.5 rounded-b-sm bg-laranja-criacao shadow-[0_0_8px_rgba(240,90,0,0.85)]" />
+            </div>
+          </div>
+        </div>
+
         {tracks.map((track) => {
           const acceptsMediaDrop =
             Boolean(onDropMediaOnTrack) &&
@@ -349,7 +399,7 @@ export function TimelinePanel({
                       {track.code} {track.name}
                     </span>
                   </div>
-                  <div className="truncate pl-2.5 text-[9px] text-areia/45">
+                  <div className="truncate pl-2.5 text-[10px] text-areia/45">
                     {track.subtitle}
                   </div>
                 </div>
@@ -357,10 +407,10 @@ export function TimelinePanel({
                   <button
                     type="button"
                     onClick={() => onToggleTrackFlag(track.id, "solo", !track.solo)}
-                    className={`rounded px-1 py-0.5 text-[9px] font-bold ${
+                    className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
                       track.solo
                         ? "bg-amarelo-ideias text-void"
-                        : "text-areia/40 hover:text-areia"
+                        : "text-areia/45 hover:text-areia"
                     }`}
                     aria-label={`Solo ${track.code}`}
                     title={`Solo ${track.code}`}
@@ -371,7 +421,7 @@ export function TimelinePanel({
                     type="button"
                     onClick={() => onToggleTrackFlag(track.id, "muted", !track.muted)}
                     className={`rounded p-1 ${
-                      track.muted ? "text-vermelho-foco" : "text-areia/40 hover:text-areia"
+                      track.muted ? "text-vermelho-foco" : "text-areia/45 hover:text-areia"
                     }`}
                     aria-label={`Mute ${track.code}`}
                     title={`Mute ${track.code}`}
@@ -382,7 +432,7 @@ export function TimelinePanel({
                     type="button"
                     onClick={() => onToggleTrackFlag(track.id, "locked", !track.locked)}
                     className={`rounded p-1 ${
-                      track.locked ? "text-amarelo-ideias" : "text-areia/40 hover:text-areia"
+                      track.locked ? "text-amarelo-ideias" : "text-areia/45 hover:text-areia"
                     }`}
                     aria-label={`Lock ${track.code}`}
                     title={`Lock ${track.code}`}
@@ -395,7 +445,7 @@ export function TimelinePanel({
               {/* Track Lane (supports scrub, media drop, clip drag-move & edge trim) */}
               <div
                 data-timeline-lane
-                style={{ minWidth: `${Math.round(zoom * 100)}%` }}
+                style={zoom > 1 ? { minWidth: `${Math.round(zoom * 100)}%` } : undefined}
                 onDragOver={(e) => {
                   if (!acceptsMediaDrop) return;
                   if (e.dataTransfer.types.includes("application/x-solaris-media-id")) {
@@ -430,7 +480,7 @@ export function TimelinePanel({
                     seekFromPointer(e.currentTarget, e.clientX);
                   }
                 }}
-                className={`relative flex-1 cursor-pointer select-none transition-colors motion-reduce:transition-none ${
+                className={`relative min-w-0 flex-1 cursor-pointer select-none transition-colors motion-reduce:transition-none ${
                   dropHoverTrackId === track.id ? "bg-laranja-criacao/15" : "bg-void/40"
                 }`}
               >

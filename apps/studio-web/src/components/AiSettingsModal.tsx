@@ -22,6 +22,7 @@ import {
   isDesktopTauri,
   saveDesktopOpenRouterKey,
 } from "../lib/engineBridge";
+import { SolarSelect } from "./ui/SolarSelect";
 
 interface AiSettingsModalProps {
   open: boolean;
@@ -202,6 +203,9 @@ export function AiSettingsModal({
       role="dialog"
       aria-modal="true"
       aria-labelledby="ai-settings-title"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
       className="fixed inset-0 z-50 grid place-items-center bg-void/80 p-4 backdrop-blur-md"
     >
       <div className="flex max-h-[88dvh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-areia/14 bg-carbono shadow-2xl">
@@ -332,109 +336,131 @@ export function AiSettingsModal({
 
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               <div className="rounded-xl border border-amarelo-ideias/30 bg-amarelo-ideias/10 p-2.5">
-                <span className="inline-block rounded-full bg-amarelo-ideias px-2 py-0.5 text-[9px] font-semibold text-void">
+                <span className="inline-block rounded-full bg-amarelo-ideias px-2 py-0.5 text-[10px] font-semibold text-void">
                   BEST MATCH · OMNI-MODAL
                 </span>
-                <p className="mt-1.5 text-[10px] leading-relaxed text-areia/85">
-                  Video + Audio + Image + Text + Tools — Sees your raw footage, hears pacing,
+                <p className="mt-1.5 text-[11px] leading-relaxed text-areia/85">
+                  Video + Audio + Image + Text + Tools. Sees raw footage, hears pacing,
                   and inspects QA frames natively.
                 </p>
               </div>
               <div className="rounded-xl border border-areia/12 bg-carbono/80 p-2.5">
-                <span className="inline-block rounded-full border border-laranja-criacao/45 bg-laranja-criacao/15 px-2 py-0.5 text-[9px] font-semibold text-areia">
+                <span className="inline-block rounded-full border border-laranja-criacao/45 bg-laranja-criacao/15 px-2 py-0.5 text-[10px] font-semibold text-areia">
                   SMART FALLBACK · VISION + TEXT
                 </span>
-                <p className="mt-1.5 text-[10px] leading-relaxed text-areia/75">
-                  Image + Text + Tools (Claude / GPT) — Receives compressed keyframe contact
-                  sheets + full word-level transcript + silence/beat JSON.
+                <p className="mt-1.5 text-[11px] leading-relaxed text-areia/75">
+                  Image + Text + Tools (Claude / GPT). Uses compressed keyframe contact
+                  sheets, full word-level transcripts, and silence/beat JSON.
                 </p>
               </div>
             </div>
 
-            <div className="space-y-1.5">
-              <label className="block text-[10px] font-medium uppercase tracking-[0.14em] text-areia/55">
-                Active Swarm Model Override
-              </label>
-              <select
-                disabled={savingModel}
-                value={selectedModelOverride}
-                onChange={(e) => void handlePickModel(e.target.value)}
-                className="h-9 w-full rounded-xl border border-areia/14 bg-carbono px-3 text-xs text-areia outline-none focus:border-laranja-criacao"
-              >
-                <option value="" className="bg-carbono">
-                  Auto Recommended ({modelAdvisor?.director.primary ?? "~google/gemini-flash-latest"})
-                </option>
-                {directorCandidates.map((cand) => {
-                  const badge = isOmniModalModel(cand)
-                    ? "[Best Match · Video+Audio]"
-                    : isVisionFallbackModel(cand)
-                      ? "[Smart Fallback · Vision]"
-                      : "[Tools]";
-                  const price =
-                    typeof cand.prompt_usd_per_m === "number"
-                      ? ` · $${cand.prompt_usd_per_m.toFixed(2)}/M`
-                      : "";
-                  return (
-                    <option key={cand.id} value={cand.id} className="bg-carbono">
-                      {cand.id} {badge}
-                      {price}
-                    </option>
-                  );
-                })}
-              </select>
-            </div>
-
-            {directorCandidates.length > 0 && (
-              <div className="max-h-40 space-y-1.5 overflow-y-auto pr-1">
-                {directorCandidates.slice(0, 6).map((cand) => {
-                  const omni = isOmniModalModel(cand);
-                  const active =
-                    selectedModelOverride === cand.id ||
-                    (!selectedModelOverride && modelAdvisor?.director.primary === cand.id);
-                  return (
-                    <button
-                      key={cand.id}
-                      type="button"
-                      disabled={savingModel}
-                      onClick={() => void handlePickModel(cand.id)}
-                      className={`flex w-full items-center justify-between gap-2 rounded-xl border px-3 py-2 text-left transition-colors motion-reduce:transition-none ${
-                        active
-                          ? "border-laranja-criacao/65 bg-accent"
-                          : "border-areia/10 bg-carbono/65 hover:border-areia/25"
-                      }`}
-                    >
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <span className="truncate font-medium text-areia">{cand.id}</span>
-                          {omni ? (
-                            <span className="shrink-0 rounded bg-amarelo-ideias px-1.5 py-0.5 text-[8px] font-bold text-void">
-                              BEST MATCH
-                            </span>
-                          ) : (
-                            <span className="shrink-0 rounded bg-grafite px-1.5 py-0.5 text-[8px] font-semibold text-areia/80">
-                              SMART FALLBACK
-                            </span>
-                          )}
-                        </div>
-                        <div className="mt-0.5 text-[10px] text-areia/55">
-                          In: {cand.input_modalities.join(", ") || "text"} · Context:{" "}
-                          <span className="tabular-nums">
-                            {cand.context_length > 0
-                              ? `${Math.round(cand.context_length / 1000)}k`
-                              : "n/a"}
-                          </span>
-                        </div>
-                      </div>
-                      <span className="tabular-nums shrink-0 text-[10px] text-amarelo-ideias">
-                        {typeof cand.prompt_usd_per_m === "number"
-                          ? `$${cand.prompt_usd_per_m.toFixed(2)}/M`
-                          : "—"}
-                      </span>
-                    </button>
-                  );
-                })}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-areia/55">
+                  Active Swarm Model
+                </span>
+                {selectedModelOverride && (
+                  <button
+                    type="button"
+                    disabled={savingModel}
+                    onClick={() => void handlePickModel("")}
+                    className="rounded-full border border-areia/14 bg-carbono px-2.5 py-0.5 text-[10px] text-amarelo-ideias hover:border-amarelo-ideias/45 disabled:opacity-45"
+                  >
+                    Reset to Auto
+                  </button>
+                )}
               </div>
-            )}
+
+              {directorCandidates.length > 0 ? (
+                <div className="max-h-48 space-y-1.5 overflow-y-auto pr-1">
+                  {directorCandidates.slice(0, 6).map((cand) => {
+                    const omni = isOmniModalModel(cand);
+                    const isAutoPrimary = !selectedModelOverride && modelAdvisor?.director.primary === cand.id;
+                    const active = selectedModelOverride === cand.id || isAutoPrimary;
+                    return (
+                      <button
+                        key={cand.id}
+                        type="button"
+                        disabled={savingModel}
+                        onClick={() => void handlePickModel(cand.id)}
+                        className={`flex w-full items-center justify-between gap-2 rounded-xl border px-3 py-2 text-left transition-colors motion-reduce:transition-none ${
+                          active
+                            ? "border-laranja-criacao/65 bg-accent"
+                            : "border-areia/10 bg-carbono/65 hover:border-areia/25"
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="truncate font-medium text-areia">{cand.id}</span>
+                            {isAutoPrimary && (
+                              <span className="shrink-0 rounded-full border border-amarelo-ideias/40 bg-amarelo-ideias/10 px-1.5 py-0.5 text-[10px] font-medium text-amarelo-ideias">
+                                Auto
+                              </span>
+                            )}
+                            {omni ? (
+                              <span className="shrink-0 rounded bg-amarelo-ideias px-1.5 py-0.5 text-[10px] font-bold text-void">
+                                BEST MATCH
+                              </span>
+                            ) : (
+                              <span className="shrink-0 rounded bg-grafite px-1.5 py-0.5 text-[10px] font-semibold text-areia/80">
+                                FALLBACK
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-0.5 text-[10px] text-areia/55">
+                            In: {cand.input_modalities.join(", ") || "text"} · Context:{" "}
+                            <span className="tabular-nums">
+                              {cand.context_length > 0
+                                ? `${Math.round(cand.context_length / 1000)}k`
+                                : "n/a"}
+                            </span>
+                          </div>
+                        </div>
+                        <span className="tabular-nums shrink-0 text-[10px] text-amarelo-ideias">
+                          {typeof cand.prompt_usd_per_m === "number"
+                            ? `$${cand.prompt_usd_per_m.toFixed(2)}/M`
+                            : "n/a"}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+
+              {directorCandidates.length > 6 && (
+                <SolarSelect
+                  variant="field"
+                  wrapperClassName="w-full"
+                  disabled={savingModel}
+                  aria-label="Browse all OpenRouter models"
+                  value={selectedModelOverride}
+                  onChange={(e) => void handlePickModel(e.target.value)}
+                  className="bg-carbono"
+                >
+                  <option value="" className="bg-carbono">
+                    Auto Recommended ({modelAdvisor?.director.primary ?? "google/gemini-flash-latest"})
+                  </option>
+                  {directorCandidates.map((cand) => {
+                    const badge = isOmniModalModel(cand)
+                      ? "[Best Match]"
+                      : isVisionFallbackModel(cand)
+                        ? "[Fallback]"
+                        : "[Tools]";
+                    const price =
+                      typeof cand.prompt_usd_per_m === "number"
+                        ? ` · $${cand.prompt_usd_per_m.toFixed(2)}/M`
+                        : "";
+                    return (
+                      <option key={cand.id} value={cand.id} className="bg-carbono">
+                        {cand.id} {badge}
+                        {price}
+                      </option>
+                    );
+                  })}
+                </SolarSelect>
+              )}
+            </div>
           </section>
 
           {/* Section 3: External MCP Agent Mode */}
@@ -466,7 +492,7 @@ export function AiSettingsModal({
                   className="flex items-center justify-between gap-2 rounded-xl border border-areia/10 bg-carbono px-3 py-2"
                 >
                   <div className="min-w-0">
-                    <div className="text-[9px] uppercase tracking-[0.12em] text-areia/45">
+                    <div className="text-[10px] uppercase tracking-[0.12em] text-areia/50">
                       {row.label}
                     </div>
                     <code className="block truncate font-sans tabular-nums text-[11px] text-areia/90">

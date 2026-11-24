@@ -434,7 +434,7 @@ export function InspectorPanel({
                   opacity: 1,
                 })
               }
-              className="text-[9px] font-normal normal-case text-amarelo-ideias/80 hover:underline"
+              className="text-[10px] font-normal normal-case text-amarelo-ideias/80 hover:underline"
             >
               Reset
             </button>
@@ -508,7 +508,7 @@ export function InspectorPanel({
         <div className="space-y-2 rounded-xl border border-track-a1/30 bg-void/70 p-2.5">
           <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.14em] text-track-a1">
             <span>Audio Mix</span>
-            <label className="flex items-center gap-1 text-[9px] font-normal normal-case text-areia/80">
+            <label className="flex items-center gap-1 text-[10px] font-normal normal-case text-areia/80">
               <input
                 type="checkbox"
                 checked={effectiveAudio.ducking_enabled}
@@ -587,7 +587,7 @@ export function InspectorPanel({
         <div className="flex items-center justify-between gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
           <span>Color</span>
           <span
-            className={`truncate rounded-full px-2 py-0.5 text-[9px] font-semibold normal-case tracking-normal ${
+            className={`truncate rounded-full px-2 py-0.5 text-[10px] font-semibold normal-case tracking-normal ${
               gradeTargetLabel.startsWith("FX")
                 ? "border border-track-fx/45 bg-track-fx/15 text-areia"
                 : "text-amarelo-ideias/80"
@@ -598,7 +598,7 @@ export function InspectorPanel({
           </span>
         </div>
 
-        <div className="grid grid-cols-3 gap-2 text-center">
+        <div className="grid grid-cols-3 gap-1.5 text-center">
           <ColorWheelControl
             label="LIFT"
             value={grade.lift}

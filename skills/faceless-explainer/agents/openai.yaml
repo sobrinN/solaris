@@ -1,0 +1,4 @@
+interface:
+  display_name: "Solaris Faceless Explainer"
+  short_description: "Beat-synced B-roll, Ken Burns stills, and structured GFX for explainers"
+  default_prompt: "Assemble this narration and visual assets into a crisp beat-synced explainer with Ken Burns stills, starter GFX callouts, and -14 LUFS ducked audio."

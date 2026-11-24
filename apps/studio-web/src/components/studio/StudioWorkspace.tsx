@@ -1246,7 +1246,7 @@ export function StudioWorkspace({
   };
 
   return (
-    <div className="relative flex h-dvh flex-col overflow-hidden bg-void text-areia">
+    <div className="relative flex min-h-dvh flex-col overflow-y-auto bg-void text-areia lg:h-dvh lg:overflow-hidden">
       <SwarmCursorLayer
         enabled={swarmCursorsEnabled}
         demoMode={isDemoProject}
@@ -1295,10 +1295,13 @@ export function StudioWorkspace({
           </button>
           <SolarisWordmark />
           <div className="hidden h-4 w-px bg-areia/15 sm:block" />
-          <span className="hidden text-xs font-medium text-areia sm:inline">
+          <span
+            title={project.name}
+            className="hidden max-w-[180px] truncate text-xs font-medium text-areia sm:inline"
+          >
             {project.name}
           </span>
-          <span className="tabular-nums rounded-full border border-areia/12 bg-void/70 px-2 py-0.5 text-[10px] text-areia/65">
+          <span className="tabular-nums shrink-0 rounded-full border border-areia/12 bg-void/70 px-2 py-0.5 text-[10px] text-areia/65">
             rev {project.revision}
           </span>
         </div>
@@ -1348,21 +1351,26 @@ export function StudioWorkspace({
           <button
             type="button"
             onClick={onOpenAiSettings}
-            className="hidden h-8 items-center gap-1.5 rounded-full border border-areia/12 px-3 text-xs text-areia/85 hover:bg-accent lg:flex"
+            className="flex h-8 items-center gap-1.5 rounded-full border border-areia/12 px-2.5 text-xs text-areia/85 hover:bg-accent lg:px-3"
             title="OpenRouter API Key, Model Advisor & MCP Mode"
+            aria-label="AI Settings"
           >
             <Cpu className="h-3.5 w-3.5 text-amarelo-ideias" />
-            <span>{agentStatus?.openrouter_configured ? "AI Ready" : "AI Keys"}</span>
+            <span className="hidden lg:inline">
+              {agentStatus?.openrouter_configured ? "AI Ready" : "AI Keys"}
+            </span>
           </button>
 
           <button
             type="button"
             data-cursor-anchor="brand.playbook"
             onClick={onOpenBrandDrawer}
-            className="hidden h-8 items-center gap-1.5 rounded-full border border-areia/12 px-3 text-xs text-areia/85 hover:bg-accent md:flex"
+            className="flex h-8 items-center gap-1.5 rounded-full border border-areia/12 px-2.5 text-xs text-areia/85 hover:bg-accent md:px-3"
+            title="Open Brand Playbook"
+            aria-label="Brand Playbook"
           >
             <Palette className="h-3.5 w-3.5 text-laranja-criacao" />
-            <span>Brand</span>
+            <span className="hidden md:inline">Brand</span>
           </button>
 
           <button
@@ -1377,9 +1385,9 @@ export function StudioWorkspace({
       </header>
 
       {/* Main 6-Panel Grid (Media-First proportions) */}
-      <div className="grid min-h-0 flex-1 grid-cols-12 gap-2.5 p-2.5">
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-2.5 p-2.5 lg:grid-cols-[minmax(176px,196px)_minmax(204px,1fr)_minmax(268px,1.45fr)_minmax(170px,196px)_minmax(214px,236px)] xl:grid-cols-[224px_minmax(244px,1fr)_minmax(350px,1.6fr)_212px_256px]">
         {/* Left Column: Media Pool + Effects/GFX */}
-        <div className="col-span-12 flex min-h-0 flex-col gap-2.5 lg:col-span-2">
+        <div className="flex min-h-0 flex-col gap-2.5">
           <div
             data-cursor-anchor="media.pool"
             className="flex min-h-0 flex-1 flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-3"
@@ -1462,12 +1470,12 @@ export function StudioWorkspace({
                     <div className="flex w-full items-center justify-between gap-1">
                       <div className="flex items-center gap-1">
                         {item.intelligence.is_log_footage && (
-                          <span className="rounded bg-laranja-criacao/20 px-1 py-0.5 text-[9px] text-amarelo-ideias">
+                          <span className="rounded bg-laranja-criacao/20 px-1 py-0.5 text-[10px] text-amarelo-ideias">
                             LOG
                           </span>
                         )}
                         {item.intelligence.transcript.length > 0 ? (
-                          <span className="tabular-nums rounded bg-grafite px-1 py-0.5 text-[9px] text-areia/75">
+                          <span className="tabular-nums rounded bg-grafite px-1 py-0.5 text-[10px] text-areia/75">
                             {item.intelligence.transcript.length}w
                           </span>
                         ) : (
@@ -1477,7 +1485,7 @@ export function StudioWorkspace({
                               type="button"
                               disabled={transcribingMediaId !== null}
                               onClick={() => void handleTranscribeMedia(item.id)}
-                              className="rounded border border-areia/15 px-1.5 py-0.5 text-[9px] text-areia/75 hover:border-laranja-criacao/50 hover:text-areia disabled:opacity-45"
+                              className="rounded border border-areia/15 px-1.5 py-0.5 text-[10px] text-areia/75 hover:border-laranja-criacao/50 hover:text-areia disabled:opacity-45"
                             >
                               {transcribingMediaId === item.id ? "..." : "Transcribe"}
                             </button>
@@ -1489,7 +1497,7 @@ export function StudioWorkspace({
                           type="button"
                           onClick={() => void handleAddMediaToTimeline(item)}
                           title="Add to Timeline at playhead"
-                          className="flex items-center gap-0.5 rounded border border-areia/15 bg-carbono/80 px-1.5 py-0.5 text-[9px] text-amarelo-ideias hover:border-amarelo-ideias/50"
+                          className="flex items-center gap-0.5 rounded border border-areia/15 bg-carbono/80 px-1.5 py-0.5 text-[10px] text-amarelo-ideias hover:border-amarelo-ideias/50"
                         >
                           <Plus className="h-2.5 w-2.5" />
                           <span>Timeline</span>
@@ -1507,10 +1515,13 @@ export function StudioWorkspace({
             data-cursor-anchor="effects.library"
             className="flex flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-3"
           >
-            <div className="mb-2 flex items-center justify-between">
-              <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
-                GFX ({assets.length})
-              </span>
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-1.5">
+              <div className="flex items-center gap-1.5">
+                <Layers className="h-3 w-3 text-track-g1" />
+                <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
+                  GFX ({assets.length})
+                </span>
+              </div>
               <div className="flex items-center gap-1">
                 <input
                   ref={assetPackInputRef}
@@ -1526,7 +1537,7 @@ export function StudioWorkspace({
                   type="button"
                   onClick={() => assetPackInputRef.current?.click()}
                   title="Import solaris.asset-pack/v1 JSON"
-                  className="flex items-center gap-1 rounded-full border border-areia/12 px-1.5 py-0.5 text-[9px] text-areia/75 hover:bg-accent"
+                  className="flex items-center gap-1 rounded-full border border-areia/12 px-2 py-0.5 text-[10px] text-areia/80 hover:bg-accent"
                 >
                   <Upload className="h-2.5 w-2.5 text-amarelo-ideias" />
                   <span>Import</span>
@@ -1535,12 +1546,11 @@ export function StudioWorkspace({
                   type="button"
                   onClick={() => void handleExportAssetPack()}
                   title="Export workspace GFX as solaris.asset-pack/v1 JSON"
-                  className="flex items-center gap-1 rounded-full border border-areia/12 px-1.5 py-0.5 text-[9px] text-areia/75 hover:bg-accent"
+                  className="flex items-center gap-1 rounded-full border border-areia/12 px-2 py-0.5 text-[10px] text-areia/80 hover:bg-accent"
                 >
                   <Download className="h-2.5 w-2.5 text-laranja-criacao" />
                   <span>Export</span>
                 </button>
-                <Layers className="h-3.5 w-3.5 text-track-g1" />
               </div>
             </div>
             {assetPackError && (
@@ -1564,7 +1574,7 @@ export function StudioWorkspace({
                       doc={assetThumbDocs[asset.id]}
                       lazy
                       tabIndex={-1}
-                      className="pointer-events-none absolute top-0 left-0 h-[192px] w-[340px] origin-top-left scale-[0.26] border-0 bg-transparent"
+                      className="pointer-events-none absolute top-1/2 left-1/2 h-[192px] w-[340px] -translate-x-1/2 -translate-y-1/2 scale-[0.25] border-0 bg-transparent"
                     />
                   </div>
                   <div className="flex items-center justify-between px-1 text-[10px] text-areia/85">
@@ -1578,7 +1588,7 @@ export function StudioWorkspace({
         </div>
 
         {/* Center-Left: Source Monitor + Swarm Activity Log */}
-        <div className="col-span-12 flex min-h-0 flex-col gap-2.5 lg:col-span-3">
+        <div className="flex min-h-0 flex-col gap-2.5">
           <div
             data-cursor-anchor="source.monitor"
             className="flex flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-3"
@@ -1627,7 +1637,7 @@ export function StudioWorkspace({
                   className="pointer-events-none absolute inset-y-2 rounded border border-dashed border-amarelo-ideias/75"
                   style={{ width: `${reframeBoxWidthPct}%` }}
                 >
-                  <span className="bg-amarelo-ideias px-1 text-[8px] font-semibold text-void">
+                  <span className="bg-amarelo-ideias px-1 text-[10px] font-semibold text-void">
                     REFRAME {aspectBadge}
                   </span>
                 </div>
@@ -1706,7 +1716,7 @@ export function StudioWorkspace({
         {/* Center: WebGL2 Program Monitor + Sandboxed GFX */}
         <div
           data-cursor-anchor="program.stage"
-          className="col-span-12 flex min-h-0 flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-3 lg:col-span-3"
+          className="flex min-h-[260px] flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-3 lg:min-h-0"
         >
           <div className="mb-2 flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
             <span>Program</span>
@@ -1715,7 +1725,7 @@ export function StudioWorkspace({
             </span>
           </div>
 
-          <div className="relative flex flex-1 items-center justify-center overflow-hidden rounded-xl border border-areia/12 bg-void p-2">
+          <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-areia/12 bg-void p-2">
             <WebGLProgramStage
               client={client}
               ticketVersion={ticketVersion}
@@ -1736,7 +1746,7 @@ export function StudioWorkspace({
         </div>
 
         {/* Center-Right: Broadcast Scopes */}
-        <div className="col-span-12 min-h-0 lg:col-span-2">
+        <div className="min-h-0">
           <BroadcastScopes
             scopesRef={scopesRef}
             grade={effectiveStageGrade}
@@ -1748,7 +1758,7 @@ export function StudioWorkspace({
         </div>
 
         {/* Right: Inspector */}
-        <div className="col-span-12 min-h-0 lg:col-span-2">
+        <div className="min-h-0">
           <InspectorPanel
             grade={draftGrade}
             gradeTargetLabel={activeFxClip ? "FX Clip" : "Master Grade"}

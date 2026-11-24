@@ -3,7 +3,8 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use solaris_agent_runtime::{
-    SolarisBackend, all_tools, execute_tool, get_skill, list_skills, tools::normalize_tool_name,
+    SolarisBackend, all_tools, execute_tool, get_skill, get_skill_resource, list_skill_resources,
+    list_skills, tools::normalize_tool_name,
 };
 use solaris_core_ir::{AgentRole, CommandMeta};
 
@@ -369,6 +370,15 @@ impl McpServer {
             })
             .collect();
 
+        for r in list_skill_resources() {
+            resources.push(json!({
+                "uri": r.uri,
+                "name": format!("{}/{}", r.skill_name, r.relative_path),
+                "description": r.description,
+                "mimeType": r.mime_type,
+            }));
+        }
+
         resources.push(json!({
             "uri": "solaris://projects",
             "name": "Solaris Projects",
@@ -416,12 +426,13 @@ impl McpServer {
             .ok_or((-32602, "Missing resource 'uri'".to_string()))?;
 
         if uri.starts_with("skill://") {
-            let skill = get_skill(uri).ok_or((-32002, format!("Resource not found: {uri}")))?;
+            let doc =
+                get_skill_resource(uri).ok_or((-32002, format!("Resource not found: {uri}")))?;
             return Ok(json!({
                 "contents": [{
-                    "uri": skill.uri,
-                    "mimeType": "text/markdown",
-                    "text": skill.content,
+                    "uri": doc.uri,
+                    "mimeType": doc.mime_type,
+                    "text": doc.content,
                 }]
             }));
         }

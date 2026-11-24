@@ -7,6 +7,7 @@ import type {
   SolarisEngineClient,
 } from "@solaris/engine-client";
 import { isDesktopTauri, saveDesktopExportFile } from "../../lib/engineBridge";
+import { SolarSelect } from "../ui/SolarSelect";
 
 interface ExportModalProps {
   open: boolean;
@@ -117,6 +118,9 @@ export function ExportModal({
       role="dialog"
       aria-modal="true"
       aria-labelledby="export-modal-title"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
       className="fixed inset-0 z-50 grid place-items-center bg-void/75 p-4 backdrop-blur-sm"
     >
       <div className="w-full max-w-md rounded-2xl border border-areia/14 bg-carbono p-5 shadow-2xl">
@@ -148,10 +152,11 @@ export function ExportModal({
             <label className="mb-1.5 block text-[11px] uppercase tracking-[0.14em] text-areia/60">
               Format
             </label>
-            <select
+            <SolarSelect
+              variant="field"
+              wrapperClassName="w-full"
               value={format}
               onChange={(e) => setFormat(e.target.value as ExportFormat)}
-              className="h-9 w-full rounded-xl border border-areia/12 bg-void/75 px-3 text-xs text-areia outline-none focus:border-laranja-criacao"
             >
               <option value="mp4" className="bg-carbono">
                 MP4 · H.264 + AAC (Social / Delivery)
@@ -162,28 +167,29 @@ export function ExportModal({
               <option value="webm_alpha" className="bg-carbono">
                 WebM · VP9 Alpha (Web Overlay)
               </option>
-            </select>
+            </SolarSelect>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 items-end gap-3">
             <div>
               <label className="mb-1.5 block text-[11px] uppercase tracking-[0.14em] text-areia/60">
                 Quality
               </label>
-              <select
+              <SolarSelect
+                variant="field"
+                wrapperClassName="w-full"
                 value={quality}
                 onChange={(e) => setQuality(e.target.value as ExportQuality)}
-                className="h-9 w-full rounded-xl border border-areia/12 bg-void/75 px-3 text-xs text-areia outline-none focus:border-laranja-criacao"
               >
                 <option value="draft" className="bg-carbono">Draft (Fast)</option>
                 <option value="standard" className="bg-carbono">Standard</option>
                 <option value="high" className="bg-carbono">High Master</option>
-              </select>
+              </SolarSelect>
             </div>
 
             <div>
               <label className="mb-1.5 block text-[11px] uppercase tracking-[0.14em] text-areia/60">
-                Target Loudness (LUFS)
+                Target LUFS
               </label>
               <input
                 type="number"
@@ -193,7 +199,7 @@ export function ExportModal({
                 value={targetLufsInput}
                 onChange={(e) => setTargetLufsInput(e.target.value)}
                 onBlur={() => setTargetLufsInput(String(parseClampedLufs()))}
-                className="tabular-nums h-9 w-full rounded-xl border border-areia/12 bg-void/75 px-3 text-xs text-areia outline-none focus:border-laranja-criacao"
+                className="tabular-nums h-9 w-full rounded-xl border border-areia/14 bg-void/75 px-3 text-xs text-areia outline-none focus:border-laranja-criacao"
               />
             </div>
           </div>

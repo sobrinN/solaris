@@ -18,6 +18,7 @@ import type {
   BrandReferenceKind,
   SolarisEngineClient,
 } from "@solaris/engine-client";
+import { SolarSelect } from "./ui/SolarSelect";
 
 interface BrandPlaybookDrawerProps {
   open: boolean;
@@ -168,6 +169,9 @@ export function BrandPlaybookDrawer({
       role="dialog"
       aria-modal="true"
       aria-labelledby="brand-drawer-title"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
       className="fixed inset-0 z-50 flex justify-end bg-void/70 backdrop-blur-sm"
     >
       <div className="flex h-full w-full max-w-lg flex-col border-l border-areia/12 bg-carbono shadow-2xl">
@@ -194,10 +198,11 @@ export function BrandPlaybookDrawer({
 
         {/* Playbook Selector */}
         <div className="flex items-center gap-2 border-b border-areia/10 bg-void/40 px-5 py-2.5">
-          <select
+          <SolarSelect
+            wrapperClassName="min-w-0 flex-1"
             value={draft.id}
             onChange={(e) => onSelectBrand(e.target.value)}
-            className="h-8 flex-1 rounded-full border border-areia/14 bg-grafite/80 px-3 text-xs text-areia outline-none focus:border-laranja-criacao"
+            className="h-8 w-full bg-grafite/80"
             aria-label="Select Brand Playbook"
           >
             {brands.map((b) => (
@@ -205,7 +210,7 @@ export function BrandPlaybookDrawer({
                 {b.name}
               </option>
             ))}
-          </select>
+          </SolarSelect>
           <button
             type="button"
             onClick={() => void handleCreateNew()}
@@ -304,7 +309,7 @@ export function BrandPlaybookDrawer({
                           <span className="truncate text-[11px] font-medium text-areia">
                             {item.name}
                           </span>
-                          <span className="shrink-0 rounded bg-grafite px-1.5 py-0.5 text-[9px] font-semibold text-amarelo-ideias">
+                          <span className="shrink-0 rounded bg-grafite px-1.5 py-0.5 text-[10px] font-semibold text-amarelo-ideias">
                             {KIND_LABELS[item.kind]}
                           </span>
                         </div>
@@ -497,7 +502,7 @@ export function BrandPlaybookDrawer({
                                 : prev,
                             )
                           }
-                          className="rounded-full bg-grafite px-1.5 py-0.25 text-[9px] text-amarelo-ideias hover:bg-laranja-criacao/30 hover:text-areia"
+                          className="rounded-full bg-grafite px-1.5 py-0.5 text-[10px] text-amarelo-ideias hover:bg-laranja-criacao/30 hover:text-areia"
                           title={`Set Display Font to ${f.family}`}
                         >
                           Display
@@ -514,7 +519,7 @@ export function BrandPlaybookDrawer({
                                 : prev,
                             )
                           }
-                          className="rounded-full bg-grafite px-1.5 py-0.25 text-[9px] text-areia/75 hover:bg-laranja-criacao/30 hover:text-areia"
+                          className="rounded-full bg-grafite px-1.5 py-0.5 text-[10px] text-areia/75 hover:bg-laranja-criacao/30 hover:text-areia"
                           title={`Set Body Font to ${f.family}`}
                         >
                           Body

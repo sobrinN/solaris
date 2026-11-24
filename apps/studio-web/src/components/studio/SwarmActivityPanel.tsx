@@ -91,27 +91,27 @@ export function SwarmActivityPanel({
         .writeText(mcpEndpoint)
         .then(markCopied)
         .catch(() => {
-          setErrorMsg(`Copy blocked — MCP endpoint: ${mcpEndpoint}`);
+          setErrorMsg(`Copy blocked. MCP endpoint: ${mcpEndpoint}`);
         });
     } else {
-      setErrorMsg(`Clipboard unavailable — MCP endpoint: ${mcpEndpoint}`);
+      setErrorMsg(`Clipboard unavailable. MCP endpoint: ${mcpEndpoint}`);
     }
   };
 
   return (
     <div className="flex min-h-0 flex-1 flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-3">
-      <div className="mb-2 flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
         <div className="flex items-center gap-1.5">
           <Sparkles className="h-3 w-3 text-amarelo-ideias" />
           <span>Director &amp; Swarm</span>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1">
           {onOpenAiSettings && (
             <button
               type="button"
               onClick={onOpenAiSettings}
               title={activeModelLabel ? `AI Settings (${activeModelLabel})` : "OpenRouter & Model Advisor Settings"}
-              className="flex items-center gap-1 rounded-full border border-areia/12 bg-void/65 px-2 py-0.5 text-[9px] font-medium normal-case tracking-normal text-areia/80 hover:border-amarelo-ideias/50 hover:bg-accent"
+              className="flex items-center gap-1 rounded-full border border-areia/12 bg-void/65 px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal text-areia/80 hover:border-amarelo-ideias/50 hover:bg-accent"
             >
               <Cpu className="h-2.5 w-2.5 text-amarelo-ideias" />
               <span>AI</span>
@@ -122,7 +122,7 @@ export function SwarmActivityPanel({
             disabled={qaRunning}
             onClick={() => void onRunQa()}
             title="Run Stage-3 Playback QA (frames, -14 LUFS & safe zones)"
-            className="flex items-center gap-1 rounded-full border border-areia/12 bg-void/65 px-2 py-0.5 text-[9px] font-medium normal-case tracking-normal text-areia/80 hover:border-amarelo-ideias/50 hover:bg-accent disabled:opacity-45"
+            className="flex items-center gap-1 rounded-full border border-areia/12 bg-void/65 px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal text-areia/80 hover:border-amarelo-ideias/50 hover:bg-accent disabled:opacity-45"
           >
             <ShieldCheck className="h-2.5 w-2.5 text-amarelo-ideias" />
             <span>{qaRunning ? "QA..." : "QA"}</span>
@@ -131,7 +131,7 @@ export function SwarmActivityPanel({
             type="button"
             onClick={handleCopyMcp}
             title="Copy Streamable HTTP MCP endpoint (/mcp)"
-            className="flex items-center gap-1 rounded-full border border-areia/12 bg-void/65 px-2 py-0.5 text-[9px] font-medium normal-case tracking-normal text-areia/75 hover:border-laranja-criacao/50 hover:bg-accent"
+            className="flex items-center gap-1 rounded-full border border-areia/12 bg-void/65 px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal text-areia/75 hover:border-laranja-criacao/50 hover:bg-accent"
           >
             {copiedMcp ? (
               <Check className="h-2.5 w-2.5 text-amarelo-ideias" />
@@ -218,7 +218,7 @@ export function SwarmActivityPanel({
             </span>
           </div>
           {latestQaReport.multimodal_summary && (
-            <p className="mt-1 line-clamp-2 text-[9px] text-areia/75">
+            <p className="mt-1 line-clamp-2 text-[10px] text-areia/75">
               {latestQaReport.multimodal_summary}
             </p>
           )}
@@ -232,10 +232,10 @@ export function SwarmActivityPanel({
                 .map((chk) => (
                   <div
                     key={chk.id}
-                    className="flex items-center gap-1.5 text-[9px] text-areia/80"
+                    className="flex items-center gap-1.5 text-[10px] text-areia/80"
                   >
                     <span
-                      className={`shrink-0 rounded px-1 py-0.25 text-[8px] font-semibold uppercase ${
+                      className={`shrink-0 rounded px-1 py-0.5 text-[10px] font-semibold uppercase ${
                         chk.severity === "issue"
                           ? "bg-vermelho-foco text-areia"
                           : chk.severity === "warning"
@@ -278,7 +278,7 @@ export function SwarmActivityPanel({
               <span className="tabular-nums text-[10px] text-areia/40">
                 {entry.timecode}
               </span>
-              <span className="shrink-0 rounded bg-grafite px-1.5 py-0.5 text-[9px] font-semibold text-amarelo-ideias">
+              <span className="shrink-0 rounded bg-grafite px-1.5 py-0.5 text-[10px] font-semibold text-amarelo-ideias">
                 {entry.agentId}
               </span>
               <span className="truncate text-areia/85">{entry.summary}</span>

@@ -180,7 +180,7 @@ export function BroadcastScopes({
   }, [grade, drawWaveform, drawVectorscope]);
 
   const lufsText =
-    typeof integratedLufs === "number" ? `${integratedLufs.toFixed(1)} LUFS` : "— LUFS";
+    typeof integratedLufs === "number" ? `${integratedLufs.toFixed(1)} LUFS` : "-- LUFS";
   const clampedVoice = Math.max(0, Math.min(100, Math.round(voiceLevelPct)));
   const clampedMusic = Math.max(0, Math.min(100, Math.round(musicLevelPct)));
 

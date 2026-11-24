@@ -41,8 +41,9 @@ async fn main() {
             match install_skills_to_dir(&target_dir) {
                 Ok(paths) => {
                     println!(
-                        "Installed {} Solaris skills into {}:",
+                        "Installed {} Solaris skill files across {} skills into {}:",
                         paths.len(),
+                        list_skills().len(),
                         target_dir.display()
                     );
                     for p in paths {

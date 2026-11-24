@@ -658,16 +658,54 @@ export function WebGLProgramStage({
       ? activeCaptionClip.payload.caption
       : null;
 
+  const stageWellRef = useRef<HTMLDivElement | null>(null);
+  const [stageWellSize, setStageWellSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
+
+  useEffect(() => {
+    const el = stageWellRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const measure = () => {
+      const rect = el.getBoundingClientRect();
+      const w = Math.floor(rect.width);
+      const h = Math.floor(rect.height);
+      setStageWellSize((prev) => (prev.w === w && prev.h === h ? prev : { w, h }));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const aspectRatio = width / Math.max(1, height);
+  const fittedStageStyle = useMemo(() => {
+    if (stageWellSize.w > 0 && stageWellSize.h > 0) {
+      const wellRatio = stageWellSize.w / stageWellSize.h;
+      const fitW =
+        wellRatio > aspectRatio ? stageWellSize.h * aspectRatio : stageWellSize.w;
+      const fitH = fitW / aspectRatio;
+      return {
+        width: `${Math.max(1, Math.floor(fitW))}px`,
+        height: `${Math.max(1, Math.floor(fitH))}px`,
+      };
+    }
+    return {
+      aspectRatio: `${width} / ${height}`,
+      maxHeight: "100%",
+      maxWidth: "100%",
+      width: aspectRatio >= 1 ? "100%" : "auto",
+      height: aspectRatio >= 1 ? "auto" : "100%",
+    };
+  }, [stageWellSize.w, stageWellSize.h, aspectRatio, width, height]);
+
   return (
     <div
-      className="relative flex items-center justify-center overflow-hidden rounded-xl border border-areia/15 bg-carbono/60 shadow-2xl"
-      style={{
-        aspectRatio: `${width} / ${height}`,
-        height: "100%",
-        maxHeight: "100%",
-        maxWidth: "100%",
-      }}
+      ref={stageWellRef}
+      className="relative flex h-full w-full items-center justify-center overflow-hidden"
     >
+      <div
+        className="relative flex items-center justify-center overflow-hidden rounded-xl border border-areia/15 bg-carbono/60 shadow-2xl"
+        style={fittedStageStyle}
+      >
       {/* Hidden backing media sources for V1 + V2 WebGL2 compositing */}
       {playableLayers.map((layer) => {
         const key = `${layer.trackId}:${layer.clip.id}`;
@@ -785,6 +823,7 @@ export function WebGLProgramStage({
           playheadSec={playheadSec}
         />
       )}
+      </div>
     </div>
   );
 }

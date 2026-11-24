@@ -70,8 +70,8 @@ export function ColorWheelControl({
   const py = ((Math.sqrt(3) / 2) * (value.g - value.b)) * 1.9;
   const mag = Math.hypot(px, py);
   const norm = mag > 1 ? 1 / mag : 1;
-  const dotX = px * norm * 22;
-  const dotY = py * norm * 22;
+  const dotX = px * norm * 18;
+  const dotY = py * norm * 18;
   const pctValue = Math.round(Math.min(1, mag) * 100);
 
   return (
@@ -175,7 +175,7 @@ export function ColorWheelControl({
           draggedRef.current = false;
         }}
         title="Drag to grade · Double-click to reset"
-        className="relative h-14 w-14 cursor-crosshair select-none rounded-full border border-areia/15 focus-visible:outline-2 focus-visible:outline-laranja-criacao"
+        className="relative h-12 w-12 cursor-crosshair select-none rounded-full border border-areia/15 focus-visible:outline-2 focus-visible:outline-laranja-criacao xl:h-14 xl:w-14"
         style={{
           background:
             "conic-gradient(from 90deg, #ff4d4d 0deg, #f7b733 60deg, #34d399 120deg, #38bdf8 180deg, #60a5fa 240deg, #a78bfa 300deg, #ff4d4d 360deg)",
@@ -190,7 +190,7 @@ export function ColorWheelControl({
           }}
         />
       </div>
-      <span className="text-[9px] font-medium tracking-[0.12em] text-areia/65">
+      <span className="text-[10px] font-medium tracking-[0.1em] text-areia/65">
         {label}
       </span>
     </div>

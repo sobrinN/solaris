@@ -638,6 +638,7 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
             "brand.get_playbook",
             "captions.generate_from_transcript",
             "captions.set_style",
+            "timeline.set_transform",
             "preview.capture_frame",
         ],
         AgentRole::Gfx => &[
@@ -648,6 +649,7 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
             "assets.save",
             "gfx.lint_html",
             "gfx.place",
+            "timeline.set_transform",
             "preview.capture_frame",
         ],
         AgentRole::Mix => &[
