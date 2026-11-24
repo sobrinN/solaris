@@ -1,0 +1,36 @@
+[package]
+name = "solaris-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "solaris_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "solaris-server"
+path = "src/main.rs"
+
+[dependencies]
+axum.workspace = true
+base64.workspace = true
+chrono.workspace = true
+flate2.workspace = true
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+solaris-agent-runtime = { path = "../agent-runtime" }
+solaris-core-ir = { path = "../core-ir" }
+solaris-mcp-server = { path = "../mcp-server" }
+solaris-media-engine = { path = "../media-engine" }
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tower.workspace = true

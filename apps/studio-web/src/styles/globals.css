@@ -1,0 +1,118 @@
+@import "tailwindcss";
+
+@theme {
+  --color-void: #080404;
+  --color-carbono: #1a0e0e;
+  --color-grafite: #1f1f1f;
+  --color-areia: #f7f5ef;
+  --color-vermelho-foco: #c31818;
+  --color-laranja-criacao: #f05a00;
+  --color-amarelo-ideias: #f7b733;
+
+  --color-primary: color-mix(in srgb, #f05a00 76%, #c31818);
+  --color-accent: color-mix(in srgb, #f05a00 16%, #1a0e0e);
+
+  --color-track-t1: #f7b733;
+  --color-track-g1: #fb7185;
+  --color-track-v2: #38bdf8;
+  --color-track-v1: #60a5fa;
+  --color-track-fx: #f05a00;
+  --color-track-a1: #34d399;
+  --color-track-a2: #a78bfa;
+
+  --font-sans: "Sora Variable", "Sora", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-heading: "Sora Variable", "Sora", -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+:root {
+  color-scheme: dark;
+  font-family: var(--font-sans);
+  background-color: #080404;
+  color: #f7f5ef;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+code,
+pre,
+kbd,
+samp {
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-laranja-criacao);
+  outline-offset: 2px;
+}
+
+.text-solar-gradient {
+  background: linear-gradient(95deg, #f7f5ef 0%, #f05a00 48%, #f7b733 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@utility btn-solar-outline {
+  position: relative;
+  border-radius: 9999px;
+  background: linear-gradient(180deg, rgba(26, 14, 14, 0.92), rgba(8, 4, 4, 0.96));
+  border: 1px solid rgba(247, 245, 239, 0.18);
+  box-shadow: 0 0 0 1px rgba(240, 90, 0, 0.14) inset;
+  transition: border-color 180ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 180ms cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.btn-solar-outline:hover {
+  border-color: rgba(247, 183, 51, 0.55);
+  box-shadow: 0 0 22px -6px rgba(240, 90, 0, 0.45);
+}
+
+@keyframes solar-orb-breathe {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+  50% {
+    transform: scale(1.04);
+    opacity: 1;
+  }
+}
+
+.solar-orb-breathe {
+  animation: solar-orb-breathe 5.5s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.85;
+  }
+  50% {
+    transform: scale(1.25);
+    opacity: 1;
+  }
+}
+
+.solar-pulse-dot {
+  animation: pulse-dot 2.2s ease-in-out infinite;
+}
+
+.swarm-cursor {
+  transition: transform 620ms cubic-bezier(0.16, 1, 0.3, 1), opacity 240ms ease;
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .solar-orb-breathe,
+  .solar-pulse-dot {
+    animation: none;
+  }
+  .swarm-cursor,
+  .btn-solar-outline {
+    transition: none;
+  }
+}

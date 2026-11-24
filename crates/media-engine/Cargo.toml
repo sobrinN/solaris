@@ -1,0 +1,23 @@
+[package]
+name = "solaris-media-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+solaris-core-ir = { path = "../core-ir" }
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true

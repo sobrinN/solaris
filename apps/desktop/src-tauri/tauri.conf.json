@@ -1,0 +1,38 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Solaris",
+  "version": "0.1.0",
+  "identifier": "dev.solaris.studio",
+  "build": {
+    "beforeDevCommand": "npm run dev --workspace=@solaris/studio-web",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../../studio-web/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "create": false,
+        "title": "Solaris — Autonomous AI Video Editor",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1080,
+        "minHeight": 720,
+        "backgroundColor": "#080404"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*; media-src 'self' http://127.0.0.1:* blob: data:; img-src 'self' http://127.0.0.1:* blob: data:; font-src 'self' http://127.0.0.1:* data: blob:; style-src 'self' 'unsafe-inline'; frame-src 'self' http://127.0.0.1:* data: blob:; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.icns",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ]
+  }
+}

@@ -1,0 +1,1818 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ArrowLeft,
+  Cpu,
+  Download,
+  Film,
+  Image as ImageIcon,
+  Layers,
+  Music,
+  Palette,
+  Plus,
+  Redo2,
+  Undo2,
+  Upload,
+  Users,
+  X,
+} from "lucide-react";
+import type {
+  AgentRole,
+  AgentStatusResponse,
+  AudioSettings,
+  BrandPlaybook,
+  CaptionBlock,
+  CaptionPreset,
+  Clip,
+  CodeAssetPackManifest,
+  ColorGrade,
+  EngineEventEnvelope,
+  ExportJobStatus,
+  MediaAsset,
+  ParsedCubeLut,
+  Project,
+  QaReport,
+  SavedCodeAsset,
+  SolarisEngineClient,
+  SwarmRunStatus,
+  Transform2D,
+} from "@solaris/engine-client";
+import { buildSandboxedGfxDoc, escapeHtml } from "@solaris/gfx-runtime";
+import { SolarisAudioEngine } from "../../lib/audioEngine";
+import { SolarisWordmark } from "../SolarisBrand";
+import {
+  BroadcastScopes,
+  type BroadcastScopesHandle,
+  type SampledPixelFrame,
+} from "./BroadcastScopes";
+import { ExportModal } from "./ExportModal";
+import { InspectorPanel } from "./InspectorPanel";
+import { SandboxedGfxFrame } from "./SandboxedGfxFrame";
+import { SwarmActivityPanel, type ActivityEntry } from "./SwarmActivityPanel";
+import { SwarmCursorLayer } from "./SwarmCursorLayer";
+import { TimelinePanel } from "./TimelinePanel";
+import { WebGLProgramStage, type StageVisualLayer } from "./WebGLProgramStage";
+
+const EMPTY_ROLES: AgentRole[] = [];
+
+interface StudioWorkspaceProps {
+  client: SolarisEngineClient;
+  ticketVersion?: number;
+  project: Project;
+  activeBrand: BrandPlaybook | null;
+  assets: SavedCodeAsset[];
+  events: EngineEventEnvelope[];
+  wsConnected: boolean;
+  exportJob: ExportJobStatus | null;
+  agentStatus: AgentStatusResponse | null;
+  activeModelLabel?: string;
+  selectedModelOverride?: string;
+  activeSwarmRun: SwarmRunStatus | null;
+  swarmError?: string | null;
+  latestQaReport: QaReport | null;
+  externalPlayheadSeek: { timeSec: number; seq: number } | null;
+  modalsOpen?: boolean;
+  onSwarmRunChange: (run: SwarmRunStatus | null) => void;
+  onClearSwarmError?: () => void;
+  onQaReportChange: (report: QaReport | null) => void;
+  onExportJobChange: (job: ExportJobStatus | null) => void;
+  onAssetCreated: (asset: SavedCodeAsset) => void;
+  onAssetsReplaced: (assets: SavedCodeAsset[]) => void;
+  onProjectUpdate: (project: Project) => void;
+  onBackToChat: () => void;
+  onOpenBrandDrawer: () => void;
+  onOpenAiSettings: () => void;
+}
+
+function arrayBufferToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+
+export function StudioWorkspace({
+  client,
+  ticketVersion = 0,
+  project,
+  activeBrand,
+  assets,
+  events,
+  wsConnected,
+  exportJob,
+  agentStatus,
+  activeModelLabel,
+  selectedModelOverride,
+  activeSwarmRun,
+  swarmError,
+  latestQaReport,
+  externalPlayheadSeek,
+  modalsOpen = false,
+  onSwarmRunChange,
+  onClearSwarmError,
+  onQaReportChange,
+  onExportJobChange,
+  onAssetCreated,
+  onAssetsReplaced,
+  onProjectUpdate,
+  onBackToChat,
+  onOpenBrandDrawer,
+  onOpenAiSettings,
+}: StudioWorkspaceProps) {
+  const [playheadSec, setPlayheadSec] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [swarmCursorsEnabled, setSwarmCursorsEnabled] = useState(true);
+  const [selectedMediaId, setSelectedMediaId] = useState<string | null>(
+    project.media_pool[0]?.id ?? null,
+  );
+  const [selectedClipRef, setSelectedClipRef] = useState<{
+    trackId: string;
+    clipId: string;
+  } | null>(null);
+  const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [brandLut, setBrandLut] = useState<ParsedCubeLut | null>(null);
+  const [brandFontCss, setBrandFontCss] = useState<string>("");
+  const [transcribingMediaId, setTranscribingMediaId] = useState<string | null>(null);
+  const [mediaErrorMsg, setMediaErrorMsg] = useState<string | null>(null);
+  const [opErrorToast, setOpErrorToast] = useState<string | null>(null);
+  const [qaRunning, setQaRunning] = useState(false);
+  const [qaError, setQaError] = useState<string | null>(null);
+  const [assetPackError, setAssetPackError] = useState<string | null>(null);
+  const [sourceInSec, setSourceInSec] = useState(0);
+  const [sourceOutSec, setSourceOutSec] = useState<number | null>(null);
+  const [liveAudioMeters, setLiveAudioMeters] = useState<{
+    voicePct: number;
+    musicPct: number;
+    momentaryLufs: number | null;
+  }>({ voicePct: 0, musicPct: 0, momentaryLufs: null });
+
+  const scopesRef = useRef<BroadcastScopesHandle | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const assetPackInputRef = useRef<HTMLInputElement | null>(null);
+  const sourceVideoRef = useRef<HTMLVideoElement | null>(null);
+  const sourceAudioRef = useRef<HTMLAudioElement | null>(null);
+  const audioEngineRef = useRef<SolarisAudioEngine | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeVisualLayersCacheRef = useRef<{
+    sig: string;
+    layers: StageVisualLayer[];
+  }>({ sig: "", layers: [] });
+
+  const showErrorToast = useCallback((err: unknown, fallback: string) => {
+    const msg = err instanceof Error ? err.message : fallback;
+    setOpErrorToast(msg);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setOpErrorToast(null), 5000);
+  }, []);
+
+  useEffect(() => {
+    const engine = new SolarisAudioEngine();
+    audioEngineRef.current = engine;
+    return () => {
+      engine.dispose();
+      audioEngineRef.current = null;
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (externalPlayheadSeek !== null && Number.isFinite(externalPlayheadSeek.timeSec)) {
+      setIsPlaying(false);
+      setPlayheadSec(Math.max(0, externalPlayheadSeek.timeSec));
+    }
+  }, [externalPlayheadSeek]);
+
+  // Reset source monitor IN/OUT markers when switching selected media
+  useEffect(() => {
+    setSourceInSec(0);
+    setSourceOutSec(null);
+  }, [selectedMediaId]);
+
+  // Load Brand Playbook uploaded custom fonts (.woff2/.ttf/.otf) as data URI @font-face CSS for sandboxed GFX iframes
+  useEffect(() => {
+    const fontAssets = (activeBrand?.reference_media ?? []).filter(
+      (r) => r.kind === "font",
+    );
+    if (!activeBrand || fontAssets.length === 0) {
+      setBrandFontCss("");
+      return;
+    }
+    let cancelled = false;
+    const loadFonts = async () => {
+      const rules: string[] = [];
+      for (const f of fontAssets.slice(0, 4)) {
+        try {
+          const url = client.getBrandMediaStreamUrl(activeBrand.id, f.id);
+          const resp = await fetch(url, { credentials: "include" });
+          if (!resp.ok) continue;
+          const buf = await resp.arrayBuffer();
+          if (buf.byteLength === 0 || buf.byteLength > 6 * 1024 * 1024) continue;
+          const ext = f.name.split(".").pop()?.toLowerCase() ?? "woff2";
+          const mime =
+            ext === "woff2"
+              ? "font/woff2"
+              : ext === "woff"
+                ? "font/woff"
+                : ext === "otf"
+                  ? "font/otf"
+                  : "font/ttf";
+          const fmt =
+            ext === "woff2"
+              ? "woff2"
+              : ext === "woff"
+                ? "woff"
+                : ext === "otf"
+                  ? "opentype"
+                  : "truetype";
+          const family = f.name
+            .replace(/\.[^.]+$/, "")
+            .replace(/[^a-zA-Z0-9 _-]/g, "")
+            .trim();
+          if (!family) continue;
+          const b64 = arrayBufferToBase64(buf);
+          rules.push(
+            `@font-face { font-family: "${family}"; src: url("data:${mime};base64,${b64}") format("${fmt}"); font-display: block; }`,
+          );
+        } catch {
+          // Skip unavailable font asset
+        }
+      }
+      if (!cancelled) setBrandFontCss(rules.join("\n"));
+    };
+    void loadFonts();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, activeBrand]);
+
+  const totalDurationSec = useMemo(() => {
+    let max = 0;
+    for (const track of project.tracks) {
+      for (const clip of track.clips) {
+        max = Math.max(max, clip.start_sec + clip.duration_sec);
+      }
+    }
+    return Math.max(max, 20);
+  }, [project.tracks]);
+
+  // Smooth rAF playback loop
+  useEffect(() => {
+    if (!isPlaying) return;
+    let rafId = 0;
+    let lastTime = performance.now();
+    const step = (now: number) => {
+      const dt = Math.min(0.1, (now - lastTime) / 1000);
+      lastTime = now;
+      setPlayheadSec((prev) => {
+        const next = prev + dt;
+        return next >= totalDurationSec ? 0 : next;
+      });
+      rafId = requestAnimationFrame(step);
+    };
+    rafId = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(rafId);
+  }, [isPlaying, totalDurationSec]);
+
+  // Sync Web Audio Engine to timeline playhead & active tracks
+  useEffect(() => {
+    audioEngineRef.current?.sync({
+      tracks: project.tracks,
+      mediaPool: project.media_pool,
+      playheadSec,
+      isPlaying,
+      getStreamUrl: (mediaId) => client.getMediaStreamUrl(project.id, mediaId),
+    });
+  }, [client, project.id, project.tracks, project.media_pool, playheadSec, isPlaying, ticketVersion]);
+
+  // Sample real Web Audio AnalyserNode levels during playback for BroadcastScopes
+  useEffect(() => {
+    if (!isPlaying) {
+      setLiveAudioMeters({ voicePct: 0, musicPct: 0, momentaryLufs: null });
+      return;
+    }
+    const timer = setInterval(() => {
+      const levels = audioEngineRef.current?.getLiveLevels();
+      if (levels) setLiveAudioMeters(levels);
+    }, 90);
+    return () => clearInterval(timer);
+  }, [isPlaying]);
+
+  const activityLog = useMemo<ActivityEntry[]>(() => {
+    const fromProject: ActivityEntry[] = (project.activity_log ?? []).map(
+      (entry) => ({
+        id: `rev-${entry.revision}`,
+        agentId: entry.agent_id,
+        role: entry.role,
+        summary: entry.summary,
+        timecode: entry.timestamp.slice(11, 19),
+      }),
+    );
+
+    const fromEvents: ActivityEntry[] = [];
+    for (let i = 0; i < events.length; i++) {
+      const env = events[i];
+      if (env.payload.event === "op_committed") {
+        const id = `rev-${env.payload.revision}`;
+        if (!fromProject.some((p) => p.id === id)) {
+          fromEvents.push({
+            id,
+            agentId: env.payload.agent_id,
+            role: env.payload.role,
+            summary: env.payload.summary,
+            timecode: env.timestamp.slice(11, 19),
+          });
+        }
+      }
+    }
+
+    return [...fromProject, ...fromEvents].reverse().slice(0, 40);
+  }, [project.activity_log, events]);
+
+  const latestRealOp = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const p = events[i].payload;
+      if (p.event === "op_committed") {
+        return {
+          agentId: p.agent_id,
+          role: p.role,
+          anchor: p.ui_anchor,
+          summary: p.summary,
+        };
+      }
+      if (p.event === "cursor_pulse") {
+        return {
+          agentId: p.agent_id,
+          role: p.role,
+          anchor: p.ui_anchor,
+          summary: p.label,
+        };
+      }
+    }
+    return null;
+  }, [events]);
+
+  const swarmRoleCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const item of activityLog) {
+      counts[item.role] = (counts[item.role] ?? 0) + 1;
+    }
+    return counts;
+  }, [activityLog]);
+
+  const selectedMedia = useMemo(
+    () =>
+      project.media_pool.find((m) => m.id === selectedMediaId) ??
+      project.media_pool[0] ??
+      null,
+    [project.media_pool, selectedMediaId],
+  );
+
+  const selectedClip = useMemo(() => {
+    if (!selectedClipRef) return null;
+    const track = project.tracks.find((t) => t.id === selectedClipRef.trackId);
+    const clip = track?.clips.find((c) => c.id === selectedClipRef.clipId);
+    if (!track || !clip) return null;
+    return { trackId: track.id, clip };
+  }, [project.tracks, selectedClipRef]);
+
+  // Honor track.solo across visual tracks + exclusive end boundary `playheadSec < start + dur`
+  const anyVisualSolo = useMemo(
+    () =>
+      project.tracks.some(
+        (t) =>
+          (t.id === "v1" || t.id === "v2" || t.id === "g1" || t.id === "t1") && t.solo,
+      ),
+    [project.tracks],
+  );
+
+  const isVisualTrackActive = useCallback(
+    (trackId: string) => {
+      const t = project.tracks.find((tr) => tr.id === trackId);
+      if (!t || t.muted) return false;
+      return !anyVisualSolo || t.solo;
+    },
+    [project.tracks, anyVisualSolo],
+  );
+
+  const activeGfxClips = useMemo(() => {
+    if (!isVisualTrackActive("g1")) return [];
+    const g1 = project.tracks.find((t) => t.id === "g1");
+    if (!g1) return [];
+    return g1.clips.filter(
+      (c) => playheadSec >= c.start_sec && playheadSec < c.start_sec + c.duration_sec,
+    );
+  }, [project.tracks, playheadSec, isVisualTrackActive]);
+
+  const activeCaptionClip = useMemo(() => {
+    if (!isVisualTrackActive("t1")) return null;
+    const t1 = project.tracks.find((t) => t.id === "t1");
+    if (!t1) return null;
+    return (
+      t1.clips.find(
+        (c) => playheadSec >= c.start_sec && playheadSec < c.start_sec + c.duration_sec,
+      ) ?? null
+    );
+  }, [project.tracks, playheadSec, isVisualTrackActive]);
+
+  // Composite V1 (bottom) and V2 (top); memoize by active clip signature so 60fps playhead ticks keep stable array identity
+  const activeVisualLayers = useMemo<StageVisualLayer[]>(() => {
+    const layers: StageVisualLayer[] = [];
+    const sigParts: string[] = [String(ticketVersion)];
+    for (const trackId of ["v1", "v2"] as const) {
+      if (!isVisualTrackActive(trackId)) continue;
+      const track = project.tracks.find((t) => t.id === trackId);
+      const clip = track?.clips.find(
+        (c) => playheadSec >= c.start_sec && playheadSec < c.start_sec + c.duration_sec,
+      );
+      if (clip && clip.payload.kind === "media") {
+        const mediaId = clip.payload.media_id;
+        const found = project.media_pool.find((m) => m.id === mediaId);
+        if (found) {
+          const url = found.path ? client.getMediaStreamUrl(project.id, found.id) : null;
+          const tr = clip.transform;
+          const rf = tr.smart_reframe;
+          sigParts.push(
+            `${trackId}:${clip.id}:${url ?? ""}:${clip.start_sec}:${clip.duration_sec}:${clip.source_in_sec}:${clip.payload.ken_burns ? 1 : 0}:${tr.x}:${tr.y}:${tr.scale}:${tr.rotation_deg}:${tr.opacity}:${rf ? `${rf.x},${rf.y},${rf.width},${rf.height}` : ""}`,
+          );
+          layers.push({
+            trackId,
+            clip,
+            media: found,
+            url,
+          });
+        }
+      }
+    }
+    const sig = sigParts.join("|");
+    if (sig === activeVisualLayersCacheRef.current.sig) {
+      return activeVisualLayersCacheRef.current.layers;
+    }
+    activeVisualLayersCacheRef.current = { sig, layers };
+    return layers;
+  }, [
+    client,
+    project.id,
+    project.tracks,
+    project.media_pool,
+    playheadSec,
+    isVisualTrackActive,
+    ticketVersion,
+  ]);
+
+  // Identify active FX adjustment clip (selected FX grade clip takes priority, else playhead-active unmuted FX clip)
+  const playheadFxClip = useMemo<Clip | null>(() => {
+    const fx = project.tracks.find((t) => t.id === "fx" && !t.muted);
+    return (
+      fx?.clips.find(
+        (c) =>
+          playheadSec >= c.start_sec &&
+          playheadSec < c.start_sec + c.duration_sec &&
+          c.payload.kind === "grade",
+      ) ?? null
+    );
+  }, [project.tracks, playheadSec]);
+
+  const activeFxClip = useMemo<Clip | null>(() => {
+    if (selectedClip?.trackId === "fx" && selectedClip.clip.payload.kind === "grade") {
+      return selectedClip.clip;
+    }
+    return playheadFxClip;
+  }, [selectedClip, playheadFxClip]);
+
+  const targetSourceGrade = useMemo<ColorGrade>(() => {
+    if (activeFxClip && activeFxClip.payload.kind === "grade") {
+      return activeFxClip.payload.grade;
+    }
+    return project.active_grade;
+  }, [activeFxClip, project.active_grade]);
+
+  const gradeTargetId = activeFxClip?.id ?? "master";
+  const [draftGradeState, setDraftGradeState] = useState<{
+    targetId: string;
+    sourceRef: ColorGrade;
+    grade: ColorGrade;
+  }>({
+    targetId: gradeTargetId,
+    sourceRef: targetSourceGrade,
+    grade: targetSourceGrade,
+  });
+
+  const draftGrade =
+    draftGradeState.targetId === gradeTargetId &&
+    draftGradeState.sourceRef === targetSourceGrade
+      ? draftGradeState.grade
+      : targetSourceGrade;
+
+  const setDraftGrade = useCallback(
+    (next: ColorGrade) => {
+      setDraftGradeState({
+        targetId: gradeTargetId,
+        sourceRef: targetSourceGrade,
+        grade: next,
+      });
+    },
+    [gradeTargetId, targetSourceGrade],
+  );
+
+  // Effective stage grade: stable reference across 60fps playback ticks, immediately reflects live draftGrade previews
+  const effectiveStageGrade = useMemo<ColorGrade>(() => {
+    if (!draftGrade.lut_path && activeBrand?.default_lut) {
+      return { ...draftGrade, lut_path: activeBrand.default_lut };
+    }
+    return draftGrade;
+  }, [draftGrade, activeBrand?.default_lut]);
+
+  // Resolve 3D LUT from effectiveStageGrade (supports custom FX clip LUTs + brand default_lut)
+  useEffect(() => {
+    const activeLutPath = effectiveStageGrade.lut_path ?? activeBrand?.default_lut;
+    if (!activeBrand || !activeLutPath) {
+      setBrandLut(null);
+      return;
+    }
+    let cancelled = false;
+    void client
+      .getBrandLut(activeBrand.id)
+      .then((lut) => {
+        if (!cancelled) setBrandLut(lut);
+      })
+      .catch(() => {
+        if (!cancelled) setBrandLut(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, activeBrand?.id, activeBrand?.default_lut, effectiveStageGrade.lut_path]);
+
+  // Drive BroadcastScopes loudness & meters from live Web Audio AnalyserNode during playback,
+  // falling back to active clip levels + measured LUFS when paused.
+  const { integratedLufs, voiceLevelPct, musicLevelPct } = useMemo(() => {
+    const lufsValues: number[] = [];
+    for (const m of project.media_pool) {
+      if (typeof m.intelligence.integrated_lufs === "number") {
+        lufsValues.push(m.intelligence.integrated_lufs);
+      }
+    }
+    const avgLufs =
+      lufsValues.length > 0
+        ? lufsValues.reduce((acc, v) => acc + v, 0) / lufsValues.length
+        : null;
+
+    if (isPlaying && (liveAudioMeters.voicePct > 0 || liveAudioMeters.musicPct > 0)) {
+      return {
+        integratedLufs: liveAudioMeters.momentaryLufs ?? avgLufs,
+        voiceLevelPct: liveAudioMeters.voicePct,
+        musicLevelPct: liveAudioMeters.musicPct,
+      };
+    }
+
+    const a1 = project.tracks.find((t) => t.id === "a1");
+    const v1 = project.tracks.find((t) => t.id === "v1");
+    const a2 = project.tracks.find((t) => t.id === "a2");
+    const audioSolo = [a1, v1, a2].some((t) => t?.solo);
+    const audible = (t: typeof a1) => Boolean(t && !t.muted && (!audioSolo || t.solo));
+
+    const voiceClip = audible(a1)
+      ? a1?.clips.find(
+          (c) =>
+            playheadSec >= c.start_sec &&
+            playheadSec < c.start_sec + c.duration_sec &&
+            c.audio.gain_db > -80,
+        )
+      : undefined;
+    const v1Clip = audible(v1)
+      ? v1?.clips.find(
+          (c) =>
+            playheadSec >= c.start_sec &&
+            playheadSec < c.start_sec + c.duration_sec &&
+            c.audio.gain_db > -80,
+        )
+      : undefined;
+    const musicClip = audible(a2)
+      ? a2?.clips.find(
+          (c) =>
+            playheadSec >= c.start_sec &&
+            playheadSec < c.start_sec + c.duration_sec &&
+            c.audio.gain_db > -80,
+        )
+      : undefined;
+
+    const dbToPct = (db: number) => Math.max(0, Math.min(100, ((db + 36) / 36) * 100));
+    const speechClip = voiceClip ?? v1Clip;
+    const vPct = speechClip ? dbToPct(speechClip.audio.gain_db) : 0;
+    const mPct = musicClip
+      ? dbToPct(
+          musicClip.audio.gain_db +
+            (speechClip && musicClip.audio.ducking_enabled ? -8 : 0),
+        )
+      : 0;
+
+    return { integratedLufs: avgLufs, voiceLevelPct: vPct, musicLevelPct: mPct };
+  }, [project.tracks, project.media_pool, playheadSec, isPlaying, liveAudioMeters]);
+
+  const handlePixelFrame = useCallback((frame: SampledPixelFrame | null) => {
+    scopesRef.current?.drawPixelFrame(frame);
+  }, []);
+
+  const handleTogglePlay = useCallback(() => {
+    audioEngineRef.current?.unlock();
+    setIsPlaying((prev) => {
+      if (!prev && playheadSec >= totalDurationSec) {
+        setPlayheadSec(0);
+      }
+      return !prev;
+    });
+  }, [playheadSec, totalDurationSec]);
+
+  const handleSeekPlayhead = useCallback((sec: number) => {
+    audioEngineRef.current?.unlock();
+    setPlayheadSec(Math.max(0, sec));
+  }, []);
+
+  const handleUndo = useCallback(async () => {
+    try {
+      const updated = await client.undo(project.id);
+      onProjectUpdate(updated);
+    } catch {
+      // Nothing to undo
+    }
+  }, [client, project.id, onProjectUpdate]);
+
+  const handleRedo = useCallback(async () => {
+    try {
+      const updated = await client.redo(project.id);
+      onProjectUpdate(updated);
+    } catch {
+      // Nothing to redo
+    }
+  }, [client, project.id, onProjectUpdate]);
+
+  const handleCommitGrade = async (grade: ColorGrade) => {
+    setDraftGrade(grade);
+    try {
+      const res = await client.applyOp(
+        project.id,
+        activeFxClip
+          ? {
+              type: "set_color_grade",
+              grade,
+              track_id: "fx",
+              clip_id: activeFxClip.id,
+            }
+          : { type: "set_color_grade", grade },
+        { agent_id: "user", role: "user" },
+      );
+      onProjectUpdate(res.project);
+    } catch (err) {
+      showErrorToast(err, "Failed to update color grade (FX track may be locked)");
+    }
+  };
+
+  const handleToggleTrackFlag = async (
+    trackId: string,
+    field: "muted" | "solo" | "locked",
+    value: boolean,
+  ) => {
+    try {
+      const res = await client.applyOp(
+        project.id,
+        {
+          type: "set_track_flags",
+          track_id: trackId,
+          [field]: value,
+        },
+        { agent_id: "user", role: "user" },
+      );
+      onProjectUpdate(res.project);
+    } catch (err) {
+      showErrorToast(err, "Failed to toggle track flag");
+    }
+  };
+
+  const handleAddMediaToTimeline = async (
+    item: MediaAsset,
+    targetTrackId?: string,
+    atSec?: number,
+    customRange?: { sourceIn: number; duration: number },
+  ) => {
+    if (item.kind === "document") {
+      showErrorToast(
+        new Error("Documents are reference briefs for the AI Director and cannot be placed on timeline tracks."),
+        "Cannot place document on timeline",
+      );
+      return;
+    }
+    const defaultTrack =
+      item.kind === "audio"
+        ? item.role_hint === "voice" || item.role_hint === "voiceover"
+          ? "a1"
+          : "a2"
+        : item.role_hint === "b_roll"
+          ? "v2"
+          : "v1";
+    const trackId = targetTrackId ?? defaultTrack;
+    const startSec = Number(Math.max(0, atSec ?? playheadSec).toFixed(2));
+    const sourceIn = customRange ? Math.max(0, customRange.sourceIn) : 0;
+    const naturalDur =
+      item.intelligence.duration_sec > 0.2
+        ? item.intelligence.duration_sec
+        : item.kind === "image"
+          ? 3.0
+          : 5.0;
+    const durationSec = Number(
+      Math.max(0.25, customRange ? customRange.duration : naturalDur).toFixed(2),
+    );
+    const clipId = `clip-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+
+    try {
+      const res = await client.applyOp(
+        project.id,
+        {
+          type: "place_clip",
+          track_id: trackId,
+          clip: {
+            id: clipId,
+            label: item.name,
+            start_sec: startSec,
+            duration_sec: durationSec,
+            source_in_sec: Number(sourceIn.toFixed(2)),
+            transform: {
+              x: 0,
+              y: 0,
+              scale: 1,
+              rotation_deg: 0,
+              opacity: 1,
+              smart_reframe:
+                project.canvas.aspect_preset === "vertical9x16"
+                  ? item.intelligence.default_reframe ?? null
+                  : null,
+            },
+            audio: {
+              gain_db: trackId === "a2" ? -14 : trackId === "v2" ? -99 : 0,
+              ducking_enabled: trackId === "a2",
+              duck_target_db: -18,
+              fade_in_sec: trackId === "a2" ? 0.25 : 0,
+              fade_out_sec: trackId === "a2" ? 0.6 : 0,
+            },
+            payload: {
+              kind: "media",
+              media_id: item.id,
+              ken_burns: item.kind === "image",
+            },
+          },
+        },
+        { agent_id: "user", role: "user", reason: `added ${item.name} to ${trackId}` },
+      );
+      onProjectUpdate(res.project);
+      setSelectedClipRef({ trackId, clipId });
+    } catch (err) {
+      showErrorToast(err, `Failed to place '${item.name}' on ${trackId.toUpperCase()}`);
+    }
+  };
+
+  const handleTrimOrMoveClip = async (
+    trackId: string,
+    clipId: string,
+    patch: {
+      new_start_sec?: number;
+      new_duration_sec?: number;
+      new_source_in_sec?: number;
+    },
+  ) => {
+    try {
+      const res = await client.applyOp(
+        project.id,
+        {
+          type: "trim_clip",
+          track_id: trackId,
+          clip_id: clipId,
+          ...patch,
+        },
+        { agent_id: "user", role: "user" },
+      );
+      onProjectUpdate(res.project);
+    } catch (err) {
+      showErrorToast(err, "Failed to move/trim clip (track may be locked)");
+    }
+  };
+
+  const handleUpdateClipTransform = async (
+    trackId: string,
+    clipId: string,
+    transform: Transform2D,
+  ) => {
+    try {
+      const res = await client.applyOp(
+        project.id,
+        {
+          type: "update_clip_transform",
+          track_id: trackId,
+          clip_id: clipId,
+          transform,
+        },
+        { agent_id: "user", role: "user" },
+      );
+      onProjectUpdate(res.project);
+    } catch (err) {
+      showErrorToast(err, "Failed to update clip transform");
+    }
+  };
+
+  const handleUpdateClipAudio = async (
+    trackId: string,
+    clipId: string,
+    audio: AudioSettings,
+  ) => {
+    try {
+      const res = await client.applyOp(
+        project.id,
+        {
+          type: "set_audio_settings",
+          track_id: trackId,
+          clip_id: clipId,
+          audio,
+        },
+        { agent_id: "user", role: "user" },
+      );
+      onProjectUpdate(res.project);
+    } catch (err) {
+      showErrorToast(err, "Failed to update audio settings");
+    }
+  };
+
+  const handleUpdateCaptionClip = async (
+    trackId: string,
+    clipId: string,
+    caption: CaptionBlock,
+  ) => {
+    try {
+      const res = await client.applyOp(
+        project.id,
+        {
+          type: "update_caption_clip",
+          track_id: trackId,
+          clip_id: clipId,
+          caption,
+        },
+        { agent_id: "user", role: "user" },
+      );
+      onProjectUpdate(res.project);
+    } catch (err) {
+      showErrorToast(err, "Failed to update caption");
+    }
+  };
+
+  const handleSplitSelectedClip = useCallback(async () => {
+    if (!selectedClip) return;
+    const { trackId, clip } = selectedClip;
+    if (
+      playheadSec <= clip.start_sec + 0.02 ||
+      playheadSec >= clip.start_sec + clip.duration_sec - 0.02
+    ) {
+      return;
+    }
+    const rightId = `${clip.id}_r_${Date.now().toString(36)}`;
+    try {
+      const res = await client.applyOp(
+        project.id,
+        {
+          type: "split_clip",
+          track_id: trackId,
+          clip_id: clip.id,
+          split_at_timeline_sec: Number(playheadSec.toFixed(3)),
+          right_clip_id: rightId,
+        },
+        { agent_id: "user", role: "user" },
+      );
+      onProjectUpdate(res.project);
+    } catch (err) {
+      showErrorToast(err, "Failed to split clip (track may be locked)");
+    }
+  }, [client, onProjectUpdate, playheadSec, project.id, selectedClip, showErrorToast]);
+
+  const handleDeleteSelectedClip = useCallback(async () => {
+    if (!selectedClip) return;
+    try {
+      const res = await client.applyOp(
+        project.id,
+        {
+          type: "delete_clip",
+          track_id: selectedClip.trackId,
+          clip_id: selectedClip.clip.id,
+        },
+        { agent_id: "user", role: "user" },
+      );
+      setSelectedClipRef(null);
+      onProjectUpdate(res.project);
+    } catch (err) {
+      showErrorToast(err, "Failed to delete clip (track may be locked)");
+    }
+  }, [client, onProjectUpdate, project.id, selectedClip, showErrorToast]);
+
+  // Global keyboard shortcuts (disabled when modals/drawers are open or interactive elements are focused)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (exportModalOpen || modalsOpen) return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.tagName === "BUTTON" ||
+          target.tagName === "A" ||
+          target.getAttribute("role") === "slider" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      if (e.code === "Space") {
+        e.preventDefault();
+        handleTogglePlay();
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) {
+          void handleRedo();
+        } else {
+          void handleUndo();
+        }
+      } else if (
+        (e.key === "Delete" || e.key === "Backspace") &&
+        selectedClipRef
+      ) {
+        e.preventDefault();
+        void handleDeleteSelectedClip();
+      } else if (
+        e.key.toLowerCase() === "s" &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        selectedClipRef
+      ) {
+        e.preventDefault();
+        void handleSplitSelectedClip();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    exportModalOpen,
+    modalsOpen,
+    selectedClipRef,
+    handleTogglePlay,
+    handleUndo,
+    handleRedo,
+    handleDeleteSelectedClip,
+    handleSplitSelectedClip,
+  ]);
+
+  const handlePlaceSavedAsset = async (asset: SavedCodeAsset) => {
+    const clipId = `gfx-${Date.now()}`;
+    try {
+      const res = await client.applyOp(
+        project.id,
+        {
+          type: "place_gfx",
+          track_id: "g1",
+          clip_id: clipId,
+          label: asset.name,
+          start_sec: Number(playheadSec.toFixed(2)),
+          duration_sec: asset.default_duration_sec,
+          gfx: {
+            asset_id: asset.id,
+            props: asset.default_props,
+            inline_html: asset.html_source,
+          },
+        },
+        { agent_id: "gfx-01", role: "gfx", reason: `placed ${asset.name}` },
+      );
+      onProjectUpdate(res.project);
+      setSelectedClipRef({ trackId: "g1", clipId });
+    } catch (err) {
+      showErrorToast(err, "Failed to place GFX asset (G1 track may be locked)");
+    }
+  };
+
+  const handleUpdateGfxProps = async (
+    trackId: string,
+    clipId: string,
+    props: Record<string, unknown>,
+  ) => {
+    try {
+      const res = await client.applyOp(
+        project.id,
+        {
+          type: "update_gfx_props",
+          track_id: trackId,
+          clip_id: clipId,
+          props,
+        },
+        { agent_id: "user", role: "user" },
+      );
+      onProjectUpdate(res.project);
+    } catch (err) {
+      showErrorToast(err, "Failed to update GFX props");
+    }
+  };
+
+  const handleUpdateCaptionPreset = async (preset: CaptionPreset) => {
+    const target =
+      selectedClip?.clip.payload.kind === "caption"
+        ? selectedClip.clip
+        : activeCaptionClip;
+    if (!target || target.payload.kind !== "caption") return;
+    try {
+      const res = await client.applyOp(
+        project.id,
+        {
+          type: "update_caption_clip",
+          track_id: "t1",
+          clip_id: target.id,
+          caption: { ...target.payload.caption, preset },
+        },
+        { agent_id: "user", role: "user" },
+      );
+      onProjectUpdate(res.project);
+    } catch (err) {
+      showErrorToast(err, "Failed to update caption preset");
+    }
+  };
+
+  const handleSaveClipAsAsset = async (clip: Clip) => {
+    if (clip.payload.kind !== "gfx") return;
+    const html =
+      clip.payload.gfx.inline_html ??
+      `<div class="clip" data-start="0" data-duration="${clip.duration_sec.toFixed(2)}" style="padding:12px 18px;border-radius:14px;background:rgba(8,4,4,0.85);border:1px solid var(--brand-accent);color:var(--brand-ink);">${escapeHtml(clip.label)}</div>`;
+    const props = clip.payload.gfx.props;
+    const properties: Record<string, { type: string }> = {};
+    for (const [k, v] of Object.entries(props)) {
+      properties[k] = {
+        type:
+          typeof v === "number"
+            ? "number"
+            : typeof v === "boolean"
+              ? "boolean"
+              : "string",
+      };
+    }
+    try {
+      const saved = await client.saveAsset({
+        id: `custom-${Date.now()}`,
+        name: `${clip.label} (Saved)`,
+        category: "custom",
+        tags: ["saved", "custom"],
+        props_schema: { type: "object", properties },
+        default_props: props,
+        html_source: html,
+        default_duration_sec: clip.duration_sec,
+        created_at: new Date().toISOString(),
+      });
+      onAssetCreated(saved);
+    } catch (err) {
+      showErrorToast(err, "Failed to save GFX asset");
+    }
+  };
+
+  const handleUploadMedia = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setMediaErrorMsg(null);
+    try {
+      await client.importMediaFiles(project.id, Array.from(files));
+      const refreshed = await client.getProject(project.id);
+      onProjectUpdate(refreshed);
+    } catch (err) {
+      setMediaErrorMsg(err instanceof Error ? err.message : "Failed to upload media");
+    }
+  };
+
+  const handleStartSwarm = async (prompt: string) => {
+    onClearSwarmError?.();
+    const run = await client.startSwarmRun(project.id, {
+      prompt,
+      model_override: selectedModelOverride || undefined,
+      allow_local_fallback: !(agentStatus?.openrouter_configured ?? false),
+    });
+    onSwarmRunChange(run);
+  };
+
+  const handleCancelSwarm = async () => {
+    if (!activeSwarmRun) return;
+    await client.cancelSwarmRun(project.id, activeSwarmRun.run_id);
+  };
+
+  const handleTranscribeMedia = async (mediaId: string) => {
+    if (transcribingMediaId) return;
+    setTranscribingMediaId(mediaId);
+    setMediaErrorMsg(null);
+    try {
+      await client.transcribeMedia(project.id, mediaId);
+      const refreshed = await client.getProject(project.id);
+      onProjectUpdate(refreshed);
+    } catch (err) {
+      setMediaErrorMsg(err instanceof Error ? err.message : "Transcription failed");
+    } finally {
+      setTranscribingMediaId(null);
+    }
+  };
+
+  const fallbackTokens = useMemo(
+    () =>
+      activeBrand?.tokens ?? {
+        bg: "#080404",
+        surface: "#1A0E0E",
+        ink: "#F7F5EF",
+        accent: "#F05A00",
+        accent_secondary: "#F7B733",
+        font_display: "Sora",
+        font_body: "Sora",
+      },
+    [activeBrand],
+  );
+
+  // Miniature live/cached visual preview docs for Saved Code Assets in Effects · GFX bin
+  const assetThumbDocs = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const asset of assets) {
+      map[asset.id] = buildSandboxedGfxDoc({
+        htmlSource: asset.html_source,
+        props: asset.default_props,
+        brandTokens: fallbackTokens,
+        fontCss: brandFontCss,
+        durationSec: asset.default_duration_sec || 2.5,
+        initialTimeSec: Math.min(0.8, (asset.default_duration_sec || 2.5) * 0.4),
+      });
+    }
+    return map;
+  }, [assets, fallbackTokens, brandFontCss]);
+
+  const aspectBadge =
+    project.canvas.aspect_preset === "vertical9x16"
+      ? "9:16"
+      : project.canvas.aspect_preset === "landscape16x9"
+        ? "16:9"
+        : "1:1";
+
+  const reframeBoxWidthPct =
+    project.canvas.aspect_preset === "vertical9x16"
+      ? 31.6
+      : project.canvas.aspect_preset === "square1x1"
+        ? 56.25
+        : 94;
+
+  const projectFps =
+    project.canvas.fps_num / Math.max(1, project.canvas.fps_den);
+
+  const isDemoProject = useMemo(
+    () => project.tracks.some((t) => t.clips.some((c) => c.id.startsWith("demo-"))),
+    [project.tracks],
+  );
+
+  const isSwarmActive =
+    activeSwarmRun !== null &&
+    (activeSwarmRun.state === "queued" ||
+      activeSwarmRun.state === "planning" ||
+      activeSwarmRun.state === "executing_spine" ||
+      activeSwarmRun.state === "executing_specialists" ||
+      activeSwarmRun.state === "running_qa");
+
+  const handleRunQa = async () => {
+    if (qaRunning) return;
+    setQaRunning(true);
+    setQaError(null);
+    try {
+      const report = await client.runProjectQa(project.id, true);
+      onQaReportChange(report);
+      const updated = await client.getProject(project.id);
+      onProjectUpdate(updated);
+    } catch (err) {
+      setQaError(err instanceof Error ? err.message : "Failed to run QA");
+    } finally {
+      setQaRunning(false);
+    }
+  };
+
+  const handleExportAssetPack = async () => {
+    setAssetPackError(null);
+    try {
+      const pack = await client.exportAssetPack();
+      const blob = new Blob([JSON.stringify(pack, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "solaris-asset-pack.json";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      setAssetPackError(err instanceof Error ? err.message : "Export failed");
+    }
+  };
+
+  const handleImportAssetPack = async (fileList: FileList | null) => {
+    const file = fileList?.[0];
+    if (!file) return;
+    setAssetPackError(null);
+    try {
+      const text = await file.text();
+      const manifest = JSON.parse(text) as CodeAssetPackManifest;
+      await client.importAssetPack(manifest);
+      const refreshed = await client.listAssets();
+      onAssetsReplaced(refreshed);
+    } catch (err) {
+      setAssetPackError(
+        err instanceof Error ? err.message : "Failed to import asset pack",
+      );
+    }
+  };
+
+  const handleInsertSourceRange = () => {
+    if (!selectedMedia) return;
+    const total =
+      selectedMedia.intelligence.duration_sec > 0.2
+        ? selectedMedia.intelligence.duration_sec
+        : 5;
+    const inPt = Math.max(0, Math.min(sourceInSec, total - 0.25));
+    const outPt =
+      sourceOutSec !== null && sourceOutSec > inPt + 0.15
+        ? Math.min(sourceOutSec, total)
+        : total;
+    void handleAddMediaToTimeline(selectedMedia, undefined, playheadSec, {
+      sourceIn: inPt,
+      duration: Math.max(0.25, outPt - inPt),
+    });
+  };
+
+  return (
+    <div className="relative flex h-dvh flex-col overflow-hidden bg-void text-areia">
+      <SwarmCursorLayer
+        enabled={swarmCursorsEnabled}
+        demoMode={isDemoProject}
+        swarmActive={isSwarmActive}
+        activeRoles={activeSwarmRun?.active_roles ?? EMPTY_ROLES}
+        latestRealOp={latestRealOp}
+      />
+
+      <ExportModal
+        open={exportModalOpen}
+        projectId={project.id}
+        projectName={project.name}
+        client={client}
+        activeJob={exportJob}
+        onJobStarted={(job) => onExportJobChange(job)}
+        onClose={() => setExportModalOpen(false)}
+      />
+
+      {opErrorToast && (
+        <div
+          role="alert"
+          className="fixed right-4 bottom-4 z-50 flex max-w-sm items-center gap-2 rounded-xl border border-vermelho-foco/55 bg-carbono/95 px-3.5 py-2.5 text-xs text-areia shadow-2xl backdrop-blur-md"
+        >
+          <span className="flex-1">{opErrorToast}</span>
+          <button
+            type="button"
+            onClick={() => setOpErrorToast(null)}
+            className="rounded-full p-0.5 text-areia/65 hover:text-areia"
+            aria-label="Dismiss error"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Top NLE Chrome */}
+      <header className="flex h-12 shrink-0 items-center justify-between border-b border-areia/10 bg-carbono/70 px-4 backdrop-blur-md">
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={onBackToChat}
+            className="flex h-8 items-center gap-1.5 rounded-full border border-areia/12 px-3 text-xs text-areia/80 hover:bg-accent hover:text-areia"
+          >
+            <ArrowLeft className="h-3.5 w-3.5" />
+            <span>Chat</span>
+          </button>
+          <SolarisWordmark />
+          <div className="hidden h-4 w-px bg-areia/15 sm:block" />
+          <span className="hidden text-xs font-medium text-areia sm:inline">
+            {project.name}
+          </span>
+          <span className="tabular-nums rounded-full border border-areia/12 bg-void/70 px-2 py-0.5 text-[10px] text-areia/65">
+            rev {project.revision}
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1 rounded-full border border-areia/12 bg-void/65 px-2.5 py-1 text-[11px]">
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${
+                wsConnected ? "bg-amarelo-ideias solar-pulse-dot" : "bg-vermelho-foco"
+              }`}
+            />
+            <span className="text-areia/75">
+              {wsConnected ? "Swarm Live" : "Reconnecting"}
+            </span>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setSwarmCursorsEnabled((v) => !v)}
+            className={`flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs ${
+              swarmCursorsEnabled
+                ? "border-laranja-criacao/60 bg-accent text-areia"
+                : "border-areia/12 bg-void/60 text-areia/70"
+            }`}
+          >
+            <Users className="h-3.5 w-3.5 text-laranja-criacao" />
+            <span>{swarmCursorsEnabled ? "Swarm On" : "Focus"}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => void handleUndo()}
+            className="grid h-8 w-8 place-items-center rounded-full border border-areia/12 text-areia/80 hover:bg-accent"
+            aria-label="Undo"
+          >
+            <Undo2 className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleRedo()}
+            className="grid h-8 w-8 place-items-center rounded-full border border-areia/12 text-areia/80 hover:bg-accent"
+            aria-label="Redo"
+          >
+            <Redo2 className="h-3.5 w-3.5" />
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenAiSettings}
+            className="hidden h-8 items-center gap-1.5 rounded-full border border-areia/12 px-3 text-xs text-areia/85 hover:bg-accent lg:flex"
+            title="OpenRouter API Key, Model Advisor & MCP Mode"
+          >
+            <Cpu className="h-3.5 w-3.5 text-amarelo-ideias" />
+            <span>{agentStatus?.openrouter_configured ? "AI Ready" : "AI Keys"}</span>
+          </button>
+
+          <button
+            type="button"
+            data-cursor-anchor="brand.playbook"
+            onClick={onOpenBrandDrawer}
+            className="hidden h-8 items-center gap-1.5 rounded-full border border-areia/12 px-3 text-xs text-areia/85 hover:bg-accent md:flex"
+          >
+            <Palette className="h-3.5 w-3.5 text-laranja-criacao" />
+            <span>Brand</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setExportModalOpen(true)}
+            className="btn-solar-outline flex h-8 items-center gap-1.5 px-4 text-xs font-medium text-areia"
+          >
+            <Download className="h-3.5 w-3.5 text-amarelo-ideias" />
+            <span>Export</span>
+          </button>
+        </div>
+      </header>
+
+      {/* Main 6-Panel Grid (Media-First proportions) */}
+      <div className="grid min-h-0 flex-1 grid-cols-12 gap-2.5 p-2.5">
+        {/* Left Column: Media Pool + Effects/GFX */}
+        <div className="col-span-12 flex min-h-0 flex-col gap-2.5 lg:col-span-2">
+          <div
+            data-cursor-anchor="media.pool"
+            className="flex min-h-0 flex-1 flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-3"
+          >
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
+                Media ({project.media_pool.length})
+              </span>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept="video/*,image/*,audio/*,.md,.txt,.pdf"
+                onChange={(e) => {
+                  void handleUploadMedia(e.target.files);
+                  e.currentTarget.value = "";
+                }}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="flex items-center gap-1 rounded-full border border-areia/12 px-2 py-0.5 text-[10px] text-areia/80 hover:bg-accent"
+              >
+                <Plus className="h-3 w-3 text-laranja-criacao" />
+                <span>Add</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 gap-1.5 overflow-y-auto pr-1">
+              {mediaErrorMsg && (
+                <div className="rounded-lg border border-vermelho-foco/40 bg-vermelho-foco/15 px-2 py-1 text-[10px] text-areia">
+                  {mediaErrorMsg}
+                </div>
+              )}
+              {project.media_pool.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-areia/12 p-4 text-center text-[11px] text-areia/45">
+                  No media imported yet.
+                </div>
+              ) : (
+                project.media_pool.map((item) => (
+                  <div
+                    key={item.id}
+                    draggable={item.kind !== "document"}
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData("application/x-solaris-media-id", item.id);
+                      e.dataTransfer.effectAllowed = "copy";
+                    }}
+                    className={`flex flex-col items-start gap-1 rounded-xl border p-2 transition-colors motion-reduce:transition-none ${
+                      selectedMedia?.id === item.id
+                        ? "border-laranja-criacao/65 bg-accent"
+                        : "border-areia/10 bg-void/65 hover:bg-accent"
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setSelectedMediaId(item.id)}
+                      onDoubleClick={() => void handleAddMediaToTimeline(item)}
+                      title="Click to inspect · Double-click or drag onto a timeline track"
+                      className="flex w-full flex-col items-start gap-1 text-left"
+                    >
+                      <div className="flex w-full items-center justify-between text-[10px] text-areia/65">
+                        {item.kind === "video" ? (
+                          <Film className="h-3 w-3 text-track-v1" />
+                        ) : item.kind === "audio" ? (
+                          <Music className="h-3 w-3 text-track-a1" />
+                        ) : (
+                          <ImageIcon className="h-3 w-3 text-track-v2" />
+                        )}
+                        <span className="tabular-nums">
+                          {item.intelligence.duration_sec > 0
+                            ? `${item.intelligence.duration_sec.toFixed(1)}s`
+                            : item.role_hint}
+                        </span>
+                      </div>
+                      <span className="w-full truncate text-[11px] font-medium text-areia">
+                        {item.name}
+                      </span>
+                    </button>
+                    <div className="flex w-full items-center justify-between gap-1">
+                      <div className="flex items-center gap-1">
+                        {item.intelligence.is_log_footage && (
+                          <span className="rounded bg-laranja-criacao/20 px-1 py-0.5 text-[9px] text-amarelo-ideias">
+                            LOG
+                          </span>
+                        )}
+                        {item.intelligence.transcript.length > 0 ? (
+                          <span className="tabular-nums rounded bg-grafite px-1 py-0.5 text-[9px] text-areia/75">
+                            {item.intelligence.transcript.length}w
+                          </span>
+                        ) : (
+                          (item.kind === "video" || item.kind === "audio") &&
+                          item.path && (
+                            <button
+                              type="button"
+                              disabled={transcribingMediaId !== null}
+                              onClick={() => void handleTranscribeMedia(item.id)}
+                              className="rounded border border-areia/15 px-1.5 py-0.5 text-[9px] text-areia/75 hover:border-laranja-criacao/50 hover:text-areia disabled:opacity-45"
+                            >
+                              {transcribingMediaId === item.id ? "..." : "Transcribe"}
+                            </button>
+                          )
+                        )}
+                      </div>
+                      {item.kind !== "document" && (
+                        <button
+                          type="button"
+                          onClick={() => void handleAddMediaToTimeline(item)}
+                          title="Add to Timeline at playhead"
+                          className="flex items-center gap-0.5 rounded border border-areia/15 bg-carbono/80 px-1.5 py-0.5 text-[9px] text-amarelo-ideias hover:border-amarelo-ideias/50"
+                        >
+                          <Plus className="h-2.5 w-2.5" />
+                          <span>Timeline</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* Saved Code Assets / Effects · GFX Bin with miniature live visual previews */}
+          <div
+            data-cursor-anchor="effects.library"
+            className="flex flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-3"
+          >
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
+                GFX ({assets.length})
+              </span>
+              <div className="flex items-center gap-1">
+                <input
+                  ref={assetPackInputRef}
+                  type="file"
+                  accept="application/json,.json"
+                  onChange={(e) => {
+                    void handleImportAssetPack(e.target.files);
+                    e.currentTarget.value = "";
+                  }}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => assetPackInputRef.current?.click()}
+                  title="Import solaris.asset-pack/v1 JSON"
+                  className="flex items-center gap-1 rounded-full border border-areia/12 px-1.5 py-0.5 text-[9px] text-areia/75 hover:bg-accent"
+                >
+                  <Upload className="h-2.5 w-2.5 text-amarelo-ideias" />
+                  <span>Import</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleExportAssetPack()}
+                  title="Export workspace GFX as solaris.asset-pack/v1 JSON"
+                  className="flex items-center gap-1 rounded-full border border-areia/12 px-1.5 py-0.5 text-[9px] text-areia/75 hover:bg-accent"
+                >
+                  <Download className="h-2.5 w-2.5 text-laranja-criacao" />
+                  <span>Export</span>
+                </button>
+                <Layers className="h-3.5 w-3.5 text-track-g1" />
+              </div>
+            </div>
+            {assetPackError && (
+              <div className="mb-1.5 rounded-lg border border-vermelho-foco/40 bg-vermelho-foco/15 px-2 py-1 text-[10px] text-areia">
+                {assetPackError}
+              </div>
+            )}
+            <div className="grid max-h-40 grid-cols-1 gap-1.5 overflow-y-auto pr-0.5">
+              {assets.map((asset) => (
+                <button
+                  key={asset.id}
+                  type="button"
+                  onClick={() => void handlePlaceSavedAsset(asset)}
+                  className="group flex flex-col gap-1 rounded-xl border border-areia/10 bg-void/70 p-1.5 text-left transition-colors hover:border-track-g1/50 hover:bg-accent motion-reduce:transition-none"
+                >
+                  <div className="relative h-12 w-full overflow-hidden rounded-lg border border-areia/10 bg-carbono/90">
+                    <SandboxedGfxFrame
+                      client={client}
+                      ticketVersion={ticketVersion}
+                      title={`Preview ${asset.name}`}
+                      doc={assetThumbDocs[asset.id]}
+                      lazy
+                      tabIndex={-1}
+                      className="pointer-events-none absolute top-0 left-0 h-[192px] w-[340px] origin-top-left scale-[0.26] border-0 bg-transparent"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between px-1 text-[10px] text-areia/85">
+                    <span className="truncate font-medium">{asset.name}</span>
+                    <Plus className="h-3 w-3 shrink-0 text-track-g1" />
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Center-Left: Source Monitor + Swarm Activity Log */}
+        <div className="col-span-12 flex min-h-0 flex-col gap-2.5 lg:col-span-3">
+          <div
+            data-cursor-anchor="source.monitor"
+            className="flex flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-3"
+          >
+            <div className="mb-2 flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
+              <span>Source</span>
+              <span className="truncate text-areia/45">
+                {selectedMedia ? selectedMedia.name : "No clip"}
+              </span>
+            </div>
+            <div className="relative grid aspect-video place-items-center overflow-hidden rounded-xl border border-areia/10 bg-void">
+              {selectedMedia && selectedMedia.kind === "video" && selectedMedia.path ? (
+                <video
+                  ref={sourceVideoRef}
+                  src={client.getMediaStreamUrl(project.id, selectedMedia.id)}
+                  className="h-full w-full object-cover opacity-85"
+                  controls
+                  muted
+                />
+              ) : selectedMedia && selectedMedia.kind === "image" && selectedMedia.path ? (
+                <img
+                  src={client.getMediaStreamUrl(project.id, selectedMedia.id)}
+                  alt={selectedMedia.name}
+                  className="h-full w-full object-cover opacity-85"
+                />
+              ) : selectedMedia && selectedMedia.kind === "audio" ? (
+                <div className="flex w-full flex-col items-center gap-2 px-3 text-track-a1">
+                  <Music className="h-5 w-5" />
+                  <span className="max-w-full truncate text-[10px] text-areia/80">
+                    {selectedMedia.name}
+                  </span>
+                  {selectedMedia.path && (
+                    <audio
+                      ref={sourceAudioRef}
+                      src={client.getMediaStreamUrl(project.id, selectedMedia.id)}
+                      controls
+                      className="h-8 w-full max-w-[260px]"
+                    />
+                  )}
+                </div>
+              ) : (
+                <span className="text-[11px] text-areia/35">Source Monitor</span>
+              )}
+              {selectedMedia?.kind !== "audio" && (
+                <div
+                  className="pointer-events-none absolute inset-y-2 rounded border border-dashed border-amarelo-ideias/75"
+                  style={{ width: `${reframeBoxWidthPct}%` }}
+                >
+                  <span className="bg-amarelo-ideias px-1 text-[8px] font-semibold text-void">
+                    REFRAME {aspectBadge}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Source IN/OUT Trim Markers + Insert Range */}
+            {selectedMedia && selectedMedia.kind !== "document" && (
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-1.5 text-[10px]">
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const activeSourceEl =
+                        selectedMedia.kind === "audio"
+                          ? sourceAudioRef.current
+                          : sourceVideoRef.current;
+                      const t = activeSourceEl?.currentTime ?? 0;
+                      setSourceInSec(Number(t.toFixed(2)));
+                    }}
+                    className="rounded border border-areia/14 bg-void/70 px-1.5 py-0.5 text-areia/80 hover:border-amarelo-ideias/50"
+                    title="Mark Source IN at current source time"
+                  >
+                    IN <span className="tabular-nums text-amarelo-ideias">{sourceInSec.toFixed(1)}s</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const activeSourceEl =
+                        selectedMedia.kind === "audio"
+                          ? sourceAudioRef.current
+                          : sourceVideoRef.current;
+                      const t =
+                        activeSourceEl?.currentTime ??
+                        selectedMedia.intelligence.duration_sec;
+                      setSourceOutSec(Number(Math.max(sourceInSec + 0.25, t).toFixed(2)));
+                    }}
+                    className="rounded border border-areia/14 bg-void/70 px-1.5 py-0.5 text-areia/80 hover:border-amarelo-ideias/50"
+                    title="Mark Source OUT at current source time"
+                  >
+                    OUT{" "}
+                    <span className="tabular-nums text-amarelo-ideias">
+                      {(sourceOutSec ?? selectedMedia.intelligence.duration_sec ?? 5).toFixed(1)}s
+                    </span>
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleInsertSourceRange}
+                  className="flex items-center gap-1 rounded-full border border-laranja-criacao/50 bg-laranja-criacao/15 px-2.5 py-0.5 font-medium text-areia hover:bg-laranja-criacao/25"
+                >
+                  <Plus className="h-2.5 w-2.5 text-amarelo-ideias" />
+                  <span>Insert Range</span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          <SwarmActivityPanel
+            agentStatus={agentStatus}
+            mcpEndpoint={`${client.getBaseUrl()}${agentStatus?.mcp_http_path ?? "/mcp"}`}
+            activeModelLabel={activeModelLabel}
+            activeSwarmRun={activeSwarmRun}
+            latestQaReport={latestQaReport}
+            qaRunning={qaRunning}
+            qaError={qaError}
+            swarmError={swarmError}
+            activityLog={activityLog}
+            onStartSwarm={handleStartSwarm}
+            onCancelSwarm={handleCancelSwarm}
+            onRunQa={handleRunQa}
+            onOpenAiSettings={onOpenAiSettings}
+          />
+        </div>
+
+        {/* Center: WebGL2 Program Monitor + Sandboxed GFX */}
+        <div
+          data-cursor-anchor="program.stage"
+          className="col-span-12 flex min-h-0 flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-3 lg:col-span-3"
+        >
+          <div className="mb-2 flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
+            <span>Program</span>
+            <span className="tabular-nums text-amarelo-ideias">
+              {project.canvas.width}×{project.canvas.height}
+            </span>
+          </div>
+
+          <div className="relative flex flex-1 items-center justify-center overflow-hidden rounded-xl border border-areia/12 bg-void p-2">
+            <WebGLProgramStage
+              client={client}
+              ticketVersion={ticketVersion}
+              width={project.canvas.width}
+              height={project.canvas.height}
+              playheadSec={playheadSec}
+              isPlaying={isPlaying}
+              grade={effectiveStageGrade}
+              activeLayers={activeVisualLayers}
+              activeGfxClips={activeGfxClips}
+              activeCaptionClip={activeCaptionClip}
+              brandTokens={fallbackTokens}
+              brandFontCss={brandFontCss}
+              brandLut={brandLut}
+              onPixelFrame={handlePixelFrame}
+            />
+          </div>
+        </div>
+
+        {/* Center-Right: Broadcast Scopes */}
+        <div className="col-span-12 min-h-0 lg:col-span-2">
+          <BroadcastScopes
+            scopesRef={scopesRef}
+            grade={effectiveStageGrade}
+            playheadSec={playheadSec}
+            integratedLufs={integratedLufs}
+            voiceLevelPct={voiceLevelPct}
+            musicLevelPct={musicLevelPct}
+          />
+        </div>
+
+        {/* Right: Inspector */}
+        <div className="col-span-12 min-h-0 lg:col-span-2">
+          <InspectorPanel
+            grade={draftGrade}
+            gradeTargetLabel={activeFxClip ? "FX Clip" : "Master Grade"}
+            hasBrandLut={Boolean(brandLut)}
+            onPreviewGrade={setDraftGrade}
+            onCommitGrade={(next) => void handleCommitGrade(next)}
+            selectedClip={selectedClip}
+            activeCaptionPreset={
+              activeCaptionClip?.payload.kind === "caption"
+                ? activeCaptionClip.payload.caption.preset
+                : null
+            }
+            savedAssets={assets}
+            onUpdateGfxProps={(trackId, clipId, props) =>
+              void handleUpdateGfxProps(trackId, clipId, props)
+            }
+            onUpdateClipTransform={(trackId, clipId, tr) =>
+              void handleUpdateClipTransform(trackId, clipId, tr)
+            }
+            onUpdateClipAudio={(trackId, clipId, audio) =>
+              void handleUpdateClipAudio(trackId, clipId, audio)
+            }
+            onUpdateCaptionClip={(trackId, clipId, caption) =>
+              void handleUpdateCaptionClip(trackId, clipId, caption)
+            }
+            onUpdateCaptionPreset={(preset) => void handleUpdateCaptionPreset(preset)}
+            onSaveClipAsAsset={handleSaveClipAsAsset}
+            swarmRoleCounts={swarmRoleCounts}
+          />
+        </div>
+      </div>
+
+      {/* Bottom: 7-Track Timeline */}
+      <div className="shrink-0 px-2.5 pb-2.5">
+        <TimelinePanel
+          tracks={project.tracks}
+          mediaPool={project.media_pool}
+          playheadSec={playheadSec}
+          totalDurationSec={totalDurationSec}
+          fps={projectFps}
+          canvasLabel={`${aspectBadge} · ${project.canvas.width}×${project.canvas.height}`}
+          isPlaying={isPlaying}
+          selectedClipId={selectedClipRef?.clipId ?? null}
+          onSelectClip={(trackId, clipId) => setSelectedClipRef({ trackId, clipId })}
+          onTogglePlay={handleTogglePlay}
+          onSeek={handleSeekPlayhead}
+          onSplitSelected={() => void handleSplitSelectedClip()}
+          onDeleteSelected={() => void handleDeleteSelectedClip()}
+          onTrimOrMoveClip={(trackId, clipId, patch) =>
+            void handleTrimOrMoveClip(trackId, clipId, patch)
+          }
+          onDropMediaOnTrack={(trackId, mediaId, startSec) => {
+            const found = project.media_pool.find((m) => m.id === mediaId);
+            if (found) {
+              void handleAddMediaToTimeline(found, trackId, startSec);
+            }
+          }}
+          onToggleTrackFlag={(trackId, field, value) =>
+            void handleToggleTrackFlag(trackId, field, value)
+          }
+        />
+      </div>
+    </div>
+  );
+}
+
+export default StudioWorkspace;

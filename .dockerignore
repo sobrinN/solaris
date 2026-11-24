@@ -1,0 +1,13 @@
+.git/
+target/
+node_modules/
+**/node_modules/
+.solaris-data/
+apps/desktop/src-tauri/target/
+apps/studio-web/dist/
+packages/*/dist/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store

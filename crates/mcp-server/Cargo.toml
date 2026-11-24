@@ -1,0 +1,25 @@
+[package]
+name = "solaris-mcp-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "solaris_mcp_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "solaris-mcp"
+path = "src/main.rs"
+
+[dependencies]
+axum.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+solaris-agent-runtime = { path = "../agent-runtime" }
+solaris-core-ir = { path = "../core-ir" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid.workspace = true

@@ -1,0 +1,54 @@
+services:
+  solaris-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_CHROMIUM: "false"
+    ports:
+      - "41731:41731"
+    environment:
+      SOLARIS_HOST: "0.0.0.0"
+      SOLARIS_PORT: "41731"
+      SOLARIS_DATA_DIR: "/var/lib/solaris/data"
+      SOLARIS_AUTH_TOKEN: "${SOLARIS_AUTH_TOKEN:?SOLARIS_AUTH_TOKEN is required when binding 0.0.0.0}"
+      SOLARIS_CORS_ORIGINS: "${SOLARIS_CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}"
+      SOLARIS_ALLOW_EXTERNAL_READS: "${SOLARIS_ALLOW_EXTERNAL_READS:-false}"
+      SOLARIS_CHROME_PATH: "${SOLARIS_CHROME_PATH:-}"
+      SOLARIS_CHROME_NO_SANDBOX: "${SOLARIS_CHROME_NO_SANDBOX:-false}"
+      SOLARIS_MAX_CONCURRENT_EXPORTS: "${SOLARIS_MAX_CONCURRENT_EXPORTS:-2}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      SOLARIS_OPENROUTER_MODEL: "${SOLARIS_OPENROUTER_MODEL:-}"
+      SOLARIS_STT_MODEL: "${SOLARIS_STT_MODEL:-}"
+      SOLARIS_STORAGE_BACKEND: "${SOLARIS_STORAGE_BACKEND:-local_fs}"
+      SOLARIS_S3_BUCKET: "${SOLARIS_S3_BUCKET:-}"
+      SOLARIS_S3_REGION: "${SOLARIS_S3_REGION:-us-east-1}"
+      SOLARIS_S3_ENDPOINT: "${SOLARIS_S3_ENDPOINT:-}"
+      SOLARIS_S3_ACCESS_KEY_ID: "${SOLARIS_S3_ACCESS_KEY_ID:-}"
+      SOLARIS_S3_SECRET_ACCESS_KEY: "${SOLARIS_S3_SECRET_ACCESS_KEY:-}"
+      SOLARIS_S3_SESSION_TOKEN: "${SOLARIS_S3_SESSION_TOKEN:-}"
+      SOLARIS_S3_PREFIX: "${SOLARIS_S3_PREFIX:-}"
+      SOLARIS_S3_FORCE_PATH_STYLE: "${SOLARIS_S3_FORCE_PATH_STYLE:-true}"
+      SOLARIS_S3_TIMEOUT_SECS: "${SOLARIS_S3_TIMEOUT_SECS:-300}"
+      SOLARIS_S3_CACHE_MAX_BYTES: "${SOLARIS_S3_CACHE_MAX_BYTES:-2147483648}"
+    volumes:
+      - solaris_data:/var/lib/solaris/data
+    restart: unless-stopped
+
+  # Create the SOLARIS_S3_BUCKET in MinIO console (:9001) before first upload when using s3-local
+  minio:
+    image: minio/minio:RELEASE.2025-02-07T23-21-09Z
+    profiles: ["s3-local"]
+    command: server /data --console-address ":9001"
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-solarisminio}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-solarisminiosecret}"
+    volumes:
+      - minio_data:/data
+
+volumes:
+  solaris_data:
+  minio_data:

@@ -1,0 +1,24 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Node / Frontend
+node_modules/
+dist/
+.vite/
+*.local
+*.tsbuildinfo
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Solaris runtime workspace
+.solaris-data/
+
+# OS / Editor
+.DS_Store
+*.swp
+.vscode/
+.idea/
