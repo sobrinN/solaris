@@ -9,13 +9,39 @@ dist/
 *.local
 *.tsbuildinfo
 
-# Environment secrets
+# Local secrets & API keys (OpenRouter API key is strictly local / OS Keychain)
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*credentials*.json
 
-# Solaris runtime workspace
+# Solaris runtime workspace (user projects, uploads, brand playbooks, saved code assets, exports, caches)
 .solaris-data/
+**/.solaris-data/
+.s3-cache/
+tmp_stt/
+/uploads/
+/exports/
+/proxies/
+/brands/
+/projects/
+/user-assets/
+/playbooks/
+
+# Local user playbooks, exported asset packs, LUTs & raw media
+BRAND.md
+*.brand.json
+*.asset-pack.json
+*.cube
+*.mp4
+*.mov
+*.webm
+*.mkv
+*.wav
+*.mp3
+*.m4a
 
 # OS / Editor
 .DS_Store
