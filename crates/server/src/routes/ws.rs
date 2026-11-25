@@ -48,6 +48,8 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, project_filter: Optio
                                 EngineEvent::LogEmitted { project_id, .. } => {
                                     project_id.as_deref().is_none_or(|pid| pid == filter)
                                 }
+                                // Workspace-global GFX library changes reach every Studio client.
+                                EngineEvent::AssetsChanged { .. } => true,
                             };
                             if !matches {
                                 continue;

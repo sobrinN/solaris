@@ -417,7 +417,7 @@ pub fn all_tools() -> Vec<ToolSpec> {
         ToolSpec {
             mcp_name: "captions.place_script",
             llm_name: "captions_place_script",
-            description: "Place scripted, word-synced kinetic caption bursts directly on T1 without requiring an audio transcript (ideal for programmatic/zero-asset videos).",
+            description: "Place word-synced caption bursts on T1 for a script that IS spoken by narration audio already on the timeline but lacks a transcript. Never use on silent/no-audio videos: Solaris captions must reflect real narration.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -444,6 +444,24 @@ pub fn all_tools() -> Vec<ToolSpec> {
                 "required": ["project_id", "segments"]
             }),
             annotations: MUTATE_NON_IDEMPOTENT,
+        },
+        ToolSpec {
+            mcp_name: "captions.update_clip",
+            llm_name: "captions_update_clip",
+            description: "Edit ONE existing T1 caption clip in place: replace its text (keeps transcript word timings when the word count is unchanged), preset, font_family, or highlight_color.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string"},
+                    "clip_id": {"type": "string"},
+                    "text": {"type": "string"},
+                    "preset": {"type": "string", "enum": ["neon_glow", "mono_caps", "karaoke", "minimal"]},
+                    "font_family": {"type": "string"},
+                    "highlight_color": {"type": "string"}
+                },
+                "required": ["project_id", "clip_id"]
+            }),
+            annotations: MUTATE_IDEMPOTENT,
         },
         ToolSpec {
             mcp_name: "assets.search",
@@ -497,6 +515,26 @@ pub fn all_tools() -> Vec<ToolSpec> {
                 "required": ["project_id", "clip_id", "label", "start_sec", "duration_sec"]
             }),
             annotations: MUTATE_NON_IDEMPOTENT,
+        },
+        ToolSpec {
+            mcp_name: "gfx.update_clip",
+            llm_name: "gfx_update_clip",
+            description: "Surgically edit ONE existing G1 GFX clip in place (same clip_id, single undo step): change label, start_sec, duration_sec, inline_html (auto-linted), asset_id, or deep-merge props. Use this instead of placing a duplicate clip when refining.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string"},
+                    "clip_id": {"type": "string"},
+                    "label": {"type": "string"},
+                    "start_sec": {"type": "number", "minimum": 0.0},
+                    "duration_sec": {"type": "number", "minimum": 0.05},
+                    "asset_id": {"type": "string"},
+                    "props": {"type": "object"},
+                    "inline_html": {"type": "string"}
+                },
+                "required": ["project_id", "clip_id"]
+            }),
+            annotations: MUTATE_IDEMPOTENT,
         },
         ToolSpec {
             mcp_name: "gfx.lint_html",
@@ -650,7 +688,9 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
             "project.get",
             "media.get_manifest",
             "timeline.place_clip",
+            "timeline.split_clip",
             "timeline.trim_clip",
+            "timeline.delete_clip",
             "timeline.set_transform",
             "preview.capture_frame",
         ],
@@ -662,14 +702,18 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
             "color.set_grade",
             "preview.capture_frame",
         ],
+        // Captions come strictly from transcribed narration; scripted captions are not
+        // available to autonomous agents so silent videos never get phantom captions.
         AgentRole::Caps => &[
             "project.get",
             "media.get_manifest",
             "media.transcribe",
             "brand.get_playbook",
             "captions.generate_from_transcript",
-            "captions.place_script",
             "captions.set_style",
+            "captions.update_clip",
+            "timeline.trim_clip",
+            "timeline.delete_clip",
             "timeline.set_transform",
             "preview.capture_frame",
         ],
@@ -681,6 +725,9 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
             "assets.save",
             "gfx.lint_html",
             "gfx.place",
+            "gfx.update_clip",
+            "timeline.trim_clip",
+            "timeline.delete_clip",
             "timeline.set_transform",
             "preview.capture_frame",
         ],
@@ -688,6 +735,8 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
             "project.get",
             "media.get_manifest",
             "timeline.place_clip",
+            "timeline.trim_clip",
+            "timeline.delete_clip",
             "audio.set_mix",
             "audio.normalize_lufs",
             "audio.enable_ducking",
@@ -701,6 +750,26 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
         .into_iter()
         .filter(|t| allowed.contains(&t.mcp_name))
         .map(to_llm_def)
+        .collect()
+}
+
+const REFINE_EDIT_TOOLS: [&str; 7] = [
+    "gfx.update_clip",
+    "captions.update_clip",
+    "timeline.trim_clip",
+    "timeline.delete_clip",
+    "timeline.set_transform",
+    "color.set_grade",
+    "audio.set_mix",
+];
+
+pub fn tools_for_refinement(role: AgentRole) -> Vec<ToolDefinition> {
+    tools_for_role(role)
+        .into_iter()
+        .filter(|def| {
+            let name = normalize_tool_name(&def.function.name);
+            !is_mutating_tool(name) || REFINE_EDIT_TOOLS.contains(&name)
+        })
         .collect()
 }
 
@@ -750,9 +819,11 @@ pub fn normalize_tool_name(raw: &str) -> &str {
         ),
         ("captions_place_script", "captions.place_script"),
         ("captions_set_style", "captions.set_style"),
+        ("captions_update_clip", "captions.update_clip"),
         ("assets_search", "assets.search"),
         ("assets_save", "assets.save"),
         ("gfx_place", "gfx.place"),
+        ("gfx_update_clip", "gfx.update_clip"),
         ("gfx_lint_html", "gfx.lint_html"),
         ("audio_set_mix", "audio.set_mix"),
         ("audio_normalize_lufs", "audio.normalize_lufs"),

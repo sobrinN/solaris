@@ -831,7 +831,7 @@ mod tests {
             .handle_json_str(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#)
             .await
             .unwrap();
-        assert_eq!(tools.result.unwrap()["tools"].as_array().unwrap().len(), 34);
+        assert_eq!(tools.result.unwrap()["tools"].as_array().unwrap().len(), 36);
 
         let skill = server
             .handle_json_str(

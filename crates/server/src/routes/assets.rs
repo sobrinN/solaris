@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -50,12 +50,51 @@ pub async fn save_asset(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     state
+        .undismiss_starter_locked(&asset.id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    state
         .inner
         .assets
         .write()
         .await
         .insert(asset.id.clone(), asset.clone());
+    drop(_persist);
+    state.emit_assets_changed("saved", Some(&asset.id));
     Ok(Json(asset))
+}
+
+#[derive(Serialize)]
+pub struct AssetDeleteResponse {
+    pub deleted: bool,
+    pub asset_id: String,
+}
+
+pub async fn delete_asset(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<AssetDeleteResponse>, (StatusCode, String)> {
+    state.delete_asset(&id).await?;
+    Ok(Json(AssetDeleteResponse {
+        deleted: true,
+        asset_id: id,
+    }))
+}
+
+#[derive(Serialize)]
+pub struct AssetRestoreResponse {
+    pub restored_count: usize,
+    pub assets: Vec<SavedCodeAsset>,
+}
+
+pub async fn restore_starter_assets(
+    State(state): State<AppState>,
+) -> Result<Json<AssetRestoreResponse>, (StatusCode, String)> {
+    let (restored_count, assets) = state.restore_starter_assets().await?;
+    Ok(Json(AssetRestoreResponse {
+        restored_count,
+        assets,
+    }))
 }
 
 #[derive(Deserialize, Default)]
@@ -143,6 +182,10 @@ pub async fn import_asset_pack(
         save_json_atomic_async(asset.clone(), path)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        state
+            .undismiss_starter_locked(&asset.id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
     {
         let mut guard = state.inner.assets.write().await;
@@ -150,6 +193,8 @@ pub async fn import_asset_pack(
             guard.insert(asset.id.clone(), asset.clone());
         }
     }
+    drop(_persist);
+    state.emit_assets_changed("imported", None);
 
     Ok(Json(AssetPackImportResponse {
         imported_count: validated_assets.len(),

@@ -71,6 +71,47 @@ fn validate_safe_id(id: &str) -> Result<(), AgentError> {
     Ok(())
 }
 
+/// Rewrites caption text while keeping it in sync with narration: when the word
+/// count is unchanged the original transcript timings are preserved 1:1; otherwise
+/// words are redistributed across the original spoken span.
+pub(crate) fn retime_caption_words(
+    original: &[CaptionWord],
+    text: &str,
+    clip: &Clip,
+) -> Vec<CaptionWord> {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    if tokens.len() == original.len() {
+        return original
+            .iter()
+            .zip(tokens)
+            .map(|(w, t)| CaptionWord {
+                text: t.to_string(),
+                start_sec: w.start_sec,
+                end_sec: w.end_sec,
+            })
+            .collect();
+    }
+    let span_start = original
+        .first()
+        .map(|w| w.start_sec)
+        .unwrap_or(clip.start_sec);
+    let span_end = original
+        .last()
+        .map(|w| w.end_sec)
+        .unwrap_or(clip.start_sec + clip.duration_sec)
+        .max(span_start + 0.05);
+    let step = (span_end - span_start) / tokens.len().max(1) as f64;
+    tokens
+        .iter()
+        .enumerate()
+        .map(|(i, t)| CaptionWord {
+            text: (*t).to_string(),
+            start_sec: span_start + step * i as f64,
+            end_sec: span_start + step * (i + 1) as f64,
+        })
+        .collect()
+}
+
 fn apply_rgb_patch(target: &mut RgbTriplet, obj: Option<&Value>) {
     let Some(v) = obj.and_then(|v| v.as_object()) else {
         return;
@@ -1433,6 +1474,169 @@ pub async fn execute_tool(
                 images_png_base64: Vec::new(),
             })
         }
+        "gfx.update_clip" => {
+            let pid = req_str(&args, "project_id")?;
+            let clip_id = req_str(&args, "clip_id")?.to_string();
+            let proj = backend.get_project(pid).await?;
+            let existing = proj
+                .tracks
+                .iter()
+                .find(|t| t.id == "g1")
+                .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+                .cloned()
+                .ok_or_else(|| AgentError::ToolError(format!("G1 clip '{clip_id}' not found")))?;
+            let ClipKind::Gfx { gfx } = &existing.payload else {
+                return Err(AgentError::ToolError(format!(
+                    "clip '{clip_id}' is not a GFX clip"
+                )));
+            };
+            let opt_num = |key: &str| {
+                args.get(key)
+                    .and_then(|v| v.as_f64())
+                    .filter(|v| v.is_finite())
+            };
+            let label = args
+                .get("label")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| existing.label.clone());
+            let start_sec = opt_num("start_sec").unwrap_or(existing.start_sec);
+            let duration_sec = opt_num("duration_sec").unwrap_or(existing.duration_sec);
+            let mut next_gfx = gfx.clone();
+            let mut inline_html = args
+                .get("inline_html")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            if let Some(aid) = args
+                .get("asset_id")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let found = backend
+                    .list_assets()
+                    .await?
+                    .into_iter()
+                    .find(|a| a.id == aid)
+                    .ok_or_else(|| {
+                        AgentError::ToolError(format!("unknown GFX asset_id '{aid}'"))
+                    })?;
+                if inline_html.is_none() {
+                    inline_html = Some(found.html_source);
+                }
+                next_gfx.props = deep_merge_json(&found.default_props, &next_gfx.props);
+                next_gfx.asset_id = Some(aid.to_string());
+            }
+            if let Some(html) = inline_html {
+                let lint = lint_gfx_html(&html);
+                if !lint.valid {
+                    return Err(AgentError::ToolError(format!(
+                        "GFX HTML failed lint: {}",
+                        lint.errors.join("; ")
+                    )));
+                }
+                next_gfx.inline_html = Some(html);
+            }
+            match args.get("props") {
+                None | Some(Value::Null) => {}
+                Some(v @ Value::Object(_)) => next_gfx.props = deep_merge_json(&next_gfx.props, v),
+                Some(_) => {
+                    return Err(AgentError::ToolError(
+                        "invalid argument 'props': expected JSON object".to_string(),
+                    ));
+                }
+            }
+            // Replace in place under the SAME clip_id as one atomic, single-undo op.
+            let (res, _) = backend
+                .apply_op(
+                    pid,
+                    TimelineCommand::Batch {
+                        commands: vec![
+                            TimelineCommand::DeleteClip {
+                                track_id: "g1".to_string(),
+                                clip_id: clip_id.clone(),
+                            },
+                            TimelineCommand::PlaceGfx {
+                                track_id: "g1".to_string(),
+                                clip_id: clip_id.clone(),
+                                label: label.clone(),
+                                start_sec,
+                                duration_sec,
+                                gfx: next_gfx,
+                            },
+                            TimelineCommand::UpdateClipTransform {
+                                track_id: "g1".to_string(),
+                                clip_id,
+                                transform: existing.transform.clone(),
+                            },
+                        ],
+                        summary: Some(format!("updated GFX '{label}'")),
+                    },
+                    meta,
+                )
+                .await?;
+            Ok(ToolOutput {
+                text: res.summary.clone(),
+                structured: serde_json::to_value(&res).unwrap_or_default(),
+                image_png_base64: None,
+                images_png_base64: Vec::new(),
+            })
+        }
+        "captions.update_clip" => {
+            let pid = req_str(&args, "project_id")?;
+            let clip_id = req_str(&args, "clip_id")?.to_string();
+            let proj = backend.get_project(pid).await?;
+            let clip = proj
+                .tracks
+                .iter()
+                .find(|t| t.id == "t1")
+                .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+                .ok_or_else(|| AgentError::ToolError(format!("T1 clip '{clip_id}' not found")))?;
+            let ClipKind::Caption { caption } = &clip.payload else {
+                return Err(AgentError::ToolError(format!(
+                    "clip '{clip_id}' is not a caption clip"
+                )));
+            };
+            let mut next = caption.clone();
+            if let Some(text) = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                next.words = retime_caption_words(&caption.words, text, clip);
+            }
+            if let Some(preset) = parse_optional_enum::<CaptionPreset>(&args, "preset")? {
+                next.preset = preset;
+            }
+            if let Some(f) = args.get("font_family").and_then(|v| v.as_str()) {
+                next.font_family = f.to_string();
+            }
+            if let Some(c) = args.get("highlight_color").and_then(|v| v.as_str()) {
+                next.highlight_color = c.to_string();
+            }
+            let (res, _) = backend
+                .apply_op(
+                    pid,
+                    TimelineCommand::UpdateCaptionClip {
+                        track_id: "t1".to_string(),
+                        clip_id,
+                        caption: next,
+                    },
+                    meta,
+                )
+                .await?;
+            Ok(ToolOutput {
+                text: res.summary.clone(),
+                structured: serde_json::to_value(&res).unwrap_or_default(),
+                image_png_base64: None,
+                images_png_base64: Vec::new(),
+            })
+        }
         "gfx.place" => {
             let pid = req_str(&args, "project_id")?;
             let clip_id = req_str(&args, "clip_id")?.to_string();
@@ -1792,7 +1996,11 @@ mod tests {
             })
         }
         fn undo(&self, _id: &str) -> BoxFuture<'_, Result<Project, AgentError>> {
-            Box::pin(async { Err(AgentError::Backend("unused".into())) })
+            Box::pin(async move {
+                let mut g = self.engine.write().await;
+                g.undo().map_err(|e| AgentError::ToolError(e.to_string()))?;
+                Ok(g.project().clone())
+            })
         }
         fn redo(&self, _id: &str) -> BoxFuture<'_, Result<Project, AgentError>> {
             Box::pin(async { Err(AgentError::Backend("unused".into())) })
@@ -2394,5 +2602,367 @@ mod tests {
             })
             .collect();
         assert_eq!(texts, vec!["Dr. Smith explained", "e.g. fast cuts."]);
+    }
+
+    fn caption_test_clip(start_sec: f64, duration_sec: f64) -> Clip {
+        Clip {
+            id: "cap-test".to_string(),
+            label: "Caption".to_string(),
+            start_sec,
+            duration_sec,
+            source_in_sec: 0.0,
+            transform: Transform2D::default(),
+            audio: AudioSettings::default(),
+            payload: ClipKind::Caption {
+                caption: CaptionBlock {
+                    words: Vec::new(),
+                    preset: CaptionPreset::Minimal,
+                    font_family: "Sora".to_string(),
+                    highlight_color: "#F7B733".to_string(),
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn retime_caption_words_keeps_transcript_timing_when_word_count_matches() {
+        let original = vec![
+            CaptionWord {
+                text: "hello".to_string(),
+                start_sec: 0.5,
+                end_sec: 1.0,
+            },
+            CaptionWord {
+                text: "world".to_string(),
+                start_sec: 1.0,
+                end_sec: 1.8,
+            },
+        ];
+        let words = retime_caption_words(&original, "hi there", &caption_test_clip(0.5, 2.0));
+        assert_eq!(words[0].text, "hi");
+        assert_eq!((words[0].start_sec, words[0].end_sec), (0.5, 1.0));
+        assert_eq!(words[1].text, "there");
+        assert_eq!((words[1].start_sec, words[1].end_sec), (1.0, 1.8));
+    }
+
+    #[test]
+    fn retime_caption_words_spreads_changed_word_count_across_spoken_span() {
+        let original = vec![
+            CaptionWord {
+                text: "a".to_string(),
+                start_sec: 2.0,
+                end_sec: 3.0,
+            },
+            CaptionWord {
+                text: "b".to_string(),
+                start_sec: 3.0,
+                end_sec: 4.0,
+            },
+        ];
+        let words = retime_caption_words(
+            &original,
+            "one two three four",
+            &caption_test_clip(2.0, 2.0),
+        );
+        assert_eq!(words.len(), 4);
+        assert!((words[0].start_sec - 2.0).abs() < 1e-9);
+        assert!((words[3].end_sec - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn retime_caption_words_never_drops_words_from_long_text() {
+        let text = (0..80)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let words = retime_caption_words(&[], &text, &caption_test_clip(0.0, 10.0));
+        assert_eq!(words.len(), 80);
+        assert_eq!(words.last().unwrap().text, "w79");
+    }
+
+    #[tokio::test]
+    async fn gfx_update_clip_updates_in_place_keeps_transform_deep_merges_lints_and_is_one_undo() {
+        let project = Project::new_default("gfx_update_test", AspectPreset::Vertical9x16);
+        let pid = project.id.clone();
+        let mut engine = ProjectEngine::new(project);
+        let meta = CommandMeta::default();
+        let original_html =
+            r#"<div class="clip" data-start="0" data-duration="3.0">{{title}}</div>"#;
+        engine
+            .apply(
+                TimelineCommand::PlaceGfx {
+                    track_id: "g1".into(),
+                    clip_id: "gfx-1".into(),
+                    label: "Hero Card".into(),
+                    start_sec: 1.0,
+                    duration_sec: 3.0,
+                    gfx: GfxInstance {
+                        asset_id: None,
+                        props: json!({ "title": "Old", "theme": { "bg": "#080404", "ink": "#F7F5EF" } }),
+                        inline_html: Some(original_html.into()),
+                    },
+                },
+                meta.clone(),
+            )
+            .unwrap();
+        let custom_transform = Transform2D {
+            x: 0.12,
+            y: -0.18,
+            scale: 1.15,
+            rotation_deg: 4.0,
+            opacity: 0.9,
+            smart_reframe: None,
+        };
+        engine
+            .apply(
+                TimelineCommand::UpdateClipTransform {
+                    track_id: "g1".into(),
+                    clip_id: "gfx-1".into(),
+                    transform: custom_transform.clone(),
+                },
+                meta.clone(),
+            )
+            .unwrap();
+        // Also place a non-GFX clip on g1 via PlaceClip? No, place a caption clip on t1 to test unknown id on g1.
+        let backend = ExecMockBackend {
+            engine: RwLock::new(engine),
+            keyframes: Vec::new(),
+            assets: Vec::new(),
+        };
+
+        // Rejects unknown clip id
+        assert!(
+            execute_tool(
+                &backend,
+                "gfx.update_clip",
+                json!({ "project_id": pid, "clip_id": "missing", "label": "X" }),
+                meta.clone(),
+            )
+            .await
+            .is_err()
+        );
+
+        // Rejects unsafe HTML via linter
+        assert!(
+            execute_tool(
+                &backend,
+                "gfx.update_clip",
+                json!({
+                    "project_id": pid,
+                    "clip_id": "gfx-1",
+                    "inline_html": "<script>fetch('https://evil.example')</script>"
+                }),
+                meta.clone(),
+            )
+            .await
+            .is_err()
+        );
+
+        let rev_before = backend.get_project(&pid).await.unwrap().revision;
+        execute_tool(
+            &backend,
+            "gfx.update_clip",
+            json!({
+                "project_id": pid,
+                "clip_id": "gfx-1",
+                "label": "Updated Hero",
+                "props": { "theme": { "bg": "#1A0E0E" }, "badge": "NEW" }
+            }),
+            meta.clone(),
+        )
+        .await
+        .unwrap();
+
+        let after = backend.get_project(&pid).await.unwrap();
+        assert_eq!(after.revision, rev_before + 1);
+        let g1 = after.tracks.iter().find(|t| t.id == "g1").unwrap();
+        assert_eq!(g1.clips.len(), 1);
+        let clip = &g1.clips[0];
+        assert_eq!(clip.id, "gfx-1");
+        assert_eq!(clip.label, "Updated Hero");
+        assert!((clip.transform.x - 0.12).abs() < 1e-9);
+        assert!((clip.transform.y - -0.18).abs() < 1e-9);
+        assert!((clip.transform.scale - 1.15).abs() < 1e-9);
+        match &clip.payload {
+            ClipKind::Gfx { gfx } => {
+                assert_eq!(gfx.props["title"], "Old");
+                assert_eq!(gfx.props["theme"]["bg"], "#1A0E0E");
+                assert_eq!(gfx.props["theme"]["ink"], "#F7F5EF");
+                assert_eq!(gfx.props["badge"], "NEW");
+            }
+            other => panic!("expected Gfx clip, got {other:?}"),
+        }
+
+        // Single undo reverts the entire gfx.update_clip in one step
+        let undone = backend.undo(&pid).await.unwrap();
+        let g1_undone = undone.tracks.iter().find(|t| t.id == "g1").unwrap();
+        assert_eq!(g1_undone.clips[0].label, "Hero Card");
+    }
+
+    #[tokio::test]
+    async fn captions_update_clip_validates_kind_presets_and_word_timings() {
+        let project = Project::new_default("cap_update_test", AspectPreset::Vertical9x16);
+        let pid = project.id.clone();
+        let mut engine = ProjectEngine::new(project);
+        let meta = CommandMeta::default();
+        let cap_clip = Clip {
+            id: "cap-1".into(),
+            label: "Hello world".into(),
+            start_sec: 1.0,
+            duration_sec: 2.0,
+            source_in_sec: 0.0,
+            transform: Transform2D::default(),
+            audio: AudioSettings::default(),
+            payload: ClipKind::Caption {
+                caption: CaptionBlock {
+                    words: vec![
+                        CaptionWord {
+                            text: "Hello".into(),
+                            start_sec: 1.0,
+                            end_sec: 1.7,
+                        },
+                        CaptionWord {
+                            text: "world".into(),
+                            start_sec: 1.7,
+                            end_sec: 2.8,
+                        },
+                    ],
+                    preset: CaptionPreset::Minimal,
+                    font_family: "Sora".into(),
+                    highlight_color: "#F7B733".into(),
+                },
+            },
+        };
+        engine
+            .apply(
+                TimelineCommand::PlaceClip {
+                    track_id: "t1".into(),
+                    clip: cap_clip,
+                },
+                meta.clone(),
+            )
+            .unwrap();
+        let backend = ExecMockBackend {
+            engine: RwLock::new(engine),
+            keyframes: Vec::new(),
+            assets: Vec::new(),
+        };
+
+        // Rejects unknown / non-caption clip
+        assert!(
+            execute_tool(
+                &backend,
+                "captions.update_clip",
+                json!({ "project_id": pid, "clip_id": "missing", "preset": "karaoke" }),
+                meta.clone(),
+            )
+            .await
+            .is_err()
+        );
+
+        // All four presets parse cleanly, and same word count preserves timings
+        for preset in ["neon_glow", "mono_caps", "karaoke", "minimal"] {
+            execute_tool(
+                &backend,
+                "captions.update_clip",
+                json!({
+                    "project_id": pid,
+                    "clip_id": "cap-1",
+                    "preset": preset,
+                    "text": "Hi there"
+                }),
+                meta.clone(),
+            )
+            .await
+            .unwrap();
+        }
+        let after_same = backend.get_project(&pid).await.unwrap();
+        let t1 = after_same.tracks.iter().find(|t| t.id == "t1").unwrap();
+        if let ClipKind::Caption { caption } = &t1.clips[0].payload {
+            assert_eq!(caption.preset, CaptionPreset::Minimal);
+            assert_eq!(caption.words.len(), 2);
+            assert_eq!(
+                (caption.words[0].start_sec, caption.words[0].end_sec),
+                (1.0, 1.7)
+            );
+            assert_eq!(
+                (caption.words[1].start_sec, caption.words[1].end_sec),
+                (1.7, 2.8)
+            );
+        } else {
+            panic!("expected caption clip");
+        }
+
+        // Different word count spans the original spoken range [1.0, 2.8]
+        execute_tool(
+            &backend,
+            "captions.update_clip",
+            json!({
+                "project_id": pid,
+                "clip_id": "cap-1",
+                "text": "One two three four"
+            }),
+            meta,
+        )
+        .await
+        .unwrap();
+        let after_diff = backend.get_project(&pid).await.unwrap();
+        let t1_diff = after_diff.tracks.iter().find(|t| t.id == "t1").unwrap();
+        if let ClipKind::Caption { caption } = &t1_diff.clips[0].payload {
+            assert_eq!(caption.words.len(), 4);
+            assert!((caption.words[0].start_sec - 1.0).abs() < 1e-9);
+            assert!((caption.words[3].end_sec - 2.8).abs() < 1e-9);
+        } else {
+            panic!("expected caption clip");
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_atomicity_through_backend_apply_op_rolls_back_on_error() {
+        let project = Project::new_default("batch_atomic_test", AspectPreset::Vertical9x16);
+        let pid = project.id.clone();
+        let backend = ExecMockBackend {
+            engine: RwLock::new(ProjectEngine::new(project)),
+            keyframes: Vec::new(),
+            assets: Vec::new(),
+        };
+        let rev_before = backend.get_project(&pid).await.unwrap().revision;
+        let err = backend
+            .apply_op(
+                &pid,
+                TimelineCommand::Batch {
+                    commands: vec![
+                        TimelineCommand::PlaceGfx {
+                            track_id: "g1".into(),
+                            clip_id: "ok-clip".into(),
+                            label: "Valid".into(),
+                            start_sec: 0.0,
+                            duration_sec: 2.0,
+                            gfx: GfxInstance {
+                                asset_id: None,
+                                props: json!({}),
+                                inline_html: Some(
+                                    "<div data-start='0' data-duration='2'>Ok</div>".into(),
+                                ),
+                            },
+                        },
+                        TimelineCommand::DeleteClip {
+                            track_id: "g1".into(),
+                            clip_id: "does-not-exist".into(),
+                        },
+                    ],
+                    summary: Some("atomic rollback test".into()),
+                },
+                CommandMeta::default(),
+            )
+            .await;
+        assert!(err.is_err());
+        let after = backend.get_project(&pid).await.unwrap();
+        assert_eq!(after.revision, rev_before);
+        let g1 = after.tracks.iter().find(|t| t.id == "g1").unwrap();
+        assert!(
+            g1.clips.is_empty(),
+            "rolled-back batch must leave g1 untouched"
+        );
     }
 }

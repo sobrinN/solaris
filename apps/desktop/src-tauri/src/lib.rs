@@ -20,6 +20,7 @@ pub struct EngineConnectionInfo {
 struct DesktopServerState {
     workspace_dir: PathBuf,
     server: Mutex<Option<EmbeddedServerHandle>>,
+    selected_export_dir: Mutex<Option<PathBuf>>,
 }
 
 fn load_keychain_openrouter_key() -> Option<String> {
@@ -84,18 +85,82 @@ fn sanitize_download_filename(raw: &str) -> String {
 }
 
 #[tauri::command]
+async fn pick_export_folder(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, DesktopServerState>,
+) -> Result<Option<String>, String> {
+    let starting_dir = state
+        .selected_export_dir
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .filter(|p| p.is_dir())
+        .or_else(|| app.path().download_dir().ok())
+        .or_else(|| app.path().desktop_dir().ok());
+
+    let mut dialog = rfd::AsyncFileDialog::new().set_title("Choose Solaris Export Folder");
+    if let Some(dir) = starting_dir {
+        dialog = dialog.set_directory(dir);
+    }
+
+    let Some(handle) = dialog.pick_folder().await else {
+        return Ok(None);
+    };
+    let chosen = handle.path().to_path_buf();
+    let canon = std::fs::canonicalize(&chosen)
+        .map_err(|e| format!("selected export folder is not accessible: {e}"))?;
+    if !canon.is_dir() {
+        return Err("selected path is not a folder".to_string());
+    }
+    if let Ok(mut guard) = state.selected_export_dir.lock() {
+        *guard = Some(canon.clone());
+    }
+    Ok(Some(canon.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
 async fn save_export_file(
     app: tauri::AppHandle,
     state: tauri::State<'_, DesktopServerState>,
     output_path: String,
     suggested_name: Option<String>,
+    target_dir: Option<String>,
 ) -> Result<String, String> {
-    let exports_root = state.workspace_dir.join("exports");
-    let target_dir = app
-        .path()
-        .download_dir()
-        .or_else(|_| app.path().desktop_dir())
-        .map_err(|e| format!("failed to resolve Downloads directory: {e}"))?;
+    let workspace_dir = state.workspace_dir.clone();
+    let exports_root = workspace_dir.join("exports");
+    let selected_dir = state
+        .selected_export_dir
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+
+    let target_dir = match target_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(requested) => {
+            let canon_req = std::fs::canonicalize(requested)
+                .map_err(|e| format!("selected export folder unavailable: {e}"))?;
+            let authorized = selected_dir
+                .as_ref()
+                .is_some_and(|allowed| allowed == &canon_req);
+            if !authorized || !canon_req.is_dir() {
+                return Err(
+                    "requested export folder must be chosen via the folder picker".to_string(),
+                );
+            }
+            canon_req
+        }
+        None => match selected_dir.filter(|p| p.is_dir()) {
+            Some(dir) => dir,
+            None => app
+                .path()
+                .download_dir()
+                .or_else(|_| app.path().desktop_dir())
+                .map_err(|e| format!("failed to resolve Downloads directory: {e}"))?,
+        },
+    };
 
     tauri::async_runtime::spawn_blocking(move || {
         use std::fs::OpenOptions;
@@ -103,7 +168,14 @@ async fn save_export_file(
 
         let canon_exports = std::fs::canonicalize(&exports_root)
             .map_err(|e| format!("exports directory unavailable: {e}"))?;
-        let canon_src = std::fs::canonicalize(&output_path)
+        let raw_src = PathBuf::from(&output_path);
+        let src_candidate = if raw_src.is_absolute() {
+            raw_src
+        } else {
+            let joined = workspace_dir.join(&raw_src);
+            if joined.exists() { joined } else { raw_src }
+        };
+        let canon_src = std::fs::canonicalize(&src_candidate)
             .map_err(|e| format!("export output not found: {e}"))?;
         if !canon_src.starts_with(&canon_exports) || !canon_src.is_file() {
             return Err(
@@ -112,7 +184,7 @@ async fn save_export_file(
         }
 
         std::fs::create_dir_all(&target_dir)
-            .map_err(|e| format!("failed to prepare Downloads directory: {e}"))?;
+            .map_err(|e| format!("failed to prepare export folder: {e}"))?;
 
         let raw_name = suggested_name
             .as_deref()
@@ -125,9 +197,7 @@ async fn save_export_file(
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("solaris-export");
-        let ext = Path::new(&safe_name)
-            .extension()
-            .and_then(|e| e.to_str());
+        let ext = Path::new(&safe_name).extension().and_then(|e| e.to_str());
 
         let mut dest = target_dir.join(&safe_name);
         let mut dest_file = None;
@@ -188,7 +258,10 @@ async fn save_export_file(
         if let Err(e) = std::io::copy(&mut src_file, &mut out_file) {
             drop(out_file);
             let _ = std::fs::remove_file(&dest);
-            return Err(format!("failed to save export to '{}': {e}", dest.display()));
+            return Err(format!(
+                "failed to save export to '{}': {e}",
+                dest.display()
+            ));
         }
 
         Ok(dest.to_string_lossy().to_string())
@@ -208,10 +281,12 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .setup(move |app| {
-            let data_dir = app
+            let raw_data_dir = app
                 .path()
                 .app_data_dir()
                 .unwrap_or_else(|_| PathBuf::from(".solaris-data"));
+            let _ = std::fs::create_dir_all(&raw_data_dir);
+            let data_dir = std::fs::canonicalize(&raw_data_dir).unwrap_or(raw_data_dir);
 
             let keychain_key = load_keychain_openrouter_key();
             let config = ServerConfig {
@@ -238,6 +313,7 @@ pub fn run() {
             app.manage(DesktopServerState {
                 workspace_dir: data_dir,
                 server: Mutex::new(Some(server_handle)),
+                selected_export_dir: Mutex::new(None),
             });
 
             // Create the main window AFTER embedded server + managed state are ready (eliminates startup race)
@@ -250,6 +326,7 @@ pub fn run() {
             get_engine_connection,
             save_openrouter_key,
             delete_openrouter_key,
+            pick_export_folder,
             save_export_file
         ])
         .build(tauri::generate_context!())

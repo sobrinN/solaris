@@ -28,7 +28,7 @@ pub use skills::{
     list_skill_resources, list_skills, skills_for_role,
 };
 pub use stt::transcribe_audio_openrouter;
-pub use swarm::{SwarmRunRequest, run_qa_pass, run_swarm};
+pub use swarm::{SwarmRunRequest, prepare_swarm_request, run_qa_pass, run_swarm};
 pub use tools::{
     ToolAnnotations, ToolOutput, ToolSpec, all_tools, execute_tool, is_mutating_tool,
     tools_for_role,

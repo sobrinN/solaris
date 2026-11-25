@@ -3,10 +3,7 @@ use serde_json::json;
 
 use crate::commands::{AgentRole, CommandMeta, TimelineCommand};
 use crate::engine::ProjectEngine;
-use crate::model::{
-    AspectPreset, AudioSettings, CaptionBlock, CaptionPreset, CaptionWord, Clip, ClipKind,
-    ColorGrade, GfxInstance, Project, SavedCodeAsset, Transform2D,
-};
+use crate::model::{AspectPreset, ColorGrade, GfxInstance, Project, SavedCodeAsset};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectTemplateInfo {
@@ -26,9 +23,9 @@ pub fn builtin_templates() -> Vec<ProjectTemplateInfo> {
             id: "talking-head-short".to_string(),
             name: "Talking-Head Short".to_string(),
             category: "short_form".to_string(),
-            description: "9:16 vertical reel scaffold with 2.5s hook title, Neon Glow captions, mid-video stat card, and Rec.709 punchy grade.".to_string(),
+            description: "9:16 vertical reel scaffold with 2.5s hook title, mid-video stat card, and Rec.709 punchy grade (captions come only from transcribed speech).".to_string(),
             aspect_preset: AspectPreset::Vertical9x16,
-            recommended_prompt: "Cut silences with 0.12s breath pad, add a 1.08x hook zoom, Neon Glow captions, and -14 LUFS ducked mix.".to_string(),
+            recommended_prompt: "Cut silences with 0.12s breath pad, add a 1.08x hook zoom, synced captions from spoken audio, and -14 LUFS ducked mix.".to_string(),
             default_duration_sec: 18.0,
             tags: vec![
                 "9:16".to_string(),
@@ -41,7 +38,7 @@ pub fn builtin_templates() -> Vec<ProjectTemplateInfo> {
             id: "faceless-explainer".to_string(),
             name: "Faceless Explainer".to_string(),
             category: "explainer".to_string(),
-            description: "16:9 widescreen explainer scaffold with 3-chapter GFX beats, Minimal captions, lower-third callout, and cinematic contrast.".to_string(),
+            description: "16:9 widescreen explainer scaffold with 3-chapter GFX beats, lower-third callout, and cinematic contrast (captions come only from transcribed voiceover).".to_string(),
             aspect_preset: AspectPreset::Landscape16x9,
             recommended_prompt: "Assemble voiceover on A1, cover with Ken Burns B-roll on V2, place 3-chapter GFX cards, and normalize to -14 LUFS.".to_string(),
             default_duration_sec: 24.0,
@@ -134,45 +131,6 @@ fn build_talking_head_commands(assets: &[SavedCodeAsset]) -> Vec<TimelineCommand
             track_id: None,
             clip_id: None,
         },
-        TimelineCommand::PlaceClip {
-            track_id: "t1".to_string(),
-            clip: Clip {
-                id: "tpl-cap-hook".to_string(),
-                label: "Hook Caption".to_string(),
-                start_sec: 0.25,
-                duration_sec: 2.2,
-                source_in_sec: 0.0,
-                transform: Transform2D {
-                    y: 0.16,
-                    ..Transform2D::default()
-                },
-                audio: AudioSettings::default(),
-                payload: ClipKind::Caption {
-                    caption: CaptionBlock {
-                        words: vec![
-                            CaptionWord {
-                                text: "STOP".to_string(),
-                                start_sec: 0.25,
-                                end_sec: 0.9,
-                            },
-                            CaptionWord {
-                                text: "SCROLLING".to_string(),
-                                start_sec: 0.9,
-                                end_sec: 1.6,
-                            },
-                            CaptionWord {
-                                text: "NOW".to_string(),
-                                start_sec: 1.6,
-                                end_sec: 2.45,
-                            },
-                        ],
-                        preset: CaptionPreset::NeonGlow,
-                        font_family: "Sora".to_string(),
-                        highlight_color: "#F7B733".to_string(),
-                    },
-                },
-            },
-        },
         TimelineCommand::PlaceGfx {
             track_id: "g1".to_string(),
             clip_id: "tpl-gfx-hook".to_string(),
@@ -223,45 +181,6 @@ fn build_faceless_explainer_commands(assets: &[SavedCodeAsset]) -> Vec<TimelineC
             },
             track_id: None,
             clip_id: None,
-        },
-        TimelineCommand::PlaceClip {
-            track_id: "t1".to_string(),
-            clip: Clip {
-                id: "tpl-exp-cap-1".to_string(),
-                label: "Opening Beat".to_string(),
-                start_sec: 0.4,
-                duration_sec: 2.6,
-                source_in_sec: 0.0,
-                transform: Transform2D {
-                    y: 0.24,
-                    ..Transform2D::default()
-                },
-                audio: AudioSettings::default(),
-                payload: ClipKind::Caption {
-                    caption: CaptionBlock {
-                        words: vec![
-                            CaptionWord {
-                                text: "HOW".to_string(),
-                                start_sec: 0.4,
-                                end_sec: 1.0,
-                            },
-                            CaptionWord {
-                                text: "IT".to_string(),
-                                start_sec: 1.0,
-                                end_sec: 1.6,
-                            },
-                            CaptionWord {
-                                text: "WORKS".to_string(),
-                                start_sec: 1.6,
-                                end_sec: 3.0,
-                            },
-                        ],
-                        preset: CaptionPreset::Minimal,
-                        font_family: "Sora".to_string(),
-                        highlight_color: "#F05A00".to_string(),
-                    },
-                },
-            },
         },
         TimelineCommand::PlaceGfx {
             track_id: "g1".to_string(),
@@ -336,13 +255,14 @@ mod tests {
         assert_eq!(short.canvas.aspect_preset, AspectPreset::Vertical9x16);
         assert!(short.revision >= 4);
         assert!(
-            !short
+            short
                 .tracks
                 .iter()
                 .find(|t| t.id == "t1")
                 .unwrap()
                 .clips
-                .is_empty()
+                .is_empty(),
+            "templates must not pre-populate captions without narrated audio"
         );
         assert!(
             !short
@@ -364,6 +284,16 @@ mod tests {
         )
         .expect("faceless-explainer instantiates");
         assert_eq!(explainer.canvas.aspect_preset, AspectPreset::Square1x1);
+        assert!(
+            explainer
+                .tracks
+                .iter()
+                .find(|t| t.id == "t1")
+                .unwrap()
+                .clips
+                .is_empty(),
+            "explainer template must not pre-populate captions without narrated audio"
+        );
         assert_eq!(
             explainer
                 .tracks

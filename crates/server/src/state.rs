@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -32,6 +32,35 @@ const MAX_LOG_DETAILS_CHARS: usize = 12_000;
 pub const MAX_GFX_SANDBOX_BYTES: usize = 512 * 1024;
 const DEFAULT_MAX_CONCURRENT_EXPORTS: usize = 2;
 const AGENT_CREDENTIALS_FILE: &str = "agent_credentials.json";
+const DISMISSED_STARTERS_FILE: &str = ".dismissed_starters.json";
+const MAX_BATCH_COMMANDS: usize = 256;
+
+fn load_dismissed_starters(assets_dir: &Path) -> (HashSet<String>, Option<String>) {
+    let path = assets_dir.join(DISMISSED_STARTERS_FILE);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(_) => return (HashSet::new(), None),
+    };
+    match serde_json::from_str::<Vec<String>>(&raw) {
+        Ok(ids) => (ids.into_iter().collect(), None),
+        Err(err) => {
+            let unix = Utc::now().timestamp();
+            let backup_name = format!(".dismissed_starters.corrupt-{unix}.json");
+            let backup_path = assets_dir.join(&backup_name);
+            let moved = fs::rename(&path, &backup_path).is_ok();
+            let warning = if moved {
+                format!(
+                    "Corrupt {DISMISSED_STARTERS_FILE} moved to {backup_name}; continuing with empty dismissed-starters list: {err}"
+                )
+            } else {
+                format!(
+                    "Corrupt {DISMISSED_STARTERS_FILE} could not be renamed to {backup_name}; continuing with empty dismissed-starters list: {err}"
+                )
+            };
+            (HashSet::new(), Some(warning))
+        }
+    }
+}
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct PersistedAgentCredentials {
@@ -114,6 +143,8 @@ pub struct AppStateInner {
     pub projects: RwLock<HashMap<String, ProjectEngine>>,
     pub brands: RwLock<HashMap<String, BrandPlaybook>>,
     pub assets: RwLock<HashMap<String, SavedCodeAsset>>,
+    /// Built-in starter GFX IDs the user deleted; persisted so restarts never resurrect them.
+    pub dismissed_starters: RwLock<HashSet<String>>,
     pub export_jobs: RwLock<HashMap<String, ExportJobStatus>>,
     pub swarm_runs: RwLock<HashMap<String, SwarmRunStatus>>,
     pub swarm_cancels: RwLock<HashMap<String, CancellationToken>>,
@@ -142,12 +173,15 @@ pub struct AppStateInner {
 
 impl AppState {
     pub fn initialize(config: &ServerConfig) -> std::io::Result<Self> {
-        let projects_dir = config.workspace_dir.join("projects");
-        let brands_dir = config.workspace_dir.join("brands");
-        let assets_dir = config.workspace_dir.join("assets");
-        let uploads_dir = config.workspace_dir.join("uploads");
-        let brands_media_dir = config.workspace_dir.join("brands_media");
-        let exports_dir = config.workspace_dir.join("exports");
+        fs::create_dir_all(&config.workspace_dir)?;
+        let workspace_dir = fs::canonicalize(&config.workspace_dir)
+            .unwrap_or_else(|_| config.workspace_dir.clone());
+        let projects_dir = workspace_dir.join("projects");
+        let brands_dir = workspace_dir.join("brands");
+        let assets_dir = workspace_dir.join("assets");
+        let uploads_dir = workspace_dir.join("uploads");
+        let brands_media_dir = workspace_dir.join("brands_media");
+        let exports_dir = workspace_dir.join("exports");
         fs::create_dir_all(&projects_dir)?;
         fs::create_dir_all(&brands_dir)?;
         fs::create_dir_all(&assets_dir)?;
@@ -211,7 +245,11 @@ impl AppState {
         if let Ok(entries) = fs::read_dir(&assets_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                let is_hidden = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with('.'));
+                if !is_hidden && path.extension().and_then(|e| e.to_str()) == Some("json") {
                     match fs::read_to_string(&path)
                         .map_err(|e| e.to_string())
                         .and_then(|raw| {
@@ -230,8 +268,9 @@ impl AppState {
                 }
             }
         }
+        let (dismissed_starters, dismissed_starters_warning) = load_dismissed_starters(&assets_dir);
         for starter in starter_code_assets() {
-            if !assets.contains_key(&starter.id) {
+            if !assets.contains_key(&starter.id) && !dismissed_starters.contains(&starter.id) {
                 let _ =
                     save_json_atomic(&starter, &assets_dir.join(format!("{}.json", starter.id)));
                 assets.insert(starter.id.clone(), starter);
@@ -244,16 +283,16 @@ impl AppState {
         let storage: Arc<dyn AssetStorage> = match config.s3_config.clone() {
             Some(s3_cfg) => Arc::new(S3Storage::new(
                 s3_cfg,
-                &config.workspace_dir,
+                &workspace_dir,
                 config.allow_external_media_reads,
             )),
             None => Arc::new(LocalFsStorage::new(
-                &config.workspace_dir,
+                &workspace_dir,
                 config.allow_external_media_reads,
             )),
         };
         let mut openrouter_cfg = OpenRouterConfig::from_env();
-        let persisted_creds = load_persisted_credentials(&config.workspace_dir);
+        let persisted_creds = load_persisted_credentials(&workspace_dir);
         if openrouter_cfg.api_key.is_none()
             && let Some(key) = persisted_creds
                 .openrouter_api_key
@@ -290,12 +329,13 @@ impl AppState {
             .map(|n| n.min(16))
             .unwrap_or(DEFAULT_MAX_CONCURRENT_EXPORTS);
 
-        Ok(Self {
+        let state = Self {
             inner: Arc::new(AppStateInner {
-                workspace_dir: config.workspace_dir.clone(),
+                workspace_dir,
                 projects: RwLock::new(projects),
                 brands: RwLock::new(brands),
                 assets: RwLock::new(assets),
+                dismissed_starters: RwLock::new(dismissed_starters),
                 export_jobs: RwLock::new(HashMap::new()),
                 swarm_runs: RwLock::new(HashMap::new()),
                 swarm_cancels: RwLock::new(HashMap::new()),
@@ -324,7 +364,21 @@ impl AppState {
                     .as_ref()
                     .and_then(|p| fs::canonicalize(p).ok()),
             }),
-        })
+        };
+        if let Some(warning) = dismissed_starters_warning {
+            state.push_log(LogEntry {
+                id: Uuid::new_v4().to_string(),
+                timestamp: Utc::now(),
+                level: LogLevel::Warn,
+                source: "assets".to_string(),
+                project_id: None,
+                run_id: None,
+                agent_id: None,
+                message: warning,
+                details: None,
+            });
+        }
+        Ok(state)
     }
 
     pub async fn resolve_readable_path_async(
@@ -395,6 +449,142 @@ impl AppState {
 
     pub fn emit(&self, event: EngineEvent) {
         let _ = self.inner.events_tx.send(EngineEventEnvelope::now(event));
+    }
+
+    pub fn emit_assets_changed(&self, action: &str, asset_id: Option<&str>) {
+        self.emit(EngineEvent::AssetsChanged {
+            action: action.to_string(),
+            asset_id: asset_id.map(str::to_string),
+        });
+    }
+
+    fn assets_dir(&self) -> PathBuf {
+        self.inner.workspace_dir.join("assets")
+    }
+
+    async fn persist_dismissed_starters(&self) -> Result<(), String> {
+        let mut ids: Vec<String> = self
+            .inner
+            .dismissed_starters
+            .read()
+            .await
+            .iter()
+            .cloned()
+            .collect();
+        ids.sort();
+        save_json_atomic_async(ids, self.assets_dir().join(DISMISSED_STARTERS_FILE)).await
+    }
+
+    /// Must be called while holding `asset_persist_lock`. Re-saving a dismissed
+    /// starter (e.g. via import or the AI) un-dismisses it.
+    pub async fn undismiss_starter_locked(&self, asset_id: &str) -> Result<(), String> {
+        let removed = self.inner.dismissed_starters.write().await.remove(asset_id);
+        if removed {
+            self.persist_dismissed_starters().await?;
+        }
+        Ok(())
+    }
+
+    /// Deletes a saved GFX asset from disk + memory. Existing timeline clips keep
+    /// their `inline_html` copy so playback/export never breaks.
+    pub async fn delete_asset(&self, asset_id: &str) -> Result<(), (StatusCode, String)> {
+        validate_safe_id(asset_id)?;
+        let _persist = self.inner.asset_persist_lock.lock().await;
+        if !self.inner.assets.read().await.contains_key(asset_id) {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("GFX asset '{asset_id}' not found"),
+            ));
+        }
+        let is_starter = starter_code_assets().iter().any(|s| s.id == asset_id);
+        let newly_dismissed = if is_starter {
+            let mut candidate: Vec<String> = self
+                .inner
+                .dismissed_starters
+                .read()
+                .await
+                .iter()
+                .cloned()
+                .collect();
+            let inserted = !candidate.iter().any(|id| id == asset_id);
+            if inserted {
+                candidate.push(asset_id.to_string());
+            }
+            candidate.sort();
+            save_json_atomic_async(candidate, self.assets_dir().join(DISMISSED_STARTERS_FILE))
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            if inserted {
+                self.inner
+                    .dismissed_starters
+                    .write()
+                    .await
+                    .insert(asset_id.to_string());
+            }
+            inserted
+        } else {
+            false
+        };
+
+        let path = self.assets_dir().join(format!("{asset_id}.json"));
+        let remove_res = tokio::task::spawn_blocking(move || match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|inner| inner);
+        if let Err(err) = remove_res {
+            if newly_dismissed {
+                self.inner.dismissed_starters.write().await.remove(asset_id);
+                let _ = self.persist_dismissed_starters().await;
+            }
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, err));
+        }
+
+        self.inner.assets.write().await.remove(asset_id);
+        drop(_persist);
+        self.emit_assets_changed("deleted", Some(asset_id));
+        Ok(())
+    }
+
+    /// Clears dismissed starters and re-seeds every missing built-in GFX.
+    pub async fn restore_starter_assets(
+        &self,
+    ) -> Result<(usize, Vec<SavedCodeAsset>), (StatusCode, String)> {
+        let _persist = self.inner.asset_persist_lock.lock().await;
+        let missing: Vec<SavedCodeAsset> = {
+            let guard = self.inner.assets.read().await;
+            starter_code_assets()
+                .into_iter()
+                .filter(|s| !guard.contains_key(&s.id))
+                .collect()
+        };
+        for starter in &missing {
+            save_json_atomic_async(
+                starter.clone(),
+                self.assets_dir().join(format!("{}.json", starter.id)),
+            )
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        }
+        self.inner.dismissed_starters.write().await.clear();
+        self.persist_dismissed_starters()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        let list = {
+            let mut guard = self.inner.assets.write().await;
+            for starter in &missing {
+                guard.insert(starter.id.clone(), starter.clone());
+            }
+            let mut list: Vec<SavedCodeAsset> = guard.values().cloned().collect();
+            list.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+            list
+        };
+        drop(_persist);
+        self.emit_assets_changed("restored", None);
+        Ok((missing.len(), list))
     }
 
     pub fn push_log(&self, mut entry: LogEntry) {
@@ -501,6 +691,30 @@ impl AppState {
         &self,
         cmd: &TimelineCommand,
     ) -> Result<(), (StatusCode, String)> {
+        if let TimelineCommand::Batch { commands, .. } = cmd {
+            if commands.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "batch command must contain at least one sub-command".to_string(),
+                ));
+            }
+            if commands.len() > MAX_BATCH_COMMANDS {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("batch command exceeds maximum of {MAX_BATCH_COMMANDS} sub-commands"),
+                ));
+            }
+            for sub in commands {
+                if matches!(sub, TimelineCommand::Batch { .. }) {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "nested batch commands are not allowed".to_string(),
+                    ));
+                }
+                Box::pin(self.validate_timeline_command(sub)).await?;
+            }
+            return Ok(());
+        }
         match cmd {
             TimelineCommand::AddMedia { asset } => {
                 if !asset.path.trim().is_empty() {
@@ -1493,6 +1707,144 @@ mod tests {
             .await
             .expect("clear model too");
         assert!(!cred_path.exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_dismissed_starters_is_quarantined_and_logged() {
+        let dir =
+            std::env::temp_dir().join(format!("solaris_corrupt_dismissed_{}", Uuid::new_v4()));
+        let assets_dir = dir.join("assets");
+        fs::create_dir_all(&assets_dir).expect("create assets dir");
+        fs::write(assets_dir.join(DISMISSED_STARTERS_FILE), "{not valid json").expect("write bad");
+
+        let state = AppState::initialize(&ServerConfig {
+            workspace_dir: dir.clone(),
+            ..ServerConfig::default()
+        })
+        .expect("init state");
+
+        assert!(!assets_dir.join(DISMISSED_STARTERS_FILE).exists());
+        let has_backup = fs::read_dir(&assets_dir)
+            .expect("read assets dir")
+            .flatten()
+            .any(|e| {
+                e.file_name().to_str().is_some_and(|n| {
+                    n.starts_with(".dismissed_starters.corrupt-") && n.ends_with(".json")
+                })
+            });
+        assert!(
+            has_backup,
+            "corrupt dismissed starters file must be moved aside"
+        );
+        assert!(
+            state
+                .list_logs(None, Some(LogLevel::Warn), 10)
+                .iter()
+                .any(|l| {
+                    l.source == "assets" && l.message.contains("Corrupt .dismissed_starters.json")
+                })
+        );
+        assert_eq!(
+            state.inner.assets.blocking_read().len(),
+            starter_code_assets().len()
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn delete_asset_persists_dismissal_before_removal_and_emits_events() {
+        let dir = std::env::temp_dir().join(format!("solaris_asset_events_{}", Uuid::new_v4()));
+        let state = AppState::initialize(&ServerConfig {
+            workspace_dir: dir.clone(),
+            ..ServerConfig::default()
+        })
+        .expect("init state");
+        let mut rx = state.inner.events_tx.subscribe();
+
+        state
+            .delete_asset("stat-card-solar")
+            .await
+            .expect("delete starter");
+        let ev = rx.recv().await.expect("deleted event");
+        assert!(matches!(
+            ev.payload,
+            EngineEvent::AssetsChanged { ref action, ref asset_id }
+            if action == "deleted" && asset_id.as_deref() == Some("stat-card-solar")
+        ));
+        assert!(
+            !state
+                .inner
+                .assets
+                .read()
+                .await
+                .contains_key("stat-card-solar")
+        );
+        assert!(
+            state
+                .inner
+                .dismissed_starters
+                .read()
+                .await
+                .contains("stat-card-solar")
+        );
+
+        // Restarting keeps the starter deleted.
+        let restarted = AppState::initialize(&ServerConfig {
+            workspace_dir: dir.clone(),
+            ..ServerConfig::default()
+        })
+        .expect("restarted state");
+        assert!(
+            !restarted
+                .inner
+                .assets
+                .read()
+                .await
+                .contains_key("stat-card-solar")
+        );
+
+        // Restoring re-seeds it and emits restored.
+        let mut rx2 = restarted.inner.events_tx.subscribe();
+        let (restored_count, _) = restarted.restore_starter_assets().await.expect("restore");
+        assert_eq!(restored_count, 1);
+        let ev2 = rx2.recv().await.expect("restored event");
+        assert!(matches!(
+            ev2.payload,
+            EngineEvent::AssetsChanged { ref action, asset_id: None }
+            if action == "restored"
+        ));
+        assert!(
+            restarted
+                .inner
+                .assets
+                .read()
+                .await
+                .contains_key("stat-card-solar")
+        );
+
+        // Re-saving a dismissed starter via undismiss_starter_locked un-dismisses it.
+        restarted
+            .delete_asset("stat-card-solar")
+            .await
+            .expect("delete again");
+        {
+            let _lock = restarted.inner.asset_persist_lock.lock().await;
+            restarted
+                .undismiss_starter_locked("stat-card-solar")
+                .await
+                .expect("undismiss");
+        }
+        assert!(
+            !restarted
+                .inner
+                .dismissed_starters
+                .read()
+                .await
+                .contains("stat-card-solar")
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::backend::SolarisBackend;
 use crate::error::AgentError;
+use crate::swarm::speech::narrated_transcript_present;
 use crate::swarm::{DirectorPlan, is_voice_hint};
 use crate::tools::execute_tool;
 
@@ -461,17 +462,13 @@ pub(crate) async fn execute_deterministic_specialist(
             if !t1_empty {
                 return 0;
             }
-            let has_transcript = live_project
-                .media_pool
-                .iter()
-                .any(|m| !m.intelligence.transcript.is_empty());
             let meta = CommandMeta {
                 agent_id: "caps-01".to_string(),
                 role,
                 reason: Some("local captions".to_string()),
             };
-            if has_transcript {
-                if execute_tool(
+            if narrated_transcript_present(&live_project)
+                && execute_tool(
                     backend.as_ref(),
                     "captions.generate_from_transcript",
                     json!({ "project_id": project.id, "preset": "neon_glow", "words_per_burst": 3 }),
@@ -479,30 +476,9 @@ pub(crate) async fn execute_deterministic_specialist(
                 )
                 .await
                 .is_ok()
-                {
-                    ops_counter.fetch_add(1, Ordering::Relaxed);
-                    committed += 1;
-                }
-            } else if !has_visual_media {
-                let segments = build_programmatic_caption_segments(prompt, plan, target_dur);
-                if execute_tool(
-                    backend.as_ref(),
-                    "captions.place_script",
-                    json!({
-                        "project_id": project.id,
-                        "preset": "neon_glow",
-                        "words_per_burst": 3,
-                        "y": 0.24,
-                        "segments": segments,
-                    }),
-                    meta,
-                )
-                .await
-                .is_ok()
-                {
-                    ops_counter.fetch_add(1, Ordering::Relaxed);
-                    committed += 1;
-                }
+            {
+                ops_counter.fetch_add(1, Ordering::Relaxed);
+                committed += 1;
             }
         }
         AgentRole::Gfx => {
@@ -745,60 +721,6 @@ fn compute_contiguous_grid(count: usize, total_dur: f64) -> Vec<(f64, f64)> {
             };
             let dur = ((next_start - start).max(0.1) * 100.0).round() / 100.0;
             (start, dur)
-        })
-        .collect()
-}
-
-fn build_programmatic_caption_segments(
-    prompt: &str,
-    plan: &DirectorPlan,
-    total_dur: f64,
-) -> Vec<serde_json::Value> {
-    let clean_topic = extract_topic_phrase(prompt);
-    let lines: Vec<String> = if !plan.scenes.is_empty() {
-        plan.scenes
-            .iter()
-            .take(7)
-            .enumerate()
-            .map(|(i, s)| {
-                let narration = s.narration.trim();
-                if !narration.is_empty() {
-                    return narration.to_string();
-                }
-                let title = s.title.trim();
-                let brief = s.visual_brief.trim();
-                if !title.is_empty() && !brief.is_empty() {
-                    truncate_chars(&format!("{title}: {brief}"), 96)
-                } else if !title.is_empty() {
-                    title.to_string()
-                } else if !brief.is_empty() {
-                    truncate_chars(brief, 96)
-                } else {
-                    format!("Part {} of {clean_topic}.", i + 1)
-                }
-            })
-            .collect()
-    } else {
-        vec![
-            format!("Let's unpack {clean_topic} in seconds."),
-            "First, look at why this matters right now.".to_string(),
-            "Strip away the noise to find the core idea.".to_string(),
-            "See how each piece connects in motion.".to_string(),
-            "The result is clearer, faster momentum.".to_string(),
-            format!("Ready to put {clean_topic} into action?"),
-        ]
-    };
-
-    let grid = compute_contiguous_grid(lines.len(), total_dur);
-    lines
-        .into_iter()
-        .zip(grid)
-        .map(|(text, (start, dur))| {
-            json!({
-                "text": text,
-                "start_sec": start,
-                "duration_sec": dur,
-            })
         })
         .collect()
 }
@@ -1079,7 +1001,7 @@ mod tests {
     }
 
     #[test]
-    fn programmatic_scenes_and_captions_have_zero_overlaps_and_valid_gfx_lint() {
+    fn programmatic_scenes_have_zero_overlaps_and_valid_gfx_lint() {
         let brand = BrandPlaybook::solaris_default();
         let empty_plan = DirectorPlan::default();
         let long_prompt = "Explain https://example.com/very-long-unbroken-token-that-should-be-capped-cleanly in motion";
@@ -1087,9 +1009,7 @@ mod tests {
 
         for total_dur in [4.0, 10.0, 16.0, 20.0, 24.0] {
             let scenes = build_programmatic_scenes(long_prompt, &empty_plan, &brand, total_dur);
-            let caps = build_programmatic_caption_segments(long_prompt, &empty_plan, total_dur);
             assert_eq!(scenes.len(), 6);
-            assert_eq!(caps.len(), 6);
 
             for (idx, pair) in scenes.windows(2).enumerate() {
                 let prev_end = pair[0].1 + pair[0].2;
@@ -1105,15 +1025,6 @@ mod tests {
                 "final scene end {} should match total_dur {total_dur}",
                 last.1 + last.2
             );
-
-            // Caption beats align with scene grid with zero overlap
-            for (scene, cap) in scenes.iter().zip(caps.iter()) {
-                let cap_start = cap["start_sec"].as_f64().unwrap();
-                let cap_dur = cap["duration_sec"].as_f64().unwrap();
-                assert!((cap_start - scene.1).abs() < 1e-9);
-                assert!((cap_dur - scene.2).abs() < 1e-9);
-                assert!(cap_dur > 0.05);
-            }
 
             // Every generated HTML scene passes lint_gfx_html cleanly with zero warnings
             for (label, _, _, html) in &scenes {
@@ -1153,12 +1064,9 @@ mod tests {
             ..DirectorPlan::default()
         };
         let planned_scenes = build_programmatic_scenes("Solar energy", &custom_plan, &brand, 12.0);
-        let planned_caps = build_programmatic_caption_segments("Solar energy", &custom_plan, 12.0);
         assert_eq!(planned_scenes.len(), 2);
         assert!(planned_scenes[0].3.contains("SOLAR ORBIT"));
         assert!(planned_scenes[1].3.contains("CLEAN ENERGY"));
-        assert_eq!(planned_caps[0]["text"], "Sunlight drives every orbit.");
-        assert_eq!(planned_caps[1]["text"], "Capture more watts every hour.");
         for (_, _, _, html) in &planned_scenes {
             assert!(lint_gfx_html(html).valid);
         }

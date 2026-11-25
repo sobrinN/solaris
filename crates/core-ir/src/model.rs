@@ -511,6 +511,8 @@ pub struct SwarmRunStatus {
     pub error: Option<String>,
     #[serde(default)]
     pub qa_report: Option<QaReport>,
+    #[serde(default)]
+    pub refinement_summary: Option<String>,
     pub started_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

@@ -791,11 +791,16 @@ impl SolarisBackend for AppState {
             save_json_atomic_async(asset.clone(), path)
                 .await
                 .map_err(AgentError::Backend)?;
+            self.undismiss_starter_locked(&asset.id)
+                .await
+                .map_err(AgentError::Backend)?;
             self.inner
                 .assets
                 .write()
                 .await
                 .insert(asset.id.clone(), asset.clone());
+            drop(_persist);
+            self.emit_assets_changed("saved", Some(&asset.id));
             Ok(asset)
         })
     }

@@ -7,8 +7,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use solaris_agent_runtime::{
     CreativePlan, CreativePlanInput, ModelRecommendation, ModelRoleKind, SkillDoc, SolarisBackend,
-    SwarmRunRequest, build_local_creative_plan, generate_creative_plan, list_skills, run_qa_pass,
-    run_swarm,
+    SwarmRunRequest, build_local_creative_plan, generate_creative_plan, list_skills,
+    prepare_swarm_request, run_qa_pass, run_swarm,
 };
 use solaris_core_ir::{
     AspectPreset, BrandPlaybook, EngineEvent, LogEntry, LogLevel, MediaAsset, QaReport,
@@ -310,14 +310,19 @@ pub async fn generate_plan(
 pub async fn start_swarm_run(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-    Json(req): Json<SwarmRunRequest>,
+    Json(mut req): Json<SwarmRunRequest>,
 ) -> Result<(StatusCode, Json<SwarmRunStatus>), (StatusCode, String)> {
     validate_safe_id(&id)?;
+    for clip_id in &req.selected_clip_ids {
+        validate_safe_id(clip_id)?;
+    }
     {
         let guard = state.inner.projects.read().await;
-        if !guard.contains_key(&id) {
+        let Some(engine) = guard.get(&id) else {
             return Err((StatusCode::NOT_FOUND, format!("project '{id}' not found")));
-        }
+        };
+        prepare_swarm_request(&mut req, engine.project())
+            .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
     }
 
     let run_id = Uuid::new_v4().to_string();
@@ -334,6 +339,7 @@ pub async fn start_swarm_run(
         summary: None,
         error: None,
         qa_report: None,
+        refinement_summary: None,
         started_at: now,
         updated_at: now,
     };
@@ -607,4 +613,195 @@ pub async fn clear_logs(
     }
     state.clear_logs(query.project_id.as_deref());
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request as HttpRequest, header};
+    use serde_json::Value;
+    use solaris_core_ir::{AudioSettings, Clip, ClipKind, Project, ProjectEngine, Transform2D};
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::routes::build_router;
+    use crate::state::ServerConfig;
+
+    const REFINE_NEEDS_MODEL: &str =
+        "Refinement needs an AI model. Add an OpenRouter key in AI Settings.";
+
+    fn test_state(name: &str) -> (AppState, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("solaris_agent_route_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AppState::initialize(&ServerConfig {
+            workspace_dir: dir.clone(),
+            ..ServerConfig::default()
+        })
+        .expect("init state");
+        state.inner.openrouter.set_api_key(None);
+        (state, dir)
+    }
+
+    async fn insert_project(state: &AppState, with_clip: bool) -> String {
+        let mut project = Project::new_default("swarm-route", AspectPreset::Vertical9x16);
+        if with_clip {
+            let track = project
+                .tracks
+                .iter_mut()
+                .find(|t| t.id == "v1")
+                .expect("v1 track");
+            track.clips.push(Clip {
+                id: "hook-1".to_string(),
+                label: "Hook".to_string(),
+                start_sec: 0.0,
+                duration_sec: 3.0,
+                source_in_sec: 0.0,
+                transform: Transform2D::default(),
+                audio: AudioSettings::default(),
+                payload: ClipKind::Media {
+                    media_id: "m1".to_string(),
+                    ken_burns: false,
+                },
+            });
+        }
+        let id = project.id.clone();
+        state
+            .inner
+            .projects
+            .write()
+            .await
+            .insert(id.clone(), ProjectEngine::new(project));
+        id
+    }
+
+    async fn post_run(app: &Router, project_id: &str, body: &str) -> (StatusCode, Vec<u8>) {
+        let res = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/projects/{project_id}/swarm/run"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (status, bytes.to_vec())
+    }
+
+    async fn await_run(app: &Router, project_id: &str, run_id: &str) -> Value {
+        for _ in 0..400 {
+            let res = app
+                .clone()
+                .oneshot(
+                    HttpRequest::builder()
+                        .uri(format!("/api/v1/projects/{project_id}/swarm/{run_id}"))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            let run: Value = serde_json::from_slice(
+                &axum::body::to_bytes(res.into_body(), usize::MAX)
+                    .await
+                    .expect("body"),
+            )
+            .expect("json");
+            if matches!(
+                run["state"].as_str(),
+                Some("completed" | "failed" | "cancelled")
+            ) {
+                return run;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("swarm run {run_id} never finished");
+    }
+
+    #[tokio::test]
+    async fn refine_without_clips_is_rejected_with_400() {
+        let (state, dir) = test_state("refine_empty");
+        let pid = insert_project(&state, false).await;
+        let app = build_router(state);
+        let (status, body) = post_run(
+            &app,
+            &pid,
+            r#"{"prompt":"Tighten the pacing","mode":"refine"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            String::from_utf8_lossy(&body).contains("Nothing to refine yet. Generate a cut first.")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn auto_with_clips_resolves_to_refine() {
+        let (state, dir) = test_state("auto_refine");
+        let pid = insert_project(&state, true).await;
+        let app = build_router(state);
+        let (status, body) = post_run(
+            &app,
+            &pid,
+            r#"{"prompt":"Brighter grade","allow_local_fallback":false}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let accepted: Value = serde_json::from_slice(&body).expect("json");
+        let run = await_run(&app, &pid, accepted["run_id"].as_str().expect("run id")).await;
+        assert_eq!(run["state"], "failed");
+        assert_eq!(run["error"], REFINE_NEEDS_MODEL);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn auto_without_clips_still_generates() {
+        let (state, dir) = test_state("auto_generate");
+        let pid = insert_project(&state, false).await;
+        let app = build_router(state);
+        let (status, body) = post_run(
+            &app,
+            &pid,
+            r#"{"prompt":"Make a 30 second explainer","allow_local_fallback":false}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let accepted: Value = serde_json::from_slice(&body).expect("json");
+        let run = await_run(&app, &pid, accepted["run_id"].as_str().expect("run id")).await;
+        assert_eq!(run["state"], "failed");
+        assert!(
+            run["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("OPENROUTER_API_KEY is not configured")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn selected_clips_and_playhead_are_validated_before_a_run_starts() {
+        let (state, dir) = test_state("refine_inputs");
+        let pid = insert_project(&state, true).await;
+        let app = build_router(state);
+        for body in [
+            r#"{"prompt":"x","selected_clip_ids":["ghost"]}"#,
+            r#"{"prompt":"x","selected_clip_ids":["bad id!"]}"#,
+            r#"{"prompt":"x","playhead_sec":-1.0}"#,
+        ] {
+            let (status, _) = post_run(&app, &pid, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

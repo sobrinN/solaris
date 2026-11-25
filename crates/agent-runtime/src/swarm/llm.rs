@@ -13,16 +13,19 @@ use crate::backend::SolarisBackend;
 use crate::error::AgentError;
 use crate::openrouter::{
     ChatMessage, ChatRequest, ContentPart, InputAudioPayload, MediaUrlRef, MessageContent,
-    OpenRouterClient, ProviderPreferences, ReasoningConfig, truncate_msg,
+    OpenRouterClient, ProviderPreferences, ReasoningConfig, ToolDefinition, truncate_msg,
 };
 use crate::planner::CreativePlan;
 use crate::skills::skills_for_role;
-use crate::swarm::{DirectorPlan, SceneSpec, is_voice_hint};
-use crate::tools::{execute_tool, is_mutating_tool, normalize_tool_name, tools_for_role};
+use crate::swarm::speech::narration_expected;
+use crate::swarm::{DirectorPlan, SceneSpec, SwarmRunMode, is_voice_hint};
+use crate::tools::{
+    execute_tool, is_mutating_tool, normalize_tool_name, tools_for_refinement, tools_for_role,
+};
 
 const MAX_LLM_VIDEO_PROXY_BYTES: usize = 4 * 1024 * 1024;
-const DIRECTOR_MAX_TOKENS_INITIAL: u32 = 4096;
-const DIRECTOR_MAX_TOKENS_RETRY: u32 = 8192;
+pub(crate) const DIRECTOR_MAX_TOKENS_INITIAL: u32 = 4096;
+pub(crate) const DIRECTOR_MAX_TOKENS_RETRY: u32 = 8192;
 const WORKER_MAX_TOKENS: u32 = 16384;
 const SCENE_WORKER_MAX_TOKENS: u32 = 10240;
 
@@ -114,16 +117,24 @@ fn push_coaching_user_message(messages: &mut Vec<ChatMessage>, coaching: impl In
     messages.push(ChatMessage::user_text(coaching));
 }
 
+fn worker_tools(role: AgentRole, mode: SwarmRunMode) -> Vec<ToolDefinition> {
+    match mode {
+        SwarmRunMode::Refine => tools_for_refinement(role),
+        SwarmRunMode::Auto | SwarmRunMode::Generate => tools_for_role(role),
+    }
+}
+
 fn validate_worker_tool_scope(
     role: AgentRole,
     tool_name: &str,
     args: &serde_json::Value,
     allowed_tracks: &[&str],
+    mode: SwarmRunMode,
 ) -> Result<(), String> {
     let norm = normalize_tool_name(tool_name.trim());
 
-    // Strict role allowlist enforcement matching `tools_for_role(role)`
-    let role_allowed = tools_for_role(role)
+    // Strict role allowlist enforcement matching `worker_tools(role, mode)`
+    let role_allowed = worker_tools(role, mode)
         .into_iter()
         .any(|def| normalize_tool_name(&def.function.name) == norm);
     if !role_allowed {
@@ -133,6 +144,18 @@ fn validate_worker_tool_scope(
     }
 
     // Track-level scope enforcement for mutating timeline/audio/color tools
+    let implicit_track = match norm {
+        "gfx.update_clip" | "gfx.place" => Some("g1"),
+        "captions.update_clip" | "captions.set_style" => Some("t1"),
+        _ => None,
+    };
+    if let Some(tid) = implicit_track
+        && !allowed_tracks.contains(&tid)
+    {
+        return Err(format!(
+            "specialist {role:?} may not mutate track '{tid}' (allowed: {allowed_tracks:?})"
+        ));
+    }
     if is_mutating_tool(norm)
         && let Some(tid) = args.get("track_id").and_then(|v| v.as_str())
     {
@@ -251,21 +274,28 @@ pub(crate) async fn build_openrouter_director_plan(
         .map(|a| format!("{} ({})", a.id, a.name))
         .collect();
 
+    let captions_rule = if narration_expected(project) {
+        "Captions: transcribed narration is present, so plan captions from its transcript (captions_notes: caption style and timing only)."
+    } else {
+        "Captions: NO narration with a transcript was detected, so plan no captions and set `captions_notes` to \"No captions: no narration detected\"."
+    };
     let mode_guidance = if programmatic_visuals {
         format!(
             "PRODUCTION MODE: PROGRAMMATIC ZERO-ASSET VIDEO (no footage/images imported). \
-             Solaris will synthesize the ENTIRE {:.1}s video in PARALLEL using dedicated scene micro-agents on G1 \
-             and synchronized kinetic captions on T1 (`captions.place_script`). \
+             Solaris will synthesize the ENTIRE {:.1}s video in PARALLEL using dedicated scene micro-agents on G1. \
+             {captions_rule} \
              Do NOT invent fake media_ids or ask for imported footage, and NEVER put internal asset IDs (like `progress-bar-solar`) into visible text specs. \
              In `art_direction`, define ONE unified visual system shared by all scenes (rich full-height layered radial glow + subtle architectural grid backdrop across 100vh so lower regions are never pitch-black, consistent top scene badge format `01 / N`, bold editorial typography, vertical-friendly diagram geometry, crisp brand accent glow). \
              In `scenes`, output 5 to 7 contiguous scene objects covering 0.0s to {:.1}s with ZERO gaps: \
              each object MUST have `scene_index` (1..N), `title`, `start_sec`, `duration_sec`, `visual_brief` (specific diagram/UI/visual focal point contained cleanly inside `5vh..61vh` for 9:16 so `63vh..76vh` stays clear for T1 captions), `motion_cue` (fast headline entrance <= 0.35s + living mid-scene motion, NO fade-to-black before scene end), and `narration` (natural punchy voiceover line that complements the on-screen graphic rather than repeating the headline verbatim). \
-             Mirror the narration timeline concisely in `captions_notes` and brief summary in `gfx_notes`. \
+             Keep the brief summary in `gfx_notes`. \
              Set `spine_notes`, `broll_notes`, `grade_notes`, and `mix_notes` to brief 1-line notes (\"Programmatic G1/T1 mode\").",
             inferred_duration_sec, inferred_duration_sec
         )
     } else {
-        "PRODUCTION MODE: FOOTAGE EDIT. Plan cuts, B-roll, color grade, captions, GFX, and audio mix grounded in the supplied media_pool. Set `scenes` to [].".to_string()
+        format!(
+            "PRODUCTION MODE: FOOTAGE EDIT. Plan cuts, B-roll, color grade, GFX, and audio mix grounded in the supplied media_pool. {captions_rule} Set `scenes` to []."
+        )
     };
 
     let approved_guidance = if approved_plan.is_some() {
@@ -778,6 +808,7 @@ pub(crate) async fn run_llm_worker_loop(
     allowed_tracks: &[&str],
     instruction: &str,
     max_turns: usize,
+    mode: SwarmRunMode,
     cancel: &CancellationToken,
     ops_counter: &Arc<AtomicU32>,
 ) -> Result<u32, AgentError> {
@@ -864,13 +895,9 @@ pub(crate) async fn run_llm_worker_loop(
                 project.canvas.height,
                 target_duration_sec
             ),
-            AgentRole::Caps => format!(
-                "\n\n## PROGRAMMATIC ZERO-ASSET CAPTIONS MODE\n\
-                 No audio transcript exists yet. Use `captions_place_script` (NOT `captions_generate_from_transcript`) to place synchronized, punchy kinetic caption bursts covering `0.0s` through `{:.1}s` on `t1`.\n\
-                 - Supply 6 to 10 clear, self-contained spoken narration segments matching each scene beat (complement the on-screen G1 headline rather than duplicating it word-for-word; keep each segment a crisp complete phrase so bursts never split mid-clause), `words_per_burst: 3`, `y: 0.25` (for 9:16) or `y: 0.34` (for 16:9), and an editorial preset (`neon_glow` or `karaoke` for 9:16; `minimal` or `mono_caps` for 16:9).\n\
-                 - Once placed (and optionally verified with 1 `preview_capture_frame`), stop and reply concisely — Director runs full QA automatically after all specialists finish.",
-                target_duration_sec
-            ),
+            AgentRole::Caps => "\n\n## ZERO-ASSET CAPTIONS MODE\n\
+                 No footage or images were imported. Narration with a transcript was detected on the timeline (V1/A1), so call `captions_generate_from_transcript` to caption it. Never invent or script caption text. Reply concisely once done; Director runs full QA automatically after all specialists finish."
+                .to_string(),
             _ => String::new(),
         }
     } else {
@@ -900,7 +927,7 @@ pub(crate) async fn run_llm_worker_loop(
         ChatMessage::system_cached(system_prompt),
         ChatMessage::user_text_cached(user_prompt),
     ];
-    let tools = tools_for_role(role);
+    let tools = worker_tools(role, mode);
     let meta = CommandMeta {
         agent_id: agent_id.to_string(),
         role,
@@ -1138,9 +1165,13 @@ pub(crate) async fn run_llm_worker_loop(
                         .to_string()
                 }
                 Ok(args) => {
-                    if let Err(scope_err) =
-                        validate_worker_tool_scope(role, &tc.function.name, &args, allowed_tracks)
-                    {
+                    if let Err(scope_err) = validate_worker_tool_scope(
+                        role,
+                        &tc.function.name,
+                        &args,
+                        allowed_tracks,
+                        mode,
+                    ) {
                         tool_errors += 1;
                         emit_swarm_log(
                             backend.as_ref(),
@@ -1581,6 +1612,7 @@ pub(crate) async fn run_programmatic_scene_worker(
                             &tc.function.name,
                             &args,
                             &["g1"],
+                            SwarmRunMode::Generate,
                         ) {
                             tool_errors += 1;
                             json!({ "ok": false, "error": scope_err }).to_string()
@@ -1741,12 +1773,14 @@ mod tests {
 
     #[test]
     fn worker_scope_blocks_cross_track_mutations_and_out_of_role_tools() {
+        let generate = SwarmRunMode::Generate;
         assert!(
             validate_worker_tool_scope(
                 AgentRole::BRoll,
                 "timeline_place_clip",
                 &json!({"track_id": "v1"}),
-                &["v2"]
+                &["v2"],
+                generate
             )
             .is_err()
         );
@@ -1755,7 +1789,8 @@ mod tests {
                 AgentRole::BRoll,
                 "timeline_place_clip",
                 &json!({"track_id": "v2"}),
-                &["v2"]
+                &["v2"],
+                generate
             )
             .is_ok()
         );
@@ -1764,7 +1799,8 @@ mod tests {
                 AgentRole::Gfx,
                 "color_set_grade",
                 &json!({"project_id": "p1"}),
-                &["g1"]
+                &["g1"],
+                generate
             )
             .is_err()
         );
@@ -1779,12 +1815,123 @@ mod tests {
                     AgentRole::Gfx,
                     forbidden,
                     &json!({"project_id": "p1"}),
-                    &["g1"]
+                    &["g1"],
+                    generate
                 )
                 .is_err(),
                 "expected Gfx to be blocked from {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn caption_and_gfx_edit_tools_are_rejected_outside_their_roles() {
+        let roles = [
+            AgentRole::Razor,
+            AgentRole::BRoll,
+            AgentRole::Grade,
+            AgentRole::Mix,
+            AgentRole::Gfx,
+            AgentRole::Caps,
+        ];
+        for role in roles {
+            let caption_args = json!({"project_id": "p1", "clip_id": "c1"});
+            let caption_ok = validate_worker_tool_scope(
+                role,
+                "captions_update_clip",
+                &caption_args,
+                &["t1"],
+                SwarmRunMode::Generate,
+            )
+            .is_ok();
+            assert_eq!(
+                caption_ok,
+                role == AgentRole::Caps,
+                "captions_update_clip for {role:?}"
+            );
+
+            let gfx_ok = validate_worker_tool_scope(
+                role,
+                "gfx_update_clip",
+                &caption_args,
+                &["g1"],
+                SwarmRunMode::Generate,
+            )
+            .is_ok();
+            assert_eq!(
+                gfx_ok,
+                role == AgentRole::Gfx,
+                "gfx_update_clip for {role:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gfx_worker_cannot_call_captions_update_clip_in_any_mode() {
+        let args = json!({"project_id": "p1", "clip_id": "c1"});
+        for mode in [SwarmRunMode::Generate, SwarmRunMode::Refine] {
+            assert!(
+                validate_worker_tool_scope(
+                    AgentRole::Gfx,
+                    "captions_update_clip",
+                    &args,
+                    &["g1", "t1"],
+                    mode
+                )
+                .is_err(),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn refinement_scope_edits_by_id_and_blocks_placement() {
+        let refine = SwarmRunMode::Refine;
+        let args = json!({"project_id": "p1", "track_id": "g1", "clip_id": "c1"});
+        assert!(
+            validate_worker_tool_scope(AgentRole::Gfx, "gfx_update_clip", &args, &["g1"], refine)
+                .is_ok()
+        );
+        assert!(
+            validate_worker_tool_scope(
+                AgentRole::Gfx,
+                "timeline_trim_clip",
+                &args,
+                &["g1"],
+                refine
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_worker_tool_scope(
+                AgentRole::Gfx,
+                "gfx_place",
+                &json!({"project_id": "p1", "clip_id": "n1"}),
+                &["g1"],
+                refine
+            )
+            .is_err()
+        );
+        assert!(
+            validate_worker_tool_scope(
+                AgentRole::Caps,
+                "captions_generate_from_transcript",
+                &json!({"project_id": "p1"}),
+                &["t1"],
+                refine
+            )
+            .is_err()
+        );
+        assert!(
+            validate_worker_tool_scope(
+                AgentRole::Gfx,
+                "gfx_place",
+                &json!({"project_id": "p1", "clip_id": "n1"}),
+                &["g1"],
+                SwarmRunMode::Generate
+            )
+            .is_ok()
+        );
     }
 
     #[test]

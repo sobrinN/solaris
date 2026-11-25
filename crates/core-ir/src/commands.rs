@@ -122,6 +122,11 @@ pub enum TimelineCommand {
     SetBrandPlaybook {
         brand_playbook_id: String,
     },
+    Batch {
+        commands: Vec<TimelineCommand>,
+        #[serde(default)]
+        summary: Option<String>,
+    },
 }
 
 impl TimelineCommand {
@@ -142,6 +147,7 @@ impl TimelineCommand {
             Self::SetAudioSettings { .. } => "set_audio_settings",
             Self::SetTrackFlags { .. } => "set_track_flags",
             Self::SetBrandPlaybook { .. } => "set_brand_playbook",
+            Self::Batch { .. } => "batch",
         }
     }
 
@@ -161,7 +167,8 @@ impl TimelineCommand {
             Self::AddMedia { .. }
             | Self::RemoveMedia { .. }
             | Self::UpdateMediaIntelligence { .. }
-            | Self::SetBrandPlaybook { .. } => None,
+            | Self::SetBrandPlaybook { .. }
+            | Self::Batch { .. } => None,
         }
     }
 }
@@ -228,6 +235,11 @@ pub enum EngineEvent {
         #[serde(default)]
         project_id: Option<String>,
         entry: crate::model::LogEntry,
+    },
+    AssetsChanged {
+        action: String,
+        #[serde(default)]
+        asset_id: Option<String>,
     },
 }
 

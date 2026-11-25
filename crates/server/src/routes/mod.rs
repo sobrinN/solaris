@@ -80,6 +80,11 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/assets/export", get(assets::export_asset_pack))
         .route("/api/v1/assets/import", post(assets::import_asset_pack))
+        .route(
+            "/api/v1/assets/restore-starters",
+            post(assets::restore_starter_assets),
+        )
+        .route("/api/v1/assets/{id}", delete(assets::delete_asset))
         .route("/api/v1/agent/status", get(agent::get_agent_status))
         .route(
             "/api/v1/agent/credentials",
@@ -310,7 +315,10 @@ fn build_cors_layer(state: &AppState) -> CorsLayer {
             HeaderName::from_static("sec-websocket-protocol"),
             HeaderName::from_static("mcp-session-id"),
         ])
-        .expose_headers([HeaderName::from_static("mcp-session-id")])
+        .expose_headers([
+            HeaderName::from_static("mcp-session-id"),
+            header::CONTENT_DISPOSITION,
+        ])
 }
 
 fn is_origin_allowed(state: &AppState, headers: &HeaderMap) -> bool {
@@ -1432,6 +1440,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_and_restore_gfx_assets_persist_across_restart() {
+        let (app, dir) = test_app("gfx_delete_restore", None);
+        let send = |app: Router, method: &str, uri: &str| {
+            let req = HttpRequest::builder()
+                .method(method)
+                .uri(uri.to_string())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::empty())
+                .unwrap();
+            async move { app.oneshot(req).await.unwrap() }
+        };
+
+        let res = send(app.clone(), "DELETE", "/api/v1/assets/stat-card-solar").await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = send(app.clone(), "DELETE", "/api/v1/assets/stat-card-solar").await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let res = send(app.clone(), "DELETE", "/api/v1/assets/..%2Fevil").await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(!dir.join("assets/stat-card-solar.json").exists());
+
+        // Restarting on the same workspace must not resurrect a deleted starter.
+        let state = AppState::initialize(&ServerConfig {
+            workspace_dir: dir.clone(),
+            ..ServerConfig::default()
+        })
+        .expect("re-init state");
+        assert!(
+            !state
+                .inner
+                .assets
+                .read()
+                .await
+                .contains_key("stat-card-solar")
+        );
+        let app2 = build_router(state.clone());
+
+        let res = send(app2.clone(), "POST", "/api/v1/assets/restore-starters").await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["restored_count"], 1);
+        assert!(
+            state
+                .inner
+                .assets
+                .read()
+                .await
+                .contains_key("stat-card-solar")
+        );
+        assert!(state.inner.dismissed_starters.read().await.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn batch_ops_validate_every_sub_command() {
+        let state = AppState::initialize(&ServerConfig {
+            workspace_dir: std::env::temp_dir()
+                .join(format!("solaris_srv_batch_validate_{}", std::process::id())),
+            ..ServerConfig::default()
+        })
+        .expect("init state");
+        let bad = TimelineCommand::Batch {
+            commands: vec![TimelineCommand::PlaceGfx {
+                track_id: "g1".into(),
+                clip_id: "evil".into(),
+                label: "Evil".into(),
+                start_sec: 0.0,
+                duration_sec: 1.0,
+                gfx: solaris_core_ir::GfxInstance {
+                    asset_id: None,
+                    props: serde_json::json!({}),
+                    inline_html: Some("<script src=\"https://evil.test/x.js\"></script>".into()),
+                },
+            }],
+            summary: None,
+        };
+        assert!(state.validate_timeline_command(&bad).await.is_err());
+        let empty = TimelineCommand::Batch {
+            commands: vec![],
+            summary: None,
+        };
+        assert!(state.validate_timeline_command(&empty).await.is_err());
+        let _ = std::fs::remove_dir_all(&state.inner.workspace_dir);
+    }
+
+    #[tokio::test]
     async fn export_resolves_media_paths_and_blocks_external_reads_when_confined() {
         let dir =
             std::env::temp_dir().join(format!("solaris_srv_export_confine_{}", std::process::id()));
@@ -2334,5 +2431,110 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn relative_workspace_dir_export_download_succeeds_without_doubling_path() {
+        struct DirGuard(PathBuf);
+        impl Drop for DirGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let rel_name = format!("solaris_rel_export_{}", uuid::Uuid::new_v4().simple());
+        let rel_dir = PathBuf::from("target").join(&rel_name);
+        let _guard = DirGuard(rel_dir.clone());
+
+        let state = AppState::initialize(&ServerConfig {
+            workspace_dir: rel_dir.clone(),
+            ..ServerConfig::default()
+        })
+        .expect("init state with relative workspace_dir");
+        assert!(
+            state.inner.workspace_dir.is_absolute(),
+            "AppState::initialize must canonicalize relative workspace_dir"
+        );
+
+        let export_file = state
+            .inner
+            .workspace_dir
+            .join("exports")
+            .join("render_cbd42a1d.mp4");
+        let payload = b"solaris-rendered-mp4-bytes";
+        std::fs::write(&export_file, payload).unwrap();
+
+        let synced_path = state
+            .inner
+            .storage
+            .sync_file("exports/render_cbd42a1d.mp4", &export_file)
+            .expect("sync export file");
+        let job_id = uuid::Uuid::new_v4().to_string();
+        state.inner.export_jobs.write().await.insert(
+            job_id.clone(),
+            solaris_core_ir::ExportJobStatus {
+                id: job_id.clone(),
+                project_id: "proj-rel".to_string(),
+                state: solaris_core_ir::ExportState::Completed,
+                progress: 1.0,
+                stage_label: "Export complete".to_string(),
+                output_path: Some(synced_path),
+                error: None,
+                updated_at: Utc::now(),
+            },
+        );
+
+        let app = build_router(state.clone());
+        let resp = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri(format!("/api/v1/exports/{job_id}/download"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let disp = resp
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(disp.contains("render_cbd42a1d.mp4"), "got {disp}");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), payload);
+
+        // Also verify a legacy job with redundant `<root_name>/exports/...` relative path still downloads.
+        let legacy_job_id = uuid::Uuid::new_v4().to_string();
+        state.inner.export_jobs.write().await.insert(
+            legacy_job_id.clone(),
+            solaris_core_ir::ExportJobStatus {
+                id: legacy_job_id.clone(),
+                project_id: "proj-rel".to_string(),
+                state: solaris_core_ir::ExportState::Completed,
+                progress: 1.0,
+                stage_label: "Export complete".to_string(),
+                output_path: Some(format!("{rel_name}/exports/render_cbd42a1d.mp4")),
+                error: None,
+                updated_at: Utc::now(),
+            },
+        );
+        let legacy_resp = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri(format!("/api/v1/exports/{legacy_job_id}/download"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(legacy_resp.status(), StatusCode::OK);
+        let legacy_body = axum::body::to_bytes(legacy_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(legacy_body.as_ref(), payload);
     }
 }

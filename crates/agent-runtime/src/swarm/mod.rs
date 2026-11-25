@@ -1,8 +1,16 @@
 mod deterministic;
 mod llm;
 mod qa;
+mod refine;
+mod refine_plan;
+mod refine_run;
+mod request;
+mod speech;
+#[cfg(test)]
+mod test_support;
 
 pub use qa::run_qa_pass;
+pub use request::{SwarmChatRole, SwarmChatTurn, SwarmRunMode, prepare_swarm_request};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -25,6 +33,8 @@ use llm::{
     run_programmatic_scene_worker,
 };
 pub(crate) use llm::{route_models, strip_json_fence};
+use request::timeline_has_clips;
+use speech::{is_music_or_sfx_asset, narrated_transcript_present, narration_expected};
 
 enum TrackLockBackend<'a> {
     Owned(Arc<dyn SolarisBackend>),
@@ -167,13 +177,6 @@ pub(crate) fn is_broll_hint(hint: &str) -> bool {
     )
 }
 
-fn is_music_or_sfx_hint(hint: &str) -> bool {
-    matches!(
-        hint.to_ascii_lowercase().as_str(),
-        "music" | "bgm" | "beat" | "soundtrack" | "sfx" | "sound_effect" | "ambience"
-    )
-}
-
 fn is_unrecoverable_openrouter_error(err: &AgentError) -> bool {
     match err {
         AgentError::NotConfigured | AgentError::Transport(_) => true,
@@ -195,6 +198,14 @@ pub struct SwarmRunRequest {
     pub skip_qa: bool,
     #[serde(default)]
     pub approved_plan: Option<CreativePlan>,
+    #[serde(default)]
+    pub mode: SwarmRunMode,
+    #[serde(default)]
+    pub selected_clip_ids: Vec<String>,
+    #[serde(default)]
+    pub playhead_sec: Option<f64>,
+    #[serde(default)]
+    pub conversation_history: Vec<SwarmChatTurn>,
 }
 
 fn default_true() -> bool {
@@ -596,6 +607,7 @@ where
         summary: None,
         error: None,
         qa_report: None,
+        refinement_summary: None,
         started_at,
         updated_at: started_at,
     };
@@ -628,6 +640,21 @@ where
     }
 
     let use_openrouter = openrouter.is_configured();
+    if req.mode.resolve(timeline_has_clips(&project)) == SwarmRunMode::Refine {
+        let run = refine_run::RefineRun {
+            backend: &backend,
+            openrouter: &openrouter,
+            advisor: &advisor,
+            project: &project,
+            brand: &brand,
+            assets: &assets,
+            req: &req,
+            run_id: &run_id,
+            cancel: &cancel,
+            ops_counter: &ops_counter,
+        };
+        return refine_run::run_refinement(run, status, &on_status).await;
+    }
     if !use_openrouter && !req.allow_local_fallback {
         return finish_failed(
             status,
@@ -687,12 +714,14 @@ where
                 return false;
             }
             match m.kind {
-                MediaKind::Video => m.intelligence.has_audio && !is_broll_hint(&m.role_hint),
+                MediaKind::Video => {
+                    m.intelligence.has_audio
+                        && !is_broll_hint(&m.role_hint)
+                        && !is_music_or_sfx_asset(m)
+                }
                 MediaKind::Audio => {
                     is_voice_hint(&m.role_hint)
-                        || (!has_any_video
-                            && prompt_mentions_vo
-                            && !is_music_or_sfx_hint(&m.role_hint))
+                        || (!has_any_video && prompt_mentions_vo && !is_music_or_sfx_asset(m))
                 }
                 _ => false,
             }
@@ -1076,13 +1105,28 @@ where
             &project_id,
             &run_id,
             Some("director-01"),
-            "Programmatic zero-asset mode: skipping V1/A1 media spine and fanning out parallel G1 scene micro-agents + T1 captions",
+            "Programmatic zero-asset mode: skipping V1/A1 media spine and fanning out parallel G1 scene micro-agents",
             None,
         );
     }
 
     if cancel.is_cancelled() {
         return finish_cancelled(status, &ops_counter, &on_status);
+    }
+
+    let refreshed = backend.get_project(&project_id).await.unwrap_or(project);
+    let narrated = narrated_transcript_present(&refreshed);
+    if !narrated {
+        emit_swarm_log(
+            backend.as_ref(),
+            LogLevel::Info,
+            "swarm",
+            &project_id,
+            &run_id,
+            Some("caps-01"),
+            "No narration detected: captions skipped".to_string(),
+            None,
+        );
     }
 
     // Stage 3 / Wave 2: Parallel Specialist & Scene Micro-Agent Fan-Out
@@ -1132,29 +1176,26 @@ where
             active_roles.push(AgentRole::Grade);
         }
     }
-    active_roles.push(AgentRole::Caps);
+    if narrated {
+        active_roles.push(AgentRole::Caps);
+    }
     active_roles.push(AgentRole::Gfx);
     if has_audio_media {
         active_roles.push(AgentRole::Mix);
     }
 
     status.state = SwarmRunState::ExecutingSpecialists;
-    status.phase_label = if programmatic_visuals {
-        format!(
-            "Fanning out {} parallel scene micro-agents (G1) & kinetic captions (T1)",
-            programmatic_scenes.len()
-        )
-    } else if has_audio_media {
-        "Wave 2: Parallel specialists editing V2, T1, G1 & A2".to_string()
-    } else {
-        "Wave 2: Parallel specialists editing V2, T1 & G1".to_string()
-    };
+    status.phase_label = wave2_label(
+        programmatic_visuals,
+        has_audio_media,
+        programmatic_scenes.len(),
+        narrated,
+    );
     status.active_roles = active_roles;
     status.ops_committed = ops_counter.load(Ordering::Relaxed);
     status.updated_at = Utc::now();
     on_status(status.clone());
 
-    let refreshed = backend.get_project(&project_id).await.unwrap_or(project);
     let use_llm_workers = use_openrouter && !openrouter_unrecoverable;
     let gfx_turns = if programmatic_visuals {
         max_turns.max(12)
@@ -1171,7 +1212,7 @@ where
     if has_visual_media {
         active_specialist_count += 2; // BRoll + Grade
     }
-    active_specialist_count += 2; // Caps + Gfx
+    active_specialist_count += 1 + usize::from(narrated); // Caps (when narrated) + Gfx
     if has_audio_media {
         active_specialist_count += 1; // Mix
     }
@@ -1255,28 +1296,35 @@ where
                 (false, false, None)
             }
         },
-        run_specialist_with_lock(
-            backend.clone(),
-            openrouter.clone(),
-            use_llm_workers,
-            req.allow_local_fallback,
-            worker_model.clone(),
-            worker_fallbacks.clone(),
-            worker_supports_reasoning,
-            run_id.clone(),
-            programmatic_visuals,
-            req.prompt.clone(),
-            refreshed.clone(),
-            brand.clone(),
-            assets.clone(),
-            caps_plan,
-            "t1",
-            "caps-01",
-            AgentRole::Caps,
-            caps_turns,
-            cancel.clone(),
-            ops_counter.clone(),
-        ),
+        async {
+            if narrated {
+                run_specialist_with_lock(
+                    backend.clone(),
+                    openrouter.clone(),
+                    use_llm_workers,
+                    req.allow_local_fallback,
+                    worker_model.clone(),
+                    worker_fallbacks.clone(),
+                    worker_supports_reasoning,
+                    run_id.clone(),
+                    programmatic_visuals,
+                    req.prompt.clone(),
+                    refreshed.clone(),
+                    brand.clone(),
+                    assets.clone(),
+                    caps_plan,
+                    "t1",
+                    "caps-01",
+                    AgentRole::Caps,
+                    caps_turns,
+                    cancel.clone(),
+                    ops_counter.clone(),
+                )
+                .await
+            } else {
+                (false, false, None)
+            }
+        },
         async {
             if programmatic_visuals {
                 run_programmatic_gfx_scene_fanout(
@@ -1549,6 +1597,28 @@ where
     status
 }
 
+fn wave2_label(
+    programmatic_visuals: bool,
+    has_audio_media: bool,
+    scene_count: usize,
+    narrated: bool,
+) -> String {
+    let mut label = match (programmatic_visuals, has_audio_media, narrated) {
+        (true, _, true) => format!(
+            "Fanning out {scene_count} parallel scene micro-agents (G1) & kinetic captions (T1)"
+        ),
+        (true, _, false) => format!("Fanning out {scene_count} parallel scene micro-agents (G1)"),
+        (false, true, true) => "Wave 2: Parallel specialists editing V2, T1, G1 & A2".to_string(),
+        (false, true, false) => "Wave 2: Parallel specialists editing V2, G1 & A2".to_string(),
+        (false, false, true) => "Wave 2: Parallel specialists editing V2, T1 & G1".to_string(),
+        (false, false, false) => "Wave 2: Parallel specialists editing V2 & G1".to_string(),
+    };
+    if !narrated {
+        label.push_str(" · No narration detected: captions skipped");
+    }
+    label
+}
+
 fn finish_failed(
     mut status: SwarmRunStatus,
     err: String,
@@ -1604,16 +1674,14 @@ pub(crate) fn build_deterministic_plan(
             "Assemble A-Roll/Voice on V1/A1, cut >0.25s silences with 0.12s pad, 1.08x hook zoom."
                 .to_string()
         } else {
-            "Zero-asset programmatic mode: full-canvas HTML/GSAP scenes on G1 and kinetic script captions on T1.".to_string()
+            "Zero-asset programmatic mode: full-canvas HTML/GSAP scenes on G1 and no captions (T1 stays empty without narration audio).".to_string()
         },
         broll_notes: "Place B-Roll/Image inserts on V2 with ken_burns on stills.".to_string(),
         grade_notes: "Recover Log footage to Rec.709 and blend brand LUT if present.".to_string(),
-        captions_notes: if has_visual {
-            "Generate 2-4 word social safe-zone captions on T1.".to_string()
+        captions_notes: if narration_expected(project) {
+            "Captions only from transcribed narration (captions.generate_from_transcript on T1, 2-4 words per burst).".to_string()
         } else {
-            format!(
-                "Place synchronized kinetic script captions on T1 covering 0.0s..{target_dur:.1}s via captions.place_script."
-            )
+            "No narration detected: place no captions on T1.".to_string()
         },
         gfx_notes: if has_visual {
             "Place Brand-tokenized title/stat cards on G1.".to_string()
@@ -1700,6 +1768,7 @@ async fn run_spine_stage(
                 plan.spine_notes
             ),
             max_turns,
+            SwarmRunMode::Generate,
             cancel,
             ops_counter,
         )
@@ -2113,6 +2182,7 @@ async fn run_specialist_with_lock(
             &[track_id],
             &instruction,
             max_turns,
+            SwarmRunMode::Generate,
             &cancel,
             &ops_counter,
         )
@@ -2209,162 +2279,14 @@ async fn run_specialist_with_lock(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{BoxFuture, CapturedFrame, KeyframeResult};
     use crate::openrouter::OpenRouterConfig;
     use solaris_core_ir::{
-        AspectPreset, CommandMeta, ExportJobStatus, ExportRequest, MediaAsset,
-        MediaIntelligenceManifest, MediaKind, OpResult, Project, ProjectEngine, TimeSpan,
-        TimelineCommand, TranscriptWord,
+        AspectPreset, MediaAsset, MediaIntelligenceManifest, MediaKind, Project, TimeSpan,
+        TranscriptWord,
     };
     use std::collections::HashMap;
-    use tokio::sync::RwLock;
 
-    struct InMemBackend {
-        engine: RwLock<ProjectEngine>,
-        assets: Vec<SavedCodeAsset>,
-        brand: BrandPlaybook,
-    }
-
-    impl SolarisBackend for InMemBackend {
-        fn list_projects(&self) -> BoxFuture<'_, Result<Vec<serde_json::Value>, AgentError>> {
-            Box::pin(async { Ok(vec![]) })
-        }
-        fn create_project(
-            &self,
-            _name: String,
-            _aspect: Option<AspectPreset>,
-            _brand: Option<String>,
-            _prompt: Option<String>,
-            _template: Option<String>,
-        ) -> BoxFuture<'_, Result<Project, AgentError>> {
-            Box::pin(async { Err(AgentError::Backend("unused".into())) })
-        }
-        fn get_project(&self, _id: &str) -> BoxFuture<'_, Result<Project, AgentError>> {
-            Box::pin(async { Ok(self.engine.read().await.project().clone()) })
-        }
-        fn apply_op(
-            &self,
-            _id: &str,
-            cmd: TimelineCommand,
-            meta: CommandMeta,
-        ) -> BoxFuture<'_, Result<(OpResult, Project), AgentError>> {
-            Box::pin(async move {
-                let mut g = self.engine.write().await;
-                let (res, _) = g
-                    .apply(cmd, meta)
-                    .map_err(|e| AgentError::ToolError(e.to_string()))?;
-                Ok((res, g.project().clone()))
-            })
-        }
-        fn undo(&self, _id: &str) -> BoxFuture<'_, Result<Project, AgentError>> {
-            Box::pin(async { Err(AgentError::Backend("unused".into())) })
-        }
-        fn redo(&self, _id: &str) -> BoxFuture<'_, Result<Project, AgentError>> {
-            Box::pin(async { Err(AgentError::Backend("unused".into())) })
-        }
-        fn acquire_track_lock(
-            &self,
-            _pid: &str,
-            tid: &str,
-            aid: &str,
-            role: AgentRole,
-        ) -> BoxFuture<'_, Result<(), AgentError>> {
-            let tid = tid.to_string();
-            let aid = aid.to_string();
-            Box::pin(async move {
-                let mut g = self.engine.write().await;
-                g.acquire_track_lock(&tid, aid, role)
-                    .map(|_| ())
-                    .map_err(|e| AgentError::ToolError(e.to_string()))
-            })
-        }
-        fn release_track_lock(
-            &self,
-            _pid: &str,
-            tid: &str,
-            aid: &str,
-        ) -> BoxFuture<'_, Result<(), AgentError>> {
-            let tid = tid.to_string();
-            let aid = aid.to_string();
-            Box::pin(async move {
-                let mut g = self.engine.write().await;
-                g.release_track_lock(&tid, &aid)
-                    .map(|_| ())
-                    .map_err(|e| AgentError::ToolError(e.to_string()))
-            })
-        }
-        fn import_media_paths(
-            &self,
-            _pid: &str,
-            _paths: Vec<(String, Option<String>)>,
-        ) -> BoxFuture<'_, Result<Vec<MediaAsset>, AgentError>> {
-            Box::pin(async { Ok(vec![]) })
-        }
-        fn transcribe_media(
-            &self,
-            _pid: &str,
-            _mid: &str,
-            _lang: Option<String>,
-        ) -> BoxFuture<'_, Result<Vec<TranscriptWord>, AgentError>> {
-            Box::pin(async { Ok(vec![]) })
-        }
-        fn extract_keyframes(
-            &self,
-            _pid: &str,
-            _mid: &str,
-            _ts: Vec<f64>,
-        ) -> BoxFuture<'_, Result<Vec<KeyframeResult>, AgentError>> {
-            Box::pin(async { Ok(vec![]) })
-        }
-        fn capture_preview_frame(
-            &self,
-            _pid: &str,
-            _ts: f64,
-        ) -> BoxFuture<'_, Result<CapturedFrame, AgentError>> {
-            Box::pin(async { Err(AgentError::Backend("unused".into())) })
-        }
-        fn list_brands(&self) -> BoxFuture<'_, Result<Vec<BrandPlaybook>, AgentError>> {
-            Box::pin(async { Ok(vec![self.brand.clone()]) })
-        }
-        fn get_brand(&self, _bid: &str) -> BoxFuture<'_, Result<BrandPlaybook, AgentError>> {
-            Box::pin(async { Ok(self.brand.clone()) })
-        }
-        fn list_assets(&self) -> BoxFuture<'_, Result<Vec<SavedCodeAsset>, AgentError>> {
-            Box::pin(async { Ok(self.assets.clone()) })
-        }
-        fn save_asset(
-            &self,
-            a: SavedCodeAsset,
-        ) -> BoxFuture<'_, Result<SavedCodeAsset, AgentError>> {
-            Box::pin(async { Ok(a) })
-        }
-        fn start_export(
-            &self,
-            _pid: &str,
-            _req: ExportRequest,
-        ) -> BoxFuture<'_, Result<ExportJobStatus, AgentError>> {
-            Box::pin(async { Err(AgentError::Backend("unused".into())) })
-        }
-        fn emit_cursor_pulse(
-            &self,
-            _pid: &str,
-            _aid: &str,
-            _role: AgentRole,
-            _anchor: &str,
-            _label: &str,
-        ) -> BoxFuture<'_, Result<(), AgentError>> {
-            Box::pin(async { Ok(()) })
-        }
-        fn emit_playhead_seek(
-            &self,
-            _pid: &str,
-            _ts: f64,
-            _aid: &str,
-            _role: AgentRole,
-        ) -> BoxFuture<'_, Result<(), AgentError>> {
-            Box::pin(async { Ok(()) })
-        }
-    }
+    use super::test_support::InMemBackend;
 
     #[tokio::test]
     async fn deterministic_swarm_cuts_silences_maps_captions_and_releases_all_locks() {
@@ -2443,11 +2365,7 @@ mod tests {
             created_at: Utc::now(),
         };
 
-        let backend = Arc::new(InMemBackend {
-            engine: RwLock::new(ProjectEngine::new(proj)),
-            assets: vec![asset],
-            brand: BrandPlaybook::solaris_default(),
-        });
+        let backend = InMemBackend::new(proj, vec![asset]);
         let client = OpenRouterClient::new(OpenRouterConfig::default());
         let advisor = Arc::new(ModelAdvisor::new(client.clone()));
 
@@ -2464,6 +2382,10 @@ mod tests {
                 max_turns_per_worker: Some(2),
                 skip_qa: false,
                 approved_plan: None,
+                mode: SwarmRunMode::Auto,
+                selected_clip_ids: Vec::new(),
+                playhead_sec: None,
+                conversation_history: Vec::new(),
             },
             CancellationToken::new(),
             |_| {},
@@ -2519,15 +2441,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zero_asset_programmatic_swarm_builds_full_30s_explainer_on_g1_and_t1() {
+    async fn zero_asset_programmatic_swarm_builds_full_30s_explainer_on_g1_without_captions() {
         let proj = Project::new_default("agent_skills_explainer", AspectPreset::Vertical9x16);
         let pid = proj.id.clone();
 
-        let backend = Arc::new(InMemBackend {
-            engine: RwLock::new(ProjectEngine::new(proj)),
-            assets: vec![],
-            brand: BrandPlaybook::solaris_default(),
-        });
+        let backend = InMemBackend::new(proj, Vec::new());
         let client = OpenRouterClient::new(OpenRouterConfig::default());
         let advisor = Arc::new(ModelAdvisor::new(client.clone()));
 
@@ -2544,6 +2462,10 @@ mod tests {
                 max_turns_per_worker: Some(4),
                 skip_qa: false,
                 approved_plan: None,
+                mode: SwarmRunMode::Auto,
+                selected_clip_ids: Vec::new(),
+                playhead_sec: None,
+                conversation_history: Vec::new(),
             },
             CancellationToken::new(),
             |_| {},
@@ -2551,7 +2473,7 @@ mod tests {
         .await;
 
         assert_eq!(status.state, SwarmRunState::Completed);
-        assert!(status.ops_committed >= 7);
+        assert!(status.ops_committed >= 6);
         let qa = status.qa_report.expect("qa report");
         assert!(
             qa.checks.iter().any(
@@ -2565,7 +2487,10 @@ mod tests {
         let g1 = p.tracks.iter().find(|t| t.id == "g1").unwrap();
         let t1 = p.tracks.iter().find(|t| t.id == "t1").unwrap();
         assert_eq!(g1.clips.len(), 6);
-        assert!(!t1.clips.is_empty());
+        assert!(
+            t1.clips.is_empty(),
+            "silent zero-asset videos must not get captions"
+        );
         assert!((p.duration_sec() - 30.0).abs() < 0.5);
     }
 

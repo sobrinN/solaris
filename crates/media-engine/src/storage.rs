@@ -132,6 +132,27 @@ impl LocalFsStorage {
     }
 }
 
+fn strip_redundant_root_prefix(root: &Path, candidate: &Path) -> Option<PathBuf> {
+    let root_name = root.file_name()?;
+    let mut normals = Vec::new();
+    for comp in candidate.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::Normal(seg) => normals.push(seg),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    if normals.len() >= 2 && normals[0] == root_name {
+        let mut stripped = PathBuf::new();
+        for seg in &normals[1..] {
+            stripped.push(seg);
+        }
+        Some(stripped)
+    } else {
+        None
+    }
+}
+
 impl AssetStorage for LocalFsStorage {
     fn resolve_readable_path(&self, raw_path: &str) -> Result<PathBuf, MediaError> {
         let trimmed = raw_path.trim();
@@ -150,7 +171,14 @@ impl AssetStorage for LocalFsStorage {
         let target = if candidate.is_absolute() {
             candidate
         } else {
-            root.join(candidate)
+            let joined = root.join(&candidate);
+            if joined.exists() {
+                joined
+            } else if let Some(stripped) = strip_redundant_root_prefix(&root, &candidate) {
+                root.join(stripped)
+            } else {
+                joined
+            }
         };
         let canonical = fs::canonicalize(&target).map_err(|e| {
             MediaError::StorageError(format!("cannot access '{}': {e}", target.display()))
@@ -206,6 +234,11 @@ impl AssetStorage for LocalFsStorage {
         }
         Ok(dest)
     }
+
+    fn sync_file(&self, _relative_key: &str, local_path: &Path) -> Result<String, MediaError> {
+        let resolved = fs::canonicalize(local_path).unwrap_or_else(|_| local_path.to_path_buf());
+        Ok(resolved.to_string_lossy().to_string())
+    }
 }
 
 #[cfg(test)]
@@ -258,6 +291,45 @@ mod tests {
         let open_storage = LocalFsStorage::new(&temp, true);
         assert!(matches!(
             open_storage.resolve_readable_path(&cred_file.to_string_lossy()),
+            Err(MediaError::StorageError(_))
+        ));
+
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn sync_file_returns_canonical_path_and_resolves_legacy_root_prefixed_relative_paths() {
+        let dir_name = format!("solaris_rel_storage_test_{}", Uuid::new_v4().simple());
+        let temp = std::env::temp_dir().join(&dir_name);
+        let storage = LocalFsStorage::new(&temp, false);
+        let export_file = storage
+            .save_bytes("exports/final_abcd1234.mp4", b"fake-mp4-bytes")
+            .unwrap();
+
+        let synced = storage
+            .sync_file("exports/final_abcd1234.mp4", &export_file)
+            .expect("sync_file succeeds");
+        assert!(
+            Path::new(&synced).is_absolute(),
+            "sync_file must return an absolute canonical path"
+        );
+        let resolved_synced = storage
+            .resolve_readable_path(&synced)
+            .expect("resolve synced export path");
+        assert_eq!(resolved_synced, fs::canonicalize(&export_file).unwrap());
+
+        // Legacy persisted relative paths prefixed with workspace root folder name
+        // (e.g. `.solaris-data/exports/foo.mp4`) must resolve cleanly without doubling the root.
+        let legacy_prefixed = format!("{dir_name}/exports/final_abcd1234.mp4");
+        let resolved_legacy = storage
+            .resolve_readable_path(&legacy_prefixed)
+            .expect("resolve legacy root-prefixed relative path");
+        assert_eq!(resolved_legacy, fs::canonicalize(&export_file).unwrap());
+
+        // Traversal with root prefix must still be rejected.
+        let traversal = format!("{dir_name}/../outside.mp4");
+        assert!(matches!(
+            storage.resolve_readable_path(&traversal),
             Err(MediaError::StorageError(_))
         ));
 

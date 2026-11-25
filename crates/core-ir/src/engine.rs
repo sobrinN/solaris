@@ -357,39 +357,77 @@ impl ProjectEngine {
         })
     }
 
+    fn check_command_locks(
+        &self,
+        command: &TimelineCommand,
+        meta: &CommandMeta,
+    ) -> Result<(), CoreError> {
+        match command {
+            TimelineCommand::Batch { commands, .. } => {
+                if commands.is_empty() {
+                    return Err(CoreError::InvalidOperation(
+                        "batch command must contain at least one sub-command".to_string(),
+                    ));
+                }
+                if commands.len() > 256 {
+                    return Err(CoreError::InvalidOperation(
+                        "batch command exceeds maximum of 256 sub-commands".to_string(),
+                    ));
+                }
+                for sub in commands {
+                    if matches!(sub, TimelineCommand::Batch { .. }) {
+                        return Err(CoreError::InvalidOperation(
+                            "nested batch commands are not allowed".to_string(),
+                        ));
+                    }
+                    if matches!(sub, TimelineCommand::UpdateMediaIntelligence { .. }) {
+                        return Err(CoreError::InvalidOperation(
+                            "update_media_intelligence cannot be inside a batch".to_string(),
+                        ));
+                    }
+                    self.check_command_locks(sub, meta)?;
+                }
+                Ok(())
+            }
+            _ => {
+                if let Some(track_id) = command.target_track_id() {
+                    let track_is_locked = self
+                        .project
+                        .tracks
+                        .iter()
+                        .any(|t| t.id == track_id && t.locked);
+                    if track_is_locked {
+                        let allowed_user_unlock = meta.role == AgentRole::User
+                            && matches!(command, TimelineCommand::SetTrackFlags { .. });
+                        if !allowed_user_unlock {
+                            return Err(CoreError::TrackLocked {
+                                track_id: track_id.to_string(),
+                                holder: "track_locked".to_string(),
+                            });
+                        }
+                    }
+                    if meta.role != AgentRole::User
+                        && let Some(lock) = self.track_locks.get(track_id)
+                        && lock.holder_agent_id != meta.agent_id
+                    {
+                        return Err(CoreError::TrackLocked {
+                            track_id: track_id.to_string(),
+                            holder: lock.holder_agent_id.clone(),
+                        });
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
     pub fn apply(
         &mut self,
         command: TimelineCommand,
         meta: CommandMeta,
     ) -> Result<(OpResult, EngineEvent), CoreError> {
         self.prune_expired_locks();
-
-        if let Some(track_id) = command.target_track_id() {
-            let track_is_locked = self
-                .project
-                .tracks
-                .iter()
-                .any(|t| t.id == track_id && t.locked);
-            if track_is_locked {
-                let allowed_user_unlock = meta.role == AgentRole::User
-                    && matches!(command, TimelineCommand::SetTrackFlags { .. });
-                if !allowed_user_unlock {
-                    return Err(CoreError::TrackLocked {
-                        track_id: track_id.to_string(),
-                        holder: "track_locked".to_string(),
-                    });
-                }
-            }
-            if meta.role != AgentRole::User
-                && let Some(lock) = self.track_locks.get(track_id)
-                && lock.holder_agent_id != meta.agent_id
-            {
-                return Err(CoreError::TrackLocked {
-                    track_id: track_id.to_string(),
-                    holder: lock.holder_agent_id.clone(),
-                });
-            }
-        }
+        self.check_command_locks(&command, &meta)?;
 
         let is_undoable = !matches!(command, TimelineCommand::UpdateMediaIntelligence { .. });
         let command_kind = command.kind_name().to_string();
@@ -398,7 +436,15 @@ impl ProjectEngine {
         } else {
             None
         };
-        let (summary, ui_anchor) = self.apply_inner(command)?;
+        let (summary, ui_anchor) = match self.apply_inner(command) {
+            Ok(res) => res,
+            Err(err) => {
+                if let Some(snapshot) = before {
+                    self.project = snapshot;
+                }
+                return Err(err);
+            }
+        };
 
         self.project.revision += 1;
         self.project.updated_at = Utc::now();
@@ -1044,6 +1090,36 @@ impl ProjectEngine {
                     format!("switched brand playbook to '{brand_playbook_id}'"),
                     "brand.playbook".to_string(),
                 ))
+            }
+            TimelineCommand::Batch { commands, summary } => {
+                let count = commands.len();
+                let mut first_summary = String::new();
+                let mut distinct_anchors: Vec<String> = Vec::new();
+                for sub in commands {
+                    let (sub_summary, sub_anchor) = self.apply_inner(sub)?;
+                    if first_summary.is_empty() {
+                        first_summary = sub_summary;
+                    }
+                    if !distinct_anchors.contains(&sub_anchor) {
+                        distinct_anchors.push(sub_anchor);
+                    }
+                }
+                let final_summary = summary
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| {
+                        if count == 1 {
+                            first_summary
+                        } else {
+                            format!("batch ({count} ops): {first_summary}")
+                        }
+                    });
+                let final_anchor = if distinct_anchors.len() == 1 {
+                    distinct_anchors.remove(0)
+                } else {
+                    "timeline".to_string()
+                };
+                Ok((final_summary, final_anchor))
             }
         }
     }
@@ -1848,5 +1924,160 @@ mod tests {
             ),
             Err(CoreError::MediaNotFound(_))
         ));
+    }
+
+    #[test]
+    fn batch_command_is_atomic_single_undo_and_checks_locks() {
+        let mut engine = ProjectEngine::new(Project::new_default(
+            "Batch Test",
+            AspectPreset::Vertical9x16,
+        ));
+        let meta = CommandMeta::default();
+
+        // Place 2 clips in 1 atomic batch
+        let (res, _ev) = engine
+            .apply(
+                TimelineCommand::Batch {
+                    commands: vec![
+                        TimelineCommand::PlaceClip {
+                            track_id: "v1".into(),
+                            clip: sample_clip("b1", 0.0, 2.0),
+                        },
+                        TimelineCommand::PlaceClip {
+                            track_id: "v1".into(),
+                            clip: sample_clip("b2", 2.0, 3.0),
+                        },
+                    ],
+                    summary: Some("placed 2 clips".into()),
+                },
+                meta.clone(),
+            )
+            .expect("batch place succeeds");
+        assert_eq!(res.revision, 1);
+        assert_eq!(res.summary, "placed 2 clips");
+        assert_eq!(
+            engine
+                .project()
+                .tracks
+                .iter()
+                .find(|t| t.id == "v1")
+                .unwrap()
+                .clips
+                .len(),
+            2
+        );
+
+        // Failing 2nd sub-command rolls back 1st sub-command completely
+        let err = engine.apply(
+            TimelineCommand::Batch {
+                commands: vec![
+                    TimelineCommand::DeleteClip {
+                        track_id: "v1".into(),
+                        clip_id: "b1".into(),
+                    },
+                    TimelineCommand::DeleteClip {
+                        track_id: "v1".into(),
+                        clip_id: "does-not-exist".into(),
+                    },
+                ],
+                summary: None,
+            },
+            meta.clone(),
+        );
+        assert!(err.is_err());
+        assert_eq!(engine.project().revision, 1);
+        assert_eq!(
+            engine
+                .project()
+                .tracks
+                .iter()
+                .find(|t| t.id == "v1")
+                .unwrap()
+                .clips
+                .len(),
+            2,
+            "failed batch must roll back partial mutations"
+        );
+
+        // Locked track blocks batch touching it
+        engine
+            .apply(
+                TimelineCommand::SetTrackFlags {
+                    track_id: "v1".into(),
+                    muted: None,
+                    solo: None,
+                    locked: Some(true),
+                },
+                meta.clone(),
+            )
+            .unwrap();
+        let locked_err = engine.apply(
+            TimelineCommand::Batch {
+                commands: vec![TimelineCommand::DeleteClip {
+                    track_id: "v1".into(),
+                    clip_id: "b1".into(),
+                }],
+                summary: None,
+            },
+            meta.clone(),
+        );
+        assert!(matches!(locked_err, Err(CoreError::TrackLocked { .. })));
+
+        // Unlock, batch move both clips, and undo in 1 step
+        engine
+            .apply(
+                TimelineCommand::SetTrackFlags {
+                    track_id: "v1".into(),
+                    muted: None,
+                    solo: None,
+                    locked: Some(false),
+                },
+                meta.clone(),
+            )
+            .unwrap();
+        engine
+            .apply(
+                TimelineCommand::Batch {
+                    commands: vec![
+                        TimelineCommand::TrimClip {
+                            track_id: "v1".into(),
+                            clip_id: "b1".into(),
+                            new_start_sec: Some(1.0),
+                            new_duration_sec: None,
+                            new_source_in_sec: None,
+                        },
+                        TimelineCommand::TrimClip {
+                            track_id: "v1".into(),
+                            clip_id: "b2".into(),
+                            new_start_sec: Some(3.0),
+                            new_duration_sec: None,
+                            new_source_in_sec: None,
+                        },
+                    ],
+                    summary: Some("moved 2 clips".into()),
+                },
+                meta,
+            )
+            .expect("batch move succeeds");
+        let v1_clips = &engine
+            .project()
+            .tracks
+            .iter()
+            .find(|t| t.id == "v1")
+            .unwrap()
+            .clips;
+        assert!((v1_clips[0].start_sec - 1.0).abs() < 1e-6);
+        assert!((v1_clips[1].start_sec - 3.0).abs() < 1e-6);
+
+        engine.undo().expect("undo batch move");
+        let v1_clips = &engine
+            .project()
+            .tracks
+            .iter()
+            .find(|t| t.id == "v1")
+            .unwrap()
+            .clips;
+        assert!((v1_clips[0].start_sec - 0.0).abs() < 1e-6);
+        assert!((v1_clips[1].start_sec - 2.0).abs() < 1e-6);
     }
 }
