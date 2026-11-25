@@ -14,8 +14,10 @@ import {
   type AgentStatusResponse,
   type AspectPreset,
   type BrandPlaybook,
+  type CreativePlan,
   type EngineEventEnvelope,
   type ExportJobStatus,
+  type GeneratePlanRequest,
   type HealthResponse,
   type LogEntry,
   type ModelAdvisorResponse,
@@ -554,6 +556,7 @@ export function App() {
     agentMode,
     templateId,
     templateName,
+    approvedPlan,
   }: {
     prompt: string;
     aspect: AspectPreset;
@@ -562,6 +565,7 @@ export function App() {
     agentMode?: "openrouter" | "mcp";
     templateId?: string;
     templateName?: string;
+    approvedPlan?: CreativePlan;
   }) => {
     const userPrompt = prompt.trim();
     const rawDisplayName =
@@ -672,6 +676,7 @@ export function App() {
             prompt: userPrompt,
             model_override: selectedModelOverride || undefined,
             allow_local_fallback: !(agentStatus?.openrouter_configured ?? false),
+            approved_plan: approvedPlan,
           });
           if (activeProjectIdRef.current !== targetPid) return;
           applySwarmRunIfNewer(run);
@@ -767,6 +772,7 @@ export function App() {
           onOpenAiSettings={() => setAiSettingsOpen(true)}
           onFilesDropped={handlePreEditorFilesDrop}
           onRemoveFile={handleRemovePreEditorFile}
+          onGeneratePlan={(req: GeneratePlanRequest) => client.generatePlan(req)}
           onOpenExistingProject={handleOpenExistingProject}
           onLaunchStudio={handleLaunchStudio}
         />

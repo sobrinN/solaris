@@ -25,6 +25,22 @@ pub struct LocalFsStorage {
     allow_external_reads: bool,
 }
 
+fn is_reserved_credentials_path(root: &Path, candidate: &Path) -> bool {
+    let Some(name) = candidate.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let is_cred_name = name.eq_ignore_ascii_case("agent_credentials.json")
+        || name
+            .to_ascii_lowercase()
+            .starts_with(".agent_credentials.json.");
+    if !is_cred_name {
+        return false;
+    }
+    candidate
+        .parent()
+        .is_some_and(|parent| parent == root || candidate.starts_with(root))
+}
+
 impl LocalFsStorage {
     pub fn new(workspace_root: impl Into<PathBuf>, allow_external_reads: bool) -> Self {
         let root = workspace_root.into();
@@ -107,6 +123,11 @@ impl LocalFsStorage {
                 "relative storage key must name a file".to_string(),
             ));
         }
+        if is_reserved_credentials_path(&root, &cursor) {
+            return Err(MediaError::StorageError(
+                "access to internal credentials file is denied".to_string(),
+            ));
+        }
         Ok((root, cursor))
     }
 }
@@ -141,6 +162,11 @@ impl AssetStorage for LocalFsStorage {
                 canonical.display(),
                 root.display()
             )));
+        }
+        if is_reserved_credentials_path(&root, &canonical) {
+            return Err(MediaError::StorageError(
+                "access to internal credentials file is denied".to_string(),
+            ));
         }
         if !canonical.is_file() {
             return Err(MediaError::StorageError(format!(
@@ -214,6 +240,24 @@ mod tests {
         ));
         assert!(matches!(
             storage.resolve_readable_path("uploads"),
+            Err(MediaError::StorageError(_))
+        ));
+
+        // Reject reads and writes targeting Solaris's internal credentials file
+        let cred_file = temp.join("agent_credentials.json");
+        fs::write(&cred_file, r#"{"openrouter_api_key":"sk-or-secret"}"#).unwrap();
+        assert!(matches!(
+            storage.resolve_readable_path("agent_credentials.json"),
+            Err(MediaError::StorageError(_))
+        ));
+        assert!(matches!(
+            storage.save_bytes("agent_credentials.json", b"overwrite"),
+            Err(MediaError::StorageError(_))
+        ));
+        // Even with allow_external_reads = true, internal credentials file stays blocked
+        let open_storage = LocalFsStorage::new(&temp, true);
+        assert!(matches!(
+            open_storage.resolve_readable_path(&cred_file.to_string_lossy()),
             Err(MediaError::StorageError(_))
         ));
 

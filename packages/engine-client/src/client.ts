@@ -7,9 +7,11 @@ import type {
   BrandReferenceKind,
   CodeAssetPackManifest,
   CommandMeta,
+  CreativePlan,
   EngineEventEnvelope,
   ExportJobStatus,
   ExportRequest,
+  GeneratePlanRequest,
   GfxSandboxResponse,
   HealthResponse,
   LogEntry,
@@ -531,6 +533,14 @@ export class SolarisEngineClient {
 
   listSkills(): Promise<SkillSummary[]> {
     return this.request<SkillSummary[]>("/api/v1/agent/skills");
+  }
+
+  generatePlan(req: GeneratePlanRequest): Promise<CreativePlan> {
+    return this.request<CreativePlan>("/api/v1/agent/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    });
   }
 
   getLogs(params?: {

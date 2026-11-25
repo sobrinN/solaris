@@ -3,6 +3,7 @@ pub mod backend;
 pub mod error;
 pub mod lint;
 pub mod openrouter;
+pub mod planner;
 pub mod skills;
 pub mod stt;
 pub mod swarm;
@@ -17,6 +18,10 @@ pub use openrouter::{
     CompletionTokensDetails, ContentPart, InputAudioPayload, MediaUrlRef, MessageContent,
     OpenRouterClient, OpenRouterConfig, OpenRouterModel, ProviderPreferences, ReasoningConfig,
     ToolCall, ToolDefinition,
+};
+pub use planner::{
+    CreativePlan, CreativePlanBeat, CreativePlanInput, build_local_creative_plan,
+    generate_creative_plan,
 };
 pub use skills::{
     SkillDoc, SkillResourceDoc, get_skill, get_skill_resource, install_skills_to_dir,

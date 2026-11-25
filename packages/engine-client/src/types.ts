@@ -292,12 +292,43 @@ export interface SwarmRunStatus {
   updated_at: string;
 }
 
+export interface CreativePlanBeat {
+  title: string;
+  time_range: string;
+  visual_direction: string;
+  audio_and_captions: string;
+}
+
+export interface CreativePlan {
+  title: string;
+  approach: string;
+  creative_direction: string;
+  target_duration_sec: number;
+  production_mode: "programmatic" | "footage_edit" | string;
+  skills_consulted: string[];
+  beats: CreativePlanBeat[];
+  style_notes: string[];
+  model_used: string;
+  used_local_fallback: boolean;
+}
+
+export interface GeneratePlanRequest {
+  prompt: string;
+  aspect_preset?: AspectPreset;
+  brand_playbook_id?: string;
+  project_id?: string;
+  model_override?: string;
+  refinement_note?: string;
+  previous_plan?: CreativePlan;
+}
+
 export interface SwarmRunRequest {
   prompt: string;
   model_override?: string;
   allow_local_fallback?: boolean;
   max_turns_per_worker?: number;
   skip_qa?: boolean;
+  approved_plan?: CreativePlan;
 }
 
 export interface AgentStatusResponse {

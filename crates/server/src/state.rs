@@ -31,6 +31,15 @@ const MAX_LOG_ENTRIES: usize = 500;
 const MAX_LOG_DETAILS_CHARS: usize = 12_000;
 pub const MAX_GFX_SANDBOX_BYTES: usize = 512 * 1024;
 const DEFAULT_MAX_CONCURRENT_EXPORTS: usize = 2;
+const AGENT_CREDENTIALS_FILE: &str = "agent_credentials.json";
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct PersistedAgentCredentials {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    openrouter_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_model: Option<String>,
+}
 
 #[derive(Clone)]
 pub struct MediaTicketEntry {
@@ -115,6 +124,7 @@ pub struct AppStateInner {
     pub persist_revisions: Mutex<HashMap<String, u64>>,
     pub brand_persist_lock: Mutex<()>,
     pub asset_persist_lock: Mutex<()>,
+    pub credentials_persist_lock: Mutex<()>,
     pub demo_pack_lock: Mutex<()>,
     pub export_semaphore: Arc<Semaphore>,
     pub shutdown: CancellationToken,
@@ -244,6 +254,25 @@ impl AppState {
             )),
         };
         let mut openrouter_cfg = OpenRouterConfig::from_env();
+        let persisted_creds = load_persisted_credentials(&config.workspace_dir);
+        if openrouter_cfg.api_key.is_none()
+            && let Some(key) = persisted_creds
+                .openrouter_api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|k| !k.is_empty())
+        {
+            openrouter_cfg.api_key = Some(key.to_string());
+        }
+        if openrouter_cfg.default_model.is_none()
+            && let Some(model) = persisted_creds
+                .default_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+        {
+            openrouter_cfg.default_model = Some(model.to_string());
+        }
         if let Some(key) = config
             .openrouter_api_key
             .as_deref()
@@ -278,6 +307,7 @@ impl AppState {
                 persist_revisions: Mutex::new(HashMap::new()),
                 brand_persist_lock: Mutex::new(()),
                 asset_persist_lock: Mutex::new(()),
+                credentials_persist_lock: Mutex::new(()),
                 demo_pack_lock: Mutex::new(()),
                 export_semaphore: Arc::new(Semaphore::new(max_concurrent_exports)),
                 shutdown: CancellationToken::new(),
@@ -695,6 +725,44 @@ impl AppState {
 
     pub async fn verify_session_id(&self, candidate: &str) -> bool {
         verify_bounded_token(&self.inner.sessions, candidate).await
+    }
+
+    /// Persists updates to the local OpenRouter API key and/or default model inside
+    /// `<workspace_dir>/agent_credentials.json` with owner-only (`0o600`) file permissions.
+    /// `None` leaves a field unchanged; `Some(None)` clears it; `Some(Some(val))` updates it.
+    pub async fn persist_agent_credentials(
+        &self,
+        update_api_key: Option<Option<String>>,
+        update_default_model: Option<Option<String>>,
+    ) -> Result<(), (StatusCode, String)> {
+        if update_api_key.is_none() && update_default_model.is_none() {
+            return Ok(());
+        }
+        let _guard = self.inner.credentials_persist_lock.lock().await;
+        let workspace_dir = self.inner.workspace_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut creds = load_persisted_credentials(&workspace_dir);
+            if let Some(next_key) = update_api_key {
+                creds.openrouter_api_key = next_key;
+            }
+            if let Some(next_model) = update_default_model {
+                creds.default_model = next_model;
+            }
+            save_persisted_credentials_atomic(&workspace_dir, &creds)
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("credentials persist task failed: {e}"),
+            )
+        })?
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to persist local agent credentials: {e}"),
+            )
+        })
     }
 
     pub async fn revoke_session_id(&self, candidate: &str) {
@@ -1209,6 +1277,70 @@ fn starter_code_assets() -> Vec<SavedCodeAsset> {
     ]
 }
 
+fn load_persisted_credentials(workspace_dir: &Path) -> PersistedAgentCredentials {
+    let path = workspace_dir.join(AGENT_CREDENTIALS_FILE);
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return PersistedAgentCredentials::default();
+    };
+    match serde_json::from_str::<PersistedAgentCredentials>(&raw) {
+        Ok(creds) => creds,
+        Err(err) => {
+            tracing::warn!(
+                path = %path.display(),
+                "ignoring malformed local agent credentials file on startup: {err}"
+            );
+            PersistedAgentCredentials::default()
+        }
+    }
+}
+
+fn save_persisted_credentials_atomic(
+    workspace_dir: &Path,
+    creds: &PersistedAgentCredentials,
+) -> std::io::Result<()> {
+    let path = workspace_dir.join(AGENT_CREDENTIALS_FILE);
+    if creds.openrouter_api_key.is_none() && creds.default_model.is_none() {
+        match fs::remove_file(&path) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err),
+        }
+    }
+
+    fs::create_dir_all(workspace_dir)?;
+    let bytes = serde_json::to_vec_pretty(creds)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tmp = workspace_dir.join(format!(
+        ".{AGENT_CREDENTIALS_FILE}.{}.tmp",
+        Uuid::new_v4().simple()
+    ));
+
+    let write_res = (|| -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+
+    if let Err(err) = write_res {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
+    if let Err(err) = fs::rename(&tmp, &path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1294,6 +1426,76 @@ mod tests {
 
         state.clear_logs(Some("p1"));
         assert!(state.list_logs(Some("p1"), None, 10).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn agent_credentials_persist_atomically_across_restarts_with_owner_only_mode() {
+        let dir = std::env::temp_dir().join(format!("solaris_state_creds_{}", Uuid::new_v4()));
+        let cfg = ServerConfig {
+            workspace_dir: dir.clone(),
+            ..ServerConfig::default()
+        };
+
+        let state_first = AppState::initialize(&cfg).expect("init first state");
+        state_first
+            .persist_agent_credentials(
+                Some(Some("sk-or-v1-persisted-test-key".to_string())),
+                Some(Some("google/gemini-4-hydrogen".to_string())),
+            )
+            .await
+            .expect("persist key and model");
+
+        let cred_path = dir.join(AGENT_CREDENTIALS_FILE);
+        assert!(cred_path.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(&cred_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "credentials file must be owner-only 0600");
+        }
+
+        // Simulate a server restart (`cargo run -p solaris-server`) in the same workspace
+        let loaded = load_persisted_credentials(&dir);
+        assert_eq!(
+            loaded.openrouter_api_key.as_deref(),
+            Some("sk-or-v1-persisted-test-key")
+        );
+        assert_eq!(
+            loaded.default_model.as_deref(),
+            Some("google/gemini-4-hydrogen")
+        );
+        let state_restarted = AppState::initialize(&cfg).expect("init restarted state");
+        assert!(state_restarted.inner.openrouter.is_configured());
+        assert_eq!(
+            state_restarted
+                .inner
+                .openrouter
+                .config()
+                .default_model
+                .as_deref(),
+            Some("google/gemini-4-hydrogen")
+        );
+
+        // Clearing API key preserves saved default_model
+        state_restarted
+            .persist_agent_credentials(Some(None), None)
+            .await
+            .expect("clear api key only");
+        let after_key_clear = load_persisted_credentials(&dir);
+        assert!(after_key_clear.openrouter_api_key.is_none());
+        assert_eq!(
+            after_key_clear.default_model.as_deref(),
+            Some("google/gemini-4-hydrogen")
+        );
+
+        // Clearing default_model too removes the credentials file cleanly
+        state_restarted
+            .persist_agent_credentials(None, Some(None))
+            .await
+            .expect("clear model too");
+        assert!(!cred_path.exists());
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

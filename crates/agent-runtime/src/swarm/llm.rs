@@ -15,6 +15,7 @@ use crate::openrouter::{
     ChatMessage, ChatRequest, ContentPart, InputAudioPayload, MediaUrlRef, MessageContent,
     OpenRouterClient, ProviderPreferences, ReasoningConfig, truncate_msg,
 };
+use crate::planner::CreativePlan;
 use crate::skills::skills_for_role;
 use crate::swarm::{DirectorPlan, SceneSpec, is_voice_hint};
 use crate::tools::{execute_tool, is_mutating_tool, normalize_tool_name, tools_for_role};
@@ -201,6 +202,7 @@ pub(crate) async fn build_openrouter_director_plan(
     brand: &BrandPlaybook,
     assets: &[SavedCodeAsset],
     prompt: &str,
+    approved_plan: Option<&CreativePlan>,
     cancel: &CancellationToken,
 ) -> Result<DirectorPlan, AgentError> {
     if cancel.is_cancelled() {
@@ -266,6 +268,11 @@ pub(crate) async fn build_openrouter_director_plan(
         "PRODUCTION MODE: FOOTAGE EDIT. Plan cuts, B-roll, color grade, captions, GFX, and audio mix grounded in the supplied media_pool. Set `scenes` to [].".to_string()
     };
 
+    let approved_guidance = if approved_plan.is_some() {
+        "\nIMPORTANT: The user already reviewed and approved `approved_creative_plan` in the input JSON. Follow its creative direction, approach, style_notes, target_duration_sec, and scene/beat structure faithfully."
+    } else {
+        ""
+    };
     let sys = format!(
         "You are Solaris Director. Output ONLY a single compact, valid raw JSON object (no markdown fences, no commentary) matching:\n\
          {{\"hook_summary\": string, \"target_duration_sec\": number, \"art_direction\": string, \
@@ -273,10 +280,11 @@ pub(crate) async fn build_openrouter_director_plan(
          \"captions_notes\": string, \"gfx_notes\": string, \"mix_notes\": string, \
          \"scenes\": [{{\"scene_index\": number, \"title\": string, \"start_sec\": number, \"duration_sec\": number, \"visual_brief\": string, \"motion_cue\": string, \"narration\": string}}]}}.\n\
          Keep every field crisp and high-signal so the JSON always terminates cleanly.\n\
-         {mode_guidance}\n\n{skill_text}"
+         {mode_guidance}{approved_guidance}\n\n{skill_text}"
     );
     let user_json = json!({
         "prompt": prompt,
+        "approved_creative_plan": approved_plan,
         "production_mode": if programmatic_visuals { "programmatic_zero_asset" } else { "footage_edit" },
         "suggested_duration_sec": inferred_duration_sec,
         "canvas": project.canvas,

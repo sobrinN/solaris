@@ -6,11 +6,13 @@ use axum::http::StatusCode;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use solaris_agent_runtime::{
-    ModelRecommendation, ModelRoleKind, SkillDoc, SolarisBackend, SwarmRunRequest, list_skills,
-    run_qa_pass, run_swarm,
+    CreativePlan, CreativePlanInput, ModelRecommendation, ModelRoleKind, SkillDoc, SolarisBackend,
+    SwarmRunRequest, build_local_creative_plan, generate_creative_plan, list_skills, run_qa_pass,
+    run_swarm,
 };
 use solaris_core_ir::{
-    EngineEvent, LogEntry, LogLevel, QaReport, SwarmRunState, SwarmRunStatus, TranscriptWord,
+    AspectPreset, BrandPlaybook, EngineEvent, LogEntry, LogLevel, MediaAsset, QaReport,
+    SavedCodeAsset, SwarmRunState, SwarmRunStatus, TranscriptWord,
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -50,6 +52,9 @@ pub async fn set_agent_credentials(
     State(state): State<AppState>,
     Json(req): Json<SetAgentCredentialsRequest>,
 ) -> Result<Json<AgentStatusResponse>, (StatusCode, String)> {
+    let mut api_key_update: Option<Option<String>> = None;
+    let mut default_model_update: Option<Option<String>> = None;
+
     if let Some(raw_key) = req.api_key {
         let trimmed = raw_key.trim();
         if trimmed.is_empty() {
@@ -65,38 +70,46 @@ pub async fn set_agent_credentials(
                 "invalid api_key format".to_string(),
             ));
         }
-        state
-            .inner
-            .openrouter
-            .set_api_key(Some(trimmed.to_string()));
-        state.inner.model_advisor.clear_error_cooldown().await;
+        api_key_update = Some(Some(trimmed.to_string()));
     }
 
     if req.clear_default_model {
-        state.inner.openrouter.set_default_model(None);
+        default_model_update = Some(None);
     } else if let Some(model) = req.default_model {
         let trimmed = model.trim();
         if trimmed.is_empty() {
-            state.inner.openrouter.set_default_model(None);
+            default_model_update = Some(None);
         } else if trimmed.len() > 160 || trimmed.chars().any(char::is_control) {
             return Err((
                 StatusCode::BAD_REQUEST,
                 "invalid default_model format".to_string(),
             ));
         } else {
-            state
-                .inner
-                .openrouter
-                .set_default_model(Some(trimmed.to_string()));
+            default_model_update = Some(Some(trimmed.to_string()));
         }
+    }
+
+    state
+        .persist_agent_credentials(api_key_update.clone(), default_model_update.clone())
+        .await?;
+
+    if let Some(next_key) = api_key_update {
+        state.inner.openrouter.set_api_key(next_key);
+        state.inner.model_advisor.clear_error_cooldown().await;
+    }
+    if let Some(next_model) = default_model_update {
+        state.inner.openrouter.set_default_model(next_model);
     }
 
     Ok(get_agent_status(State(state)).await)
 }
 
-pub async fn clear_agent_credentials(State(state): State<AppState>) -> Json<AgentStatusResponse> {
+pub async fn clear_agent_credentials(
+    State(state): State<AppState>,
+) -> Result<Json<AgentStatusResponse>, (StatusCode, String)> {
+    state.persist_agent_credentials(Some(None), None).await?;
     state.inner.openrouter.set_api_key(None);
-    get_agent_status(State(state)).await
+    Ok(get_agent_status(State(state)).await)
 }
 
 #[derive(Serialize)]
@@ -137,6 +150,161 @@ pub async fn get_skills() -> Json<Vec<SkillSummary>> {
         })
         .collect();
     Json(items)
+}
+
+fn default_plan_aspect() -> AspectPreset {
+    AspectPreset::Vertical9x16
+}
+
+#[derive(Deserialize)]
+pub struct GeneratePlanRequest {
+    pub prompt: String,
+    #[serde(default = "default_plan_aspect")]
+    pub aspect_preset: AspectPreset,
+    #[serde(default)]
+    pub brand_playbook_id: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub model_override: Option<String>,
+    #[serde(default)]
+    pub refinement_note: Option<String>,
+    #[serde(default)]
+    pub previous_plan: Option<CreativePlan>,
+}
+
+pub async fn generate_plan(
+    State(state): State<AppState>,
+    Json(req): Json<GeneratePlanRequest>,
+) -> Result<Json<CreativePlan>, (StatusCode, String)> {
+    let prompt = req.prompt.trim();
+    if prompt.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "prompt cannot be empty when generating a creative plan".to_string(),
+        ));
+    }
+    if prompt.chars().count() > 8000 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "prompt exceeds maximum length of 8000 characters".to_string(),
+        ));
+    }
+
+    if let Some(ref pid) = req.project_id {
+        validate_safe_id(pid)?;
+    }
+    if let Some(ref bid) = req.brand_playbook_id
+        && !bid.trim().is_empty()
+    {
+        validate_safe_id(bid.trim())?;
+    }
+    let model_override = req
+        .model_override
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(m) = model_override
+        && (m.len() > 160 || m.chars().any(char::is_control))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "invalid model_override format".to_string(),
+        ));
+    }
+    let refinement_note = req
+        .refinement_note
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(note) = refinement_note
+        && note.chars().count() > 2000
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "refinement_note exceeds maximum length of 2000 characters".to_string(),
+        ));
+    }
+
+    let brand: BrandPlaybook = {
+        let guard = state.inner.brands.read().await;
+        req.brand_playbook_id
+            .as_deref()
+            .and_then(|id| guard.get(id).cloned())
+            .or_else(|| guard.get("solaris-default").cloned())
+            .unwrap_or_else(BrandPlaybook::solaris_default)
+    };
+    let saved_assets: Vec<SavedCodeAsset> = {
+        let guard = state.inner.assets.read().await;
+        guard.values().cloned().collect()
+    };
+    let media_pool: Vec<MediaAsset> = if let Some(ref pid) = req.project_id {
+        let guard = state.inner.projects.read().await;
+        guard
+            .get(pid)
+            .map(|e| e.project().media_pool.clone())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let input = CreativePlanInput {
+        prompt,
+        aspect_preset: req.aspect_preset,
+        brand: &brand,
+        media_pool: &media_pool,
+        saved_assets: &saved_assets,
+        model_override,
+        refinement_note,
+        previous_plan: req.previous_plan.as_ref(),
+    };
+
+    let cancel = CancellationToken::new();
+    let plan = match generate_creative_plan(
+        &state.inner.openrouter,
+        &state.inner.model_advisor,
+        &input,
+        &cancel,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(err) => {
+            state.push_log(LogEntry {
+                id: Uuid::new_v4().to_string(),
+                timestamp: Utc::now(),
+                level: LogLevel::Warn,
+                source: "planner".to_string(),
+                project_id: req.project_id.clone(),
+                run_id: None,
+                agent_id: Some("director-plan".to_string()),
+                message: format!("Creative planner fell back to local draft: {err}"),
+                details: None,
+            });
+            build_local_creative_plan(&input)
+        }
+    };
+
+    state.push_log(LogEntry {
+        id: Uuid::new_v4().to_string(),
+        timestamp: Utc::now(),
+        level: LogLevel::Info,
+        source: "planner".to_string(),
+        project_id: req.project_id,
+        run_id: None,
+        agent_id: Some("director-plan".to_string()),
+        message: format!(
+            "Generated creative plan '{}' ({}, {:.1}s, {} beats via {})",
+            plan.title,
+            plan.approach,
+            plan.target_duration_sec,
+            plan.beats.len(),
+            plan.model_used
+        ),
+        details: None,
+    });
+
+    Ok(Json(plan))
 }
 
 pub async fn start_swarm_run(

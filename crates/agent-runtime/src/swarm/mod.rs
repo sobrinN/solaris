@@ -18,11 +18,13 @@ use crate::advisor::{ModelAdvisor, ModelRoleKind};
 use crate::backend::SolarisBackend;
 use crate::error::AgentError;
 use crate::openrouter::OpenRouterClient;
+use crate::planner::CreativePlan;
 use deterministic::{execute_deterministic_specialist, execute_deterministic_spine};
 use llm::{
     build_openrouter_director_plan, emit_swarm_log, run_llm_worker_loop,
     run_programmatic_scene_worker,
 };
+pub(crate) use llm::{route_models, strip_json_fence};
 
 enum TrackLockBackend<'a> {
     Owned(Arc<dyn SolarisBackend>),
@@ -191,6 +193,8 @@ pub struct SwarmRunRequest {
     pub max_turns_per_worker: Option<usize>,
     #[serde(default)]
     pub skip_qa: bool,
+    #[serde(default)]
+    pub approved_plan: Option<CreativePlan>,
 }
 
 fn default_true() -> bool {
@@ -462,6 +466,15 @@ fn parse_bracketed_scenes_from_notes(gfx_notes: &str, captions_notes: &str) -> V
 }
 
 pub(crate) fn infer_target_duration_sec(prompt: &str, project: &solaris_core_ir::Project) -> f64 {
+    let media_max = project
+        .media_pool
+        .iter()
+        .map(|m| m.intelligence.duration_sec)
+        .fold(0.0_f64, f64::max);
+    infer_target_duration_from_prompt(prompt, media_max)
+}
+
+pub(crate) fn infer_target_duration_from_prompt(prompt: &str, media_fallback_sec: f64) -> f64 {
     let lower = prompt.to_ascii_lowercase();
     let tokens: Vec<&str> = lower
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '.'))
@@ -548,13 +561,8 @@ pub(crate) fn infer_target_duration_sec(prompt: &str, project: &solaris_core_ir:
         }
     }
 
-    let media_max = project
-        .media_pool
-        .iter()
-        .map(|m| m.intelligence.duration_sec)
-        .fold(0.0_f64, f64::max);
-    if media_max > 1.0 {
-        media_max.clamp(6.0, 60.0)
+    if media_fallback_sec.is_finite() && media_fallback_sec > 1.0 {
+        media_fallback_sec.clamp(6.0, 60.0)
     } else {
         24.0
     }
@@ -737,7 +745,13 @@ where
         m.kind == MediaKind::Audio || (m.kind == MediaKind::Video && m.intelligence.has_audio)
     });
     let programmatic_visuals = !has_visual_media;
-    let inferred_duration_sec = infer_target_duration_sec(&req.prompt, &project);
+    let inferred_duration_sec = req
+        .approved_plan
+        .as_ref()
+        .map(|p| p.target_duration_sec)
+        .filter(|d| d.is_finite() && *d >= 3.0)
+        .map(|d| d.clamp(4.0, 180.0))
+        .unwrap_or_else(|| infer_target_duration_sec(&req.prompt, &project));
 
     emit_swarm_log(
         backend.as_ref(),
@@ -883,6 +897,7 @@ where
             &brand,
             &assets,
             &req.prompt,
+            req.approved_plan.as_ref(),
             &cancel,
         )
         .await
@@ -2448,6 +2463,7 @@ mod tests {
                 allow_local_fallback: true,
                 max_turns_per_worker: Some(2),
                 skip_qa: false,
+                approved_plan: None,
             },
             CancellationToken::new(),
             |_| {},
@@ -2527,6 +2543,7 @@ mod tests {
                 allow_local_fallback: true,
                 max_turns_per_worker: Some(4),
                 skip_qa: false,
+                approved_plan: None,
             },
             CancellationToken::new(),
             |_| {},

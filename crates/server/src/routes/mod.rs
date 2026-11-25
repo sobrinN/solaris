@@ -89,6 +89,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/agent/models", get(agent::get_recommended_models))
         .route("/api/v1/agent/skills", get(agent::get_skills))
+        .route("/api/v1/agent/plan", post(agent::generate_plan))
         .route(
             "/api/v1/logs",
             get(agent::get_logs).delete(agent::clear_logs),
@@ -2385,6 +2386,61 @@ mod tests {
             .filter(|s| s.get("id").and_then(|v| v.as_str()) == Some("solaris-demo-reel"))
             .count();
         assert_eq!(demo_count, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn agent_plan_endpoint_generates_custom_plan_and_validates_prompt() {
+        let dir = std::env::temp_dir().join(format!("solaris_srv_plan_{}", uuid::Uuid::new_v4()));
+        let state = AppState::initialize(&ServerConfig {
+            workspace_dir: dir.clone(),
+            ..ServerConfig::default()
+        })
+        .expect("init state");
+        let app = build_router(state);
+
+        // Empty prompt rejected with 400
+        let bad = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/v1/agent/plan")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"prompt":"   "}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+        // Valid prompt returns a structured, skill-grounded creative plan
+        let ok = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/v1/agent/plan")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"prompt":"Create a 22s 16:9 kinetic launch video for a Rust compiler","aspect_preset":"landscape16x9"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(ok.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let plan: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(plan["production_mode"], "programmatic");
+        assert!(plan["beats"].as_array().is_some_and(|b| !b.is_empty()));
+        assert!(
+            plan["skills_consulted"]
+                .as_array()
+                .is_some_and(|s| s.iter().any(|v| v == "director-core"))
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

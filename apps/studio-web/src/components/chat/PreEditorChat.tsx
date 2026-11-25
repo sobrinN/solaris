@@ -12,6 +12,7 @@ import {
   Music,
   Palette,
   Paperclip,
+  RefreshCw,
   Sparkles,
   X,
 } from "lucide-react";
@@ -19,6 +20,8 @@ import type {
   AgentStatusResponse,
   AspectPreset,
   BrandPlaybook,
+  CreativePlan,
+  GeneratePlanRequest,
   HealthResponse,
   ModelAdvisorResponse,
   Project,
@@ -26,7 +29,7 @@ import type {
   ProjectTemplateInfo,
 } from "@solaris/engine-client";
 import { isOmniModalModel } from "../AiSettingsModal";
-import { SolarisOrb, SolarisWordmark } from "../SolarisBrand";
+import { SolarisWordmark } from "../SolarisBrand";
 import { SolarSelect } from "../ui/SolarSelect";
 
 interface PreEditorChatProps {
@@ -46,6 +49,7 @@ interface PreEditorChatProps {
   onOpenAiSettings: () => void;
   onFilesDropped: (files: File[], aspect: AspectPreset) => Promise<void>;
   onRemoveFile?: (file: File) => Promise<void>;
+  onGeneratePlan: (req: GeneratePlanRequest) => Promise<CreativePlan>;
   onOpenExistingProject: (projectId: string) => Promise<void>;
   onLaunchStudio: (params: {
     prompt: string;
@@ -55,6 +59,7 @@ interface PreEditorChatProps {
     agentMode: "openrouter" | "mcp";
     templateId?: string;
     templateName?: string;
+    approvedPlan?: CreativePlan;
   }) => Promise<void>;
 }
 
@@ -81,6 +86,7 @@ export function PreEditorChat({
   onOpenAiSettings,
   onFilesDropped,
   onRemoveFile,
+  onGeneratePlan,
   onOpenExistingProject,
   onLaunchStudio,
 }: PreEditorChatProps) {
@@ -90,6 +96,10 @@ export function PreEditorChat({
   const [files, setFiles] = useState<File[]>([]);
   const [agentMode, setAgentMode] = useState<"openrouter" | "mcp">("openrouter");
   const [showPlanCard, setShowPlanCard] = useState(false);
+  const [creativePlan, setCreativePlan] = useState<CreativePlan | null>(null);
+  const [planLoading, setPlanLoading] = useState(false);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const [planRefinement, setPlanRefinement] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [recentOpen, setRecentOpen] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -168,6 +178,52 @@ export function PreEditorChat({
     }
   };
 
+  const handleGeneratePlan = async (opts?: { refinement?: string }) => {
+    const trimmed = prompt.trim();
+    if (!trimmed) {
+      setShowPlanCard(true);
+      setPlanError("Describe what kind of video you want first, then generate a plan.");
+      return;
+    }
+    if (planLoading) return;
+    setShowPlanCard(true);
+    setPlanLoading(true);
+    setPlanError(null);
+    try {
+      const refinement = opts?.refinement?.trim();
+      const generated = await onGeneratePlan({
+        prompt: trimmed,
+        aspect_preset: aspect,
+        brand_playbook_id: selectedBrandId,
+        project_id: draftProject?.id,
+        model_override: selectedModelOverride || undefined,
+        refinement_note: refinement || undefined,
+        previous_plan: refinement && creativePlan ? creativePlan : undefined,
+      });
+      setCreativePlan(generated);
+      if (refinement) {
+        setPlanRefinement("");
+      }
+    } catch (err) {
+      setPlanError(
+        err instanceof Error ? err.message : "Failed to generate creative plan",
+      );
+    } finally {
+      setPlanLoading(false);
+    }
+  };
+
+  const handleTogglePlan = () => {
+    if (showPlanCard) {
+      setShowPlanCard(false);
+      return;
+    }
+    setShowPlanCard(true);
+    if (!creativePlan && prompt.trim()) {
+      void handleGeneratePlan();
+    }
+  };
+
   const canSubmit =
     !submitting && (Boolean(prompt.trim()) || hasAttachments || Boolean(selectedTemplateId));
 
@@ -187,6 +243,7 @@ export function PreEditorChat({
         agentMode,
         templateId: selectedTemplateId ?? undefined,
         templateName: tpl?.name,
+        approvedPlan: creativePlan ?? undefined,
       });
     } catch (err) {
       setErrorMsg(
@@ -346,22 +403,21 @@ export function PreEditorChat({
       </header>
 
       {/* Unified Centered Intake Stage (Hero + Composer + Starter Chips) */}
-      <main className="relative z-10 mx-auto flex w-full max-w-3xl flex-1 flex-col items-center justify-center px-4 py-8 sm:py-10">
-        {/* Hero Identity */}
-        <div className="flex max-w-xl flex-col items-center text-center">
-          <SolarisOrb size={64} />
-          <h1 className="mt-6 text-[clamp(2rem,4vw,3.1rem)] font-light leading-[1.1] tracking-[-0.03em] text-areia">
+      <main className="relative z-10 mx-auto flex w-full max-w-3xl flex-1 flex-col items-center justify-center px-4 pb-16 pt-8 sm:pb-20 sm:pt-10">
+        {/* Hero Headline (clean editorial stack without duplicate center orb) */}
+        <div className="flex max-w-2xl flex-col items-center text-center">
+          <h1 className="text-[clamp(1.95rem,3.6vw,2.85rem)] font-light leading-[1.12] tracking-[-0.03em] text-areia">
             Direct your next cut with{" "}
             <span className="font-normal text-solar-gradient">Solaris</span>
           </h1>
-          <p className="mt-3 max-w-md text-sm leading-relaxed text-areia/65">
+          <p className="mt-2.5 max-w-lg text-sm leading-relaxed text-areia/60">
             Drop A-roll, B-roll, voiceovers, music, or scripts. Attach a brand playbook
             and let Solaris or your MCP agent cut the timeline.
           </p>
         </div>
 
         {/* Floating 24px Carbono Glass MediaComposer */}
-        <section className="mt-7 w-full">
+        <section className="mt-8 w-full">
           {errorMsg && (
             <div className="mb-3 rounded-xl border border-vermelho-foco/40 bg-vermelho-foco/15 px-3.5 py-2 text-xs text-areia">
               {errorMsg}
@@ -383,40 +439,243 @@ export function PreEditorChat({
             </div>
           )}
 
-          {/* Optional Lightweight Pre-Editor Shotlist Plan Card */}
+          {/* Skill-Driven Interactive AI Creative Plan */}
           {showPlanCard && (
-            <div className="mb-2.5 rounded-2xl border border-laranja-criacao/30 bg-carbono/85 p-3.5 text-xs backdrop-blur-md">
-              <div className="mb-2 flex items-center justify-between">
-                <div className="flex items-center gap-1.5 font-semibold text-amarelo-ideias">
-                  <ListChecks className="h-3.5 w-3.5" />
-                  <span>Pre-Editor Shotlist Blueprint</span>
+            <div className="mb-3 rounded-2xl border border-laranja-criacao/35 bg-carbono/90 p-4 text-xs shadow-[0_18px_48px_-20px_rgba(0,0,0,0.8)] backdrop-blur-md">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  <ListChecks className="h-4 w-4 shrink-0 text-amarelo-ideias" />
+                  <span className="truncate font-semibold text-areia">
+                    {creativePlan ? creativePlan.title : "AI Creative Plan"}
+                  </span>
+                  {creativePlan && (
+                    <>
+                      <span className="shrink-0 rounded-full border border-amarelo-ideias/35 bg-amarelo-ideias/12 px-2 py-0.5 text-[10px] font-medium text-amarelo-ideias">
+                        {creativePlan.approach}
+                      </span>
+                      <span className="tabular-nums shrink-0 rounded-full border border-areia/14 bg-void/70 px-2 py-0.5 text-[10px] text-areia/75">
+                        {Math.round(creativePlan.target_duration_sec)}s
+                      </span>
+                      {creativePlan.used_local_fallback ? (
+                        <span className="shrink-0 rounded-full border border-laranja-criacao/40 bg-laranja-criacao/15 px-2 py-0.5 text-[10px] text-areia/85">
+                          Local Draft
+                        </span>
+                      ) : (
+                        <span className="hidden shrink-0 truncate rounded-full border border-areia/12 bg-void/60 px-2 py-0.5 text-[10px] text-areia/65 sm:inline-block max-w-[170px]">
+                          {creativePlan.model_used}
+                        </span>
+                      )}
+                    </>
+                  )}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setShowPlanCard(false)}
-                  className="text-[10px] text-areia/55 hover:text-areia"
-                >
-                  Hide
-                </button>
+
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={planLoading || !prompt.trim()}
+                    onClick={() => void handleGeneratePlan()}
+                    className="flex items-center gap-1 rounded-full border border-areia/14 bg-void/70 px-2.5 py-1 text-[10px] text-areia/85 transition-colors hover:border-amarelo-ideias/50 disabled:opacity-45 motion-reduce:transition-none"
+                  >
+                    <RefreshCw
+                      className={`h-3 w-3 text-amarelo-ideias ${
+                        planLoading ? "animate-spin motion-reduce:animate-none" : ""
+                      }`}
+                    />
+                    <span>{creativePlan ? "Regenerate" : "Generate Plan"}</span>
+                  </button>
+                  {creativePlan && (
+                    <button
+                      type="button"
+                      disabled={planLoading}
+                      onClick={() => {
+                        setCreativePlan(null);
+                        setPlanRefinement("");
+                      }}
+                      className="rounded-full border border-areia/12 px-2 py-1 text-[10px] text-areia/55 hover:text-areia"
+                    >
+                      Clear
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setShowPlanCard(false)}
+                    className="rounded-full px-2 py-1 text-[10px] text-areia/55 hover:text-areia"
+                  >
+                    Hide
+                  </button>
+                </div>
               </div>
-              <div className="grid grid-cols-1 gap-1.5 text-[11px] text-areia/80 sm:grid-cols-2">
-                <div className="rounded-lg bg-void/65 px-2.5 py-1.5">
-                  <span className="font-semibold text-track-v1">Stage 1 · Spine (V1/A1):</span>{" "}
-                  Cut &gt;0.25s silences with 0.12s breath pad &amp; 1.08× hook punch-in.
+
+              {planError && (
+                <div className="mt-2.5 rounded-xl border border-vermelho-foco/40 bg-vermelho-foco/15 px-3 py-2 text-[11px] text-areia">
+                  {planError}
                 </div>
-                <div className="rounded-lg bg-void/65 px-2.5 py-1.5">
-                  <span className="font-semibold text-track-v2">Stage 2 · Visuals (V2/FX):</span>{" "}
-                  B-roll inserts, Ken Burns stills &amp; Log-to-Rec.709 + Brand LUT recovery.
+              )}
+
+              {planLoading ? (
+                <div className="mt-3 flex items-center gap-2.5 rounded-xl border border-areia/10 bg-void/65 px-3.5 py-4 text-[11px] text-areia/80">
+                  <Loader2 className="h-4 w-4 shrink-0 animate-spin text-amarelo-ideias motion-reduce:animate-none" />
+                  <span>
+                    Reading Solaris directing skills and crafting a tailored plan from your prompt...
+                  </span>
                 </div>
-                <div className="rounded-lg bg-void/65 px-2.5 py-1.5">
-                  <span className="font-semibold text-track-t1">Stage 2 · Overlays (T1/G1):</span>{" "}
-                  80% safe-zone word-synced captions + brand-tokenized GSAP cards.
+              ) : creativePlan ? (
+                <div className="mt-3 space-y-3">
+                  {/* Skills Consulted */}
+                  {creativePlan.skills_consulted.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[10px] uppercase tracking-[0.12em] text-areia/45">
+                        Skills
+                      </span>
+                      {creativePlan.skills_consulted.map((skill) => (
+                        <span
+                          key={skill}
+                          className="rounded-full border border-areia/10 bg-void/65 px-2 py-0.5 text-[10px] text-areia/70"
+                        >
+                          {skill}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Editable Creative Direction */}
+                  <div>
+                    <label
+                      htmlFor="creative-plan-direction"
+                      className="mb-1 block text-[10px] font-medium uppercase tracking-[0.12em] text-areia/50"
+                    >
+                      Creative Direction
+                    </label>
+                    <textarea
+                      id="creative-plan-direction"
+                      rows={2}
+                      value={creativePlan.creative_direction}
+                      onChange={(e) =>
+                        setCreativePlan((prev) =>
+                          prev ? { ...prev, creative_direction: e.target.value } : prev,
+                        )
+                      }
+                      className="w-full resize-none rounded-xl border border-areia/10 bg-void/65 px-3 py-2 text-[11px] leading-relaxed text-areia/90 outline-none focus:border-laranja-criacao/60"
+                    />
+                  </div>
+
+                  {/* Dynamic Beats / Scenes */}
+                  {creativePlan.beats.length > 0 && (
+                    <div className="max-h-56 space-y-1.5 overflow-y-auto pr-1">
+                      {creativePlan.beats.map((beat, idx) => (
+                        <div
+                          key={`${beat.title}-${idx}`}
+                          className="rounded-xl border border-areia/10 bg-void/65 px-3 py-2"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex min-w-0 items-center gap-2">
+                              <span className="tabular-nums shrink-0 rounded bg-grafite px-1.5 py-0.5 text-[10px] font-semibold text-amarelo-ideias">
+                                {beat.time_range || `Beat ${idx + 1}`}
+                              </span>
+                              <span className="truncate font-semibold text-areia">
+                                {beat.title}
+                              </span>
+                            </div>
+                            {creativePlan.beats.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setCreativePlan((prev) =>
+                                    prev
+                                      ? {
+                                          ...prev,
+                                          beats: prev.beats.filter((_, i) => i !== idx),
+                                        }
+                                      : prev,
+                                  )
+                                }
+                                className="rounded p-0.5 text-areia/40 hover:text-areia"
+                                aria-label={`Remove beat ${beat.title}`}
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            )}
+                          </div>
+                          <input
+                            type="text"
+                            value={beat.visual_direction}
+                            onChange={(e) => {
+                              const nextVal = e.target.value;
+                              setCreativePlan((prev) => {
+                                if (!prev) return prev;
+                                const beats = prev.beats.map((b, i) =>
+                                  i === idx ? { ...b, visual_direction: nextVal } : b,
+                                );
+                                return { ...prev, beats };
+                              });
+                            }}
+                            aria-label={`Visual direction for ${beat.title}`}
+                            className="mt-1.5 w-full rounded-lg border border-transparent bg-transparent px-1 py-0.5 text-[11px] leading-snug text-areia/85 outline-none hover:border-areia/10 focus:border-laranja-criacao/50 focus:bg-carbono/60"
+                          />
+                          {beat.audio_and_captions && (
+                            <p className="mt-1 px-1 text-[10px] text-areia/55">
+                              Audio / Captions: {beat.audio_and_captions}
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Style Notes */}
+                  {creativePlan.style_notes.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {creativePlan.style_notes.map((note, idx) => (
+                        <span
+                          key={idx}
+                          className="rounded-lg border border-areia/10 bg-carbono px-2 py-1 text-[10px] text-areia/75"
+                        >
+                          {note}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Refine & Approve Footer */}
+                  <div className="flex flex-wrap items-center gap-2 border-t border-areia/10 pt-2.5">
+                    <input
+                      type="text"
+                      value={planRefinement}
+                      onChange={(e) => setPlanRefinement(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && planRefinement.trim()) {
+                          e.preventDefault();
+                          void handleGeneratePlan({ refinement: planRefinement });
+                        }
+                      }}
+                      placeholder="Refine plan (e.g. 'make the hook faster, cut to 15s, calmer tone')..."
+                      className="h-8 min-w-[200px] flex-1 rounded-full border border-areia/12 bg-void/75 px-3 text-[11px] text-areia placeholder:text-areia/35 outline-none focus:border-laranja-criacao/60"
+                    />
+                    <button
+                      type="button"
+                      disabled={planLoading || !planRefinement.trim()}
+                      onClick={() => void handleGeneratePlan({ refinement: planRefinement })}
+                      className="h-8 rounded-full border border-areia/14 bg-grafite/80 px-3 text-[11px] text-areia/90 transition-colors hover:border-amarelo-ideias/50 disabled:opacity-40 motion-reduce:transition-none"
+                    >
+                      Refine
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!canSubmit}
+                      onClick={() => void handleSubmit()}
+                      className="btn-solar-outline h-8 px-3.5 text-[11px] font-medium text-areia disabled:opacity-45"
+                    >
+                      Approve &amp; Launch
+                    </button>
+                  </div>
                 </div>
-                <div className="rounded-lg bg-void/65 px-2.5 py-1.5">
-                  <span className="font-semibold text-track-a1">Stage 3 · Mix &amp; QA:</span>{" "}
-                  -14 LUFS voice, -18 dB music ducking &amp; 3-frame playback QA inspection.
+              ) : (
+                <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-areia/10 bg-void/60 px-3.5 py-3 text-[11px] text-areia/70">
+                  <span>
+                    Describe your video below and click <strong className="font-medium text-areia">Generate Plan</strong>. Solaris will read its directing skills and build a custom plan from your prompt.
+                  </span>
                 </div>
-              </div>
+              )}
             </div>
           )}
 
@@ -458,10 +717,10 @@ export function PreEditorChat({
                         aria-label="OpenRouter Swarm Model"
                         value={selectedModelOverride}
                         onChange={(e) => onSelectModelOverride(e.target.value)}
-                        className="max-w-[240px] sm:max-w-[300px]"
+                        className="max-w-[235px] sm:max-w-[270px]"
                       >
                         <option value="" className="bg-carbono">
-                          Auto: {modelAdvisor.director.primary}
+                          Auto · {modelAdvisor.director.primary}
                         </option>
                         {modelAdvisor.director.candidates.slice(0, 12).map((c) => {
                           const price =
@@ -470,8 +729,7 @@ export function PreEditorChat({
                               : "";
                           return (
                             <option key={c.id} value={c.id} className="bg-carbono">
-                              {c.id} {isOmniModalModel(c) ? "(Video+Audio)" : "(Programmatic)"}
-                              {price}
+                              {c.id} ({isOmniModalModel(c) ? "Omni" : "Prog"}){price}
                             </option>
                           );
                         })}
@@ -614,16 +872,20 @@ export function PreEditorChat({
 
                   <button
                     type="button"
-                    onClick={() => setShowPlanCard((v) => !v)}
+                    onClick={handleTogglePlan}
                     className={`flex h-9 items-center gap-1.5 whitespace-nowrap rounded-full border px-3 text-xs transition-colors motion-reduce:transition-none ${
-                      showPlanCard
+                      showPlanCard || creativePlan
                         ? "border-amarelo-ideias/50 bg-amarelo-ideias/15 text-amarelo-ideias"
                         : "border-areia/12 bg-grafite/75 text-areia/80 hover:border-areia/25 hover:bg-accent"
                     }`}
-                    title="Preview Director Shotlist Plan before launching Studio"
+                    title="Generate an AI Creative Plan grounded in Solaris directing skills before launching Studio"
                   >
-                    <ListChecks className="h-3.5 w-3.5" />
-                    <span>Plan</span>
+                    {planLoading ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+                    ) : (
+                      <ListChecks className="h-3.5 w-3.5" />
+                    )}
+                    <span>{creativePlan ? "Plan Ready" : "Plan"}</span>
                   </button>
                 </div>
 
