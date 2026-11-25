@@ -10,6 +10,6 @@
     "dev": "npm run dev --workspace=@solaris/studio-web",
     "build": "npm run build --workspace=@solaris/engine-client && npm run build --workspace=@solaris/gfx-runtime && npm run build --workspace=@solaris/studio-web",
     "typecheck": "npm run build --workspace=@solaris/engine-client && npm run build --workspace=@solaris/gfx-runtime && npm run typecheck --workspace=@solaris/studio-web",
-    "test": "npm run test --workspace=@solaris/gfx-runtime"
+    "test": "npm run test --workspace=@solaris/gfx-runtime && npm run test:unit --workspace=@solaris/studio-web"
   }
 }

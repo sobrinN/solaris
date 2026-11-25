@@ -266,6 +266,23 @@ export interface AssetPackImportResponse {
   assets: SavedCodeAsset[];
 }
 
+export interface AssetDeleteResponse {
+  deleted: boolean;
+  asset_id: string;
+}
+
+export interface AssetRestoreResponse {
+  restored_count: number;
+  assets: SavedCodeAsset[];
+}
+
+export type SwarmRunMode = "auto" | "generate" | "refine";
+
+export interface SwarmChatTurn {
+  role: "user" | "assistant";
+  text: string;
+}
+
 export type SwarmRunState =
   | "queued"
   | "planning"
@@ -286,6 +303,7 @@ export interface SwarmRunStatus {
   active_roles: AgentRole[];
   ops_committed: number;
   summary?: string | null;
+  refinement_summary?: string | null;
   error?: string | null;
   qa_report?: QaReport | null;
   started_at: string;
@@ -329,6 +347,10 @@ export interface SwarmRunRequest {
   max_turns_per_worker?: number;
   skip_qa?: boolean;
   approved_plan?: CreativePlan;
+  mode?: SwarmRunMode;
+  selected_clip_ids?: string[];
+  playhead_sec?: number;
+  conversation_history?: SwarmChatTurn[];
 }
 
 export interface AgentStatusResponse {
@@ -564,7 +586,8 @@ export type TimelineCommand =
       solo?: boolean;
       locked?: boolean;
     }
-  | { type: "set_brand_playbook"; brand_playbook_id: string };
+  | { type: "set_brand_playbook"; brand_playbook_id: string }
+  | { type: "batch"; commands: TimelineCommand[]; summary?: string };
 
 export interface OpResult {
   revision: number;
@@ -633,6 +656,11 @@ export type EngineEvent =
       event: "log_emitted";
       project_id?: string | null;
       entry: LogEntry;
+    }
+  | {
+      event: "assets_changed";
+      action: string;
+      asset_id?: string | null;
     };
 
 export interface EngineEventEnvelope {

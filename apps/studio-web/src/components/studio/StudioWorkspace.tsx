@@ -5,14 +5,12 @@ import {
   Download,
   Film,
   Image as ImageIcon,
-  Layers,
   Music,
   Palette,
   Plus,
   Redo2,
   Terminal,
   Undo2,
-  Upload,
   Users,
   X,
 } from "lucide-react";
@@ -24,7 +22,6 @@ import type {
   CaptionBlock,
   CaptionPreset,
   Clip,
-  CodeAssetPackManifest,
   ColorGrade,
   EngineEventEnvelope,
   ExportJobStatus,
@@ -36,10 +33,18 @@ import type {
   SavedCodeAsset,
   SolarisEngineClient,
   SwarmRunStatus,
+  TimelineCommand,
   Transform2D,
 } from "@solaris/engine-client";
-import { buildSandboxedGfxDoc, escapeHtml } from "@solaris/gfx-runtime";
+import { escapeHtml } from "@solaris/gfx-runtime";
 import { SolarisAudioEngine } from "../../lib/audioEngine";
+import {
+  buildBatchDelete,
+  buildBatchSplitAtPlayhead,
+  buildGroupMoveBatch,
+  lockedClipCount,
+  resolveSelection,
+} from "../../lib/timelineSelection";
 import { SolarisWordmark } from "../SolarisBrand";
 import {
   BroadcastScopes,
@@ -47,13 +52,18 @@ import {
   type SampledPixelFrame,
 } from "./BroadcastScopes";
 import { ExportModal } from "./ExportModal";
+import { GfxBinPanel } from "./GfxBinPanel";
 import { InspectorPanel } from "./InspectorPanel";
 import { LogsDrawer } from "./LogsDrawer";
-import { SandboxedGfxFrame } from "./SandboxedGfxFrame";
 import { SourceMonitor } from "./SourceMonitor";
-import { SwarmActivityPanel, type ActivityEntry } from "./SwarmActivityPanel";
+import {
+  SwarmActivityPanel,
+  type ActivityEntry,
+  type StartSwarmOptions,
+} from "./SwarmActivityPanel";
 import { SwarmCursorLayer } from "./SwarmCursorLayer";
 import { TimelinePanel } from "./TimelinePanel";
+import { useGfxAssetSync } from "./useGfxAssetSync";
 import { WebGLProgramStage, type StageVisualLayer } from "./WebGLProgramStage";
 
 const EMPTY_ROLES: AgentRole[] = [];
@@ -144,10 +154,13 @@ export function StudioWorkspace({
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(
     project.media_pool[0]?.id ?? null,
   );
-  const [selectedClipRef, setSelectedClipRef] = useState<{
-    trackId: string;
-    clipId: string;
-  } | null>(null);
+  const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
+  const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSelectedClipIds([]);
+    setSelectionAnchorId(null);
+  }, [project.id]);
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [logsDrawerOpen, setLogsDrawerOpen] = useState(false);
   const [brandLut, setBrandLut] = useState<ParsedCubeLut | null>(null);
@@ -155,9 +168,9 @@ export function StudioWorkspace({
   const [transcribingMediaId, setTranscribingMediaId] = useState<string | null>(null);
   const [mediaErrorMsg, setMediaErrorMsg] = useState<string | null>(null);
   const [opErrorToast, setOpErrorToast] = useState<string | null>(null);
+  const [statusToast, setStatusToast] = useState<string | null>(null);
   const [qaRunning, setQaRunning] = useState(false);
   const [qaError, setQaError] = useState<string | null>(null);
-  const [assetPackError, setAssetPackError] = useState<string | null>(null);
   const [viewerMode, setViewerMode] = useState<"program" | "source">("program");
   const [liveAudioMeters, setLiveAudioMeters] = useState<{
     voicePct: number;
@@ -167,20 +180,52 @@ export function StudioWorkspace({
 
   const scopesRef = useRef<BroadcastScopesHandle | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const assetPackInputRef = useRef<HTMLInputElement | null>(null);
   const audioEngineRef = useRef<SolarisAudioEngine | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const statusToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const exportModalOpenRef = useRef(false);
+  exportModalOpenRef.current = exportModalOpen;
   const activeVisualLayersCacheRef = useRef<{
     sig: string;
     layers: StageVisualLayer[];
   }>({ sig: "", layers: [] });
 
   const showErrorToast = useCallback((err: unknown, fallback: string) => {
-    const msg = err instanceof Error ? err.message : fallback;
+    const msg = typeof err === "string" ? err : err instanceof Error ? err.message : fallback;
     setOpErrorToast(msg);
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     toastTimerRef.current = setTimeout(() => setOpErrorToast(null), 5000);
   }, []);
+
+  const showStatusToast = useCallback((message: string) => {
+    setStatusToast(message);
+    if (statusToastTimerRef.current) clearTimeout(statusToastTimerRef.current);
+    statusToastTimerRef.current = setTimeout(() => setStatusToast(null), 6000);
+  }, []);
+
+  const handleExportDelivered = useCallback(
+    (savedPath: string, browserDownload: boolean) => {
+      if (exportModalOpenRef.current) return;
+      const message = browserDownload
+        ? `Downloaded to ${savedPath}`
+        : `Rendered video saved to ${savedPath}`;
+      showStatusToast(message);
+    },
+    [showStatusToast],
+  );
+
+  useEffect(() => {
+    return () => {
+      if (statusToastTimerRef.current) clearTimeout(statusToastTimerRef.current);
+    };
+  }, []);
+
+  useGfxAssetSync({
+    client,
+    events,
+    onAssets: onAssetsReplaced,
+    onError: (message) => showErrorToast(message, "GFX library refresh failed"),
+  });
 
   useEffect(() => {
     const engine = new SolarisAudioEngine();
@@ -362,13 +407,20 @@ export function StudioWorkspace({
     [project.media_pool, selectedMediaId],
   );
 
+  const selectedClips = useMemo(
+    () => resolveSelection(project.tracks, selectedClipIds),
+    [project.tracks, selectedClipIds],
+  );
+
   const selectedClip = useMemo(() => {
-    if (!selectedClipRef) return null;
-    const track = project.tracks.find((t) => t.id === selectedClipRef.trackId);
-    const clip = track?.clips.find((c) => c.id === selectedClipRef.clipId);
-    if (!track || !clip) return null;
-    return { trackId: track.id, clip };
-  }, [project.tracks, selectedClipRef]);
+    if (selectedClips.length !== 1) return null;
+    return { trackId: selectedClips[0].trackId, clip: selectedClips[0].clip };
+  }, [selectedClips]);
+
+  const hasTimelineClips = useMemo(
+    () => project.tracks.some((t) => t.clips.length > 0),
+    [project.tracks],
+  );
 
   // Honor track.solo across visual tracks + exclusive end boundary `playheadSec < start + dur`
   const anyVisualSolo = useMemo(
@@ -760,7 +812,8 @@ export function StudioWorkspace({
         { agent_id: "user", role: "user", reason: `added ${item.name} to ${trackId}` },
       );
       onProjectUpdate(res.project);
-      setSelectedClipRef({ trackId, clipId });
+      setSelectedClipIds([clipId]);
+      setSelectionAnchorId(clipId);
     } catch (err) {
       showErrorToast(err, `Failed to place '${item.name}' on ${trackId.toUpperCase()}`);
     }
@@ -858,52 +911,76 @@ export function StudioWorkspace({
     }
   };
 
+  const handleApplyBatchCommand = useCallback(
+    async (command: TimelineCommand, lockedSkipped = 0) => {
+      try {
+        const res = await client.applyOp(project.id, command, {
+          agent_id: "user",
+          role: "user",
+        });
+        onProjectUpdate(res.project);
+        if (lockedSkipped > 0) {
+          showStatusToast(
+            `Skipped ${lockedSkipped} locked ${lockedSkipped === 1 ? "clip" : "clips"}.`,
+          );
+        }
+      } catch (err) {
+        showErrorToast(err, "Failed to apply batch edit (a track may be locked)");
+      }
+    },
+    [client, onProjectUpdate, project.id, showErrorToast, showStatusToast],
+  );
+
+  const handleGroupMove = useCallback(
+    async (deltaSec: number) => {
+      const cmd = buildGroupMoveBatch(selectedClips, deltaSec);
+      const skipped = lockedClipCount(selectedClips);
+      if (!cmd) {
+        if (skipped > 0) {
+          showStatusToast(`Skipped ${skipped} locked ${skipped === 1 ? "clip" : "clips"}.`);
+        }
+        return;
+      }
+      await handleApplyBatchCommand(cmd, skipped);
+    },
+    [handleApplyBatchCommand, selectedClips, showStatusToast],
+  );
+
   const handleSplitSelectedClip = useCallback(async () => {
-    if (!selectedClip) return;
-    const { trackId, clip } = selectedClip;
-    if (
-      playheadSec <= clip.start_sec + 0.02 ||
-      playheadSec >= clip.start_sec + clip.duration_sec - 0.02
-    ) {
+    if (selectedClips.length === 0) return;
+    let seq = 0;
+    const stamp = Date.now().toString(36);
+    const cmd = buildBatchSplitAtPlayhead(
+      selectedClips,
+      playheadSec,
+      () => `clip_r_${stamp}_${seq++}`,
+    );
+    const skipped = lockedClipCount(selectedClips);
+    if (!cmd) {
+      if (skipped > 0) {
+        showStatusToast(`Skipped ${skipped} locked ${skipped === 1 ? "clip" : "clips"}.`);
+      }
       return;
     }
-    const rightId = `${clip.id}_r_${Date.now().toString(36)}`;
-    try {
-      const res = await client.applyOp(
-        project.id,
-        {
-          type: "split_clip",
-          track_id: trackId,
-          clip_id: clip.id,
-          split_at_timeline_sec: Number(playheadSec.toFixed(3)),
-          right_clip_id: rightId,
-        },
-        { agent_id: "user", role: "user" },
-      );
-      onProjectUpdate(res.project);
-    } catch (err) {
-      showErrorToast(err, "Failed to split clip (track may be locked)");
-    }
-  }, [client, onProjectUpdate, playheadSec, project.id, selectedClip, showErrorToast]);
+    await handleApplyBatchCommand(cmd, skipped);
+  }, [handleApplyBatchCommand, playheadSec, selectedClips, showStatusToast]);
 
   const handleDeleteSelectedClip = useCallback(async () => {
-    if (!selectedClip) return;
-    try {
-      const res = await client.applyOp(
-        project.id,
-        {
-          type: "delete_clip",
-          track_id: selectedClip.trackId,
-          clip_id: selectedClip.clip.id,
-        },
-        { agent_id: "user", role: "user" },
-      );
-      setSelectedClipRef(null);
-      onProjectUpdate(res.project);
-    } catch (err) {
-      showErrorToast(err, "Failed to delete clip (track may be locked)");
+    if (selectedClips.length === 0) return;
+    const cmd = buildBatchDelete(selectedClips);
+    const skipped = lockedClipCount(selectedClips);
+    if (!cmd) {
+      if (skipped > 0) {
+        showStatusToast(`Skipped ${skipped} locked ${skipped === 1 ? "clip" : "clips"}.`);
+      }
+      return;
     }
-  }, [client, onProjectUpdate, project.id, selectedClip, showErrorToast]);
+    await handleApplyBatchCommand(cmd, skipped);
+    setSelectedClipIds((prev) =>
+      prev.filter((id) => selectedClips.some((s) => s.clip.id === id && s.locked)),
+    );
+    setSelectionAnchorId(null);
+  }, [handleApplyBatchCommand, selectedClips, showStatusToast]);
 
   // Global keyboard shortcuts (disabled when modals/drawers are open or interactive elements are focused)
   useEffect(() => {
@@ -932,9 +1009,20 @@ export function StudioWorkspace({
         } else {
           void handleUndo();
         }
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a") {
+        e.preventDefault();
+        const allIds = project.tracks.flatMap((t) =>
+          [...t.clips].sort((a, b) => a.start_sec - b.start_sec).map((c) => c.id),
+        );
+        setSelectedClipIds(allIds);
+        setSelectionAnchorId(allIds[0] ?? null);
+      } else if (e.key === "Escape" && selectedClipIds.length > 0) {
+        e.preventDefault();
+        setSelectedClipIds([]);
+        setSelectionAnchorId(null);
       } else if (
         (e.key === "Delete" || e.key === "Backspace") &&
-        selectedClipRef
+        selectedClipIds.length > 0
       ) {
         e.preventDefault();
         void handleDeleteSelectedClip();
@@ -942,7 +1030,7 @@ export function StudioWorkspace({
         e.key.toLowerCase() === "s" &&
         !e.metaKey &&
         !e.ctrlKey &&
-        selectedClipRef
+        selectedClipIds.length > 0
       ) {
         e.preventDefault();
         void handleSplitSelectedClip();
@@ -954,7 +1042,8 @@ export function StudioWorkspace({
     exportModalOpen,
     logsDrawerOpen,
     modalsOpen,
-    selectedClipRef,
+    project.tracks,
+    selectedClipIds,
     handleTogglePlay,
     handleUndo,
     handleRedo,
@@ -962,8 +1051,16 @@ export function StudioWorkspace({
     handleSplitSelectedClip,
   ]);
 
-  const handlePlaceSavedAsset = async (asset: SavedCodeAsset) => {
+  const handlePlaceSavedAsset = async (
+    asset: SavedCodeAsset,
+    atSec?: number,
+    customDurationSec?: number,
+  ) => {
     const clipId = `gfx-${Date.now()}`;
+    const startSec = Number(Math.max(0, atSec ?? playheadSec).toFixed(2));
+    const durationSec = Number(
+      Math.max(0.25, customDurationSec ?? asset.default_duration_sec).toFixed(2),
+    );
     try {
       const res = await client.applyOp(
         project.id,
@@ -972,21 +1069,29 @@ export function StudioWorkspace({
           track_id: "g1",
           clip_id: clipId,
           label: asset.name,
-          start_sec: Number(playheadSec.toFixed(2)),
-          duration_sec: asset.default_duration_sec,
+          start_sec: startSec,
+          duration_sec: durationSec,
           gfx: {
             asset_id: asset.id,
             props: asset.default_props,
             inline_html: asset.html_source,
           },
         },
-        { agent_id: "gfx-01", role: "gfx", reason: `placed ${asset.name}` },
+        { agent_id: "user", role: "user", reason: `placed ${asset.name}` },
       );
       onProjectUpdate(res.project);
-      setSelectedClipRef({ trackId: "g1", clipId });
+      setSelectedClipIds([clipId]);
+      setSelectionAnchorId(clipId);
     } catch (err) {
       showErrorToast(err, "Failed to place GFX asset (G1 track may be locked)");
     }
+  };
+
+  const handlePlaceGfxFromDrop = (asset: SavedCodeAsset, startSec: number) => {
+    const remaining = Math.max(0, totalDurationSec - startSec);
+    const durationSec =
+      remaining >= 0.25 ? Math.min(4, remaining) : Math.min(4, asset.default_duration_sec);
+    void handlePlaceSavedAsset(asset, startSec, durationSec);
   };
 
   const handleUpdateGfxProps = async (
@@ -1081,10 +1186,14 @@ export function StudioWorkspace({
     }
   };
 
-  const handleStartSwarm = async (prompt: string) => {
+  const handleStartSwarm = async (options: StartSwarmOptions) => {
     onClearSwarmError?.();
     const run = await client.startSwarmRun(project.id, {
-      prompt,
+      prompt: options.prompt,
+      mode: options.mode,
+      selected_clip_ids: options.selectedClipIds,
+      playhead_sec: options.playheadSec,
+      conversation_history: options.conversationHistory,
       model_override: selectedModelOverride || undefined,
       allow_local_fallback: !(agentStatus?.openrouter_configured ?? false),
     });
@@ -1124,22 +1233,6 @@ export function StudioWorkspace({
       },
     [activeBrand],
   );
-
-  // Miniature live/cached visual preview docs for Saved Code Assets in Effects · GFX bin
-  const assetThumbDocs = useMemo(() => {
-    const map: Record<string, string> = {};
-    for (const asset of assets) {
-      map[asset.id] = buildSandboxedGfxDoc({
-        htmlSource: asset.html_source,
-        props: asset.default_props,
-        brandTokens: fallbackTokens,
-        fontCss: brandFontCss,
-        durationSec: asset.default_duration_sec || 2.5,
-        initialTimeSec: Math.min(0.8, (asset.default_duration_sec || 2.5) * 0.4),
-      });
-    }
-    return map;
-  }, [assets, fallbackTokens, brandFontCss]);
 
   const aspectBadge =
     project.canvas.aspect_preset === "vertical9x16"
@@ -1189,43 +1282,6 @@ export function StudioWorkspace({
     }
   };
 
-  const handleExportAssetPack = async () => {
-    setAssetPackError(null);
-    try {
-      const pack = await client.exportAssetPack();
-      const blob = new Blob([JSON.stringify(pack, null, 2)], {
-        type: "application/json",
-      });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "solaris-asset-pack.json";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (err) {
-      setAssetPackError(err instanceof Error ? err.message : "Export failed");
-    }
-  };
-
-  const handleImportAssetPack = async (fileList: FileList | null) => {
-    const file = fileList?.[0];
-    if (!file) return;
-    setAssetPackError(null);
-    try {
-      const text = await file.text();
-      const manifest = JSON.parse(text) as CodeAssetPackManifest;
-      await client.importAssetPack(manifest);
-      const refreshed = await client.listAssets();
-      onAssetsReplaced(refreshed);
-    } catch (err) {
-      setAssetPackError(
-        err instanceof Error ? err.message : "Failed to import asset pack",
-      );
-    }
-  };
-
   const handleInsertSourceRange = (media: MediaAsset, sourceIn: number, duration: number) => {
     setViewerMode("program");
     void handleAddMediaToTimeline(media, undefined, playheadSec, { sourceIn, duration });
@@ -1248,6 +1304,7 @@ export function StudioWorkspace({
         client={client}
         activeJob={exportJob}
         onJobStarted={(job) => onExportJobChange(job)}
+        onExportDelivered={handleExportDelivered}
         onClose={() => setExportModalOpen(false)}
       />
 
@@ -1257,6 +1314,25 @@ export function StudioWorkspace({
         onClear={onClearLogs}
         onClose={() => setLogsDrawerOpen(false)}
       />
+
+      {statusToast && !opErrorToast && (
+        <div
+          role="status"
+          className="fixed right-4 bottom-4 z-50 flex max-w-sm items-center gap-2 rounded-xl border border-amarelo-ideias/45 bg-carbono/95 px-3.5 py-2.5 text-xs text-areia shadow-2xl backdrop-blur-md"
+        >
+          <span className="flex-1 truncate" title={statusToast}>
+            {statusToast}
+          </span>
+          <button
+            type="button"
+            onClick={() => setStatusToast(null)}
+            className="rounded-full p-0.5 text-areia/65 hover:text-areia"
+            aria-label="Dismiss notification"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
 
       {opErrorToast && (
         <div
@@ -1388,7 +1464,14 @@ export function StudioWorkspace({
             className="btn-solar-outline flex h-8 items-center gap-1.5 px-4 text-xs font-medium text-areia"
           >
             <Download className="h-3.5 w-3.5 text-amarelo-ideias" />
-            <span>Export</span>
+            <span className="tabular-nums">
+              {exportJob &&
+              (exportJob.state === "queued" ||
+                exportJob.state === "rendering_gfx" ||
+                exportJob.state === "compositing")
+                ? `Export · ${Math.round(exportJob.progress * 100)}%`
+                : "Export"}
+            </span>
           </button>
         </div>
       </header>
@@ -1522,86 +1605,32 @@ export function StudioWorkspace({
             </div>
           </div>
 
-          {/* Saved Code Assets / Effects · GFX Bin with miniature live visual previews */}
-          <div
-            data-cursor-anchor="effects.library"
-            className="flex min-h-0 flex-1 flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-3"
-          >
-            <div className="mb-2 flex flex-wrap items-center justify-between gap-1.5">
-              <div className="flex items-center gap-1.5">
-                <Layers className="h-3 w-3 text-track-g1" />
-                <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
-                  GFX ({assets.length})
-                </span>
-              </div>
-              <div className="flex items-center gap-1">
-                <input
-                  ref={assetPackInputRef}
-                  type="file"
-                  accept="application/json,.json"
-                  onChange={(e) => {
-                    void handleImportAssetPack(e.target.files);
-                    e.currentTarget.value = "";
-                  }}
-                  className="hidden"
-                />
-                <button
-                  type="button"
-                  onClick={() => assetPackInputRef.current?.click()}
-                  title="Import solaris.asset-pack/v1 JSON"
-                  className="flex items-center gap-1 rounded-full border border-areia/12 px-2 py-0.5 text-[10px] text-areia/80 hover:bg-accent"
-                >
-                  <Upload className="h-2.5 w-2.5 text-amarelo-ideias" />
-                  <span>Import</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleExportAssetPack()}
-                  title="Export workspace GFX as solaris.asset-pack/v1 JSON"
-                  className="flex items-center gap-1 rounded-full border border-areia/12 px-2 py-0.5 text-[10px] text-areia/80 hover:bg-accent"
-                >
-                  <Download className="h-2.5 w-2.5 text-laranja-criacao" />
-                  <span>Export</span>
-                </button>
-              </div>
-            </div>
-            {assetPackError && (
-              <div className="mb-1.5 rounded-lg border border-vermelho-foco/40 bg-vermelho-foco/15 px-2 py-1 text-[10px] text-areia">
-                {assetPackError}
-              </div>
-            )}
-            <div className="grid min-h-0 grid-cols-2 content-start gap-1.5 overflow-y-auto pr-0.5">
-              {assets.map((asset) => (
-                <button
-                  key={asset.id}
-                  type="button"
-                  onClick={() => void handlePlaceSavedAsset(asset)}
-                  className="group flex flex-col gap-1 rounded-xl border border-areia/10 bg-void/70 p-1.5 text-left transition-colors hover:border-track-g1/50 hover:bg-accent motion-reduce:transition-none"
-                >
-                  <div className="relative h-16 w-full overflow-hidden rounded-lg border border-areia/10 bg-carbono/90">
-                    <SandboxedGfxFrame
-                      client={client}
-                      ticketVersion={ticketVersion}
-                      title={`Preview ${asset.name}`}
-                      doc={assetThumbDocs[asset.id]}
-                      lazy
-                      tabIndex={-1}
-                      className="pointer-events-none absolute top-1/2 left-1/2 h-[192px] w-[340px] -translate-x-1/2 -translate-y-1/2 scale-[0.33] border-0 bg-transparent"
-                    />
-                  </div>
-                  <div className="flex items-center justify-between px-1 text-[10px] text-areia/85">
-                    <span className="truncate font-medium">{asset.name}</span>
-                    <Plus className="h-3 w-3 shrink-0 text-track-g1" />
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
+          <GfxBinPanel
+            client={client}
+            projectId={project.id}
+            ticketVersion={ticketVersion}
+            assets={assets}
+            aspect={aspectBadge}
+            brandTokens={fallbackTokens}
+            brandFontCss={brandFontCss}
+            playheadSec={playheadSec}
+            onAddAtPlayhead={(asset) => void handlePlaceSavedAsset(asset)}
+            onAssetsChanged={onAssetsReplaced}
+            onNotice={showStatusToast}
+            onError={(message) => showErrorToast(message, "GFX library request failed")}
+          />
         </div>
 
         {/* Center-Left: Director & Swarm */}
         <div className="flex min-h-0 flex-col">
           <SwarmActivityPanel
+            projectId={project.id}
+            hasTimelineClips={hasTimelineClips}
+            selectedClips={selectedClips}
+            playheadSec={playheadSec}
+            onRemoveSelectedClip={(clipId) =>
+              setSelectedClipIds((prev) => prev.filter((id) => id !== clipId))
+            }
             agentStatus={agentStatus}
             mcpEndpoint={`${client.getBaseUrl()}${agentStatus?.mcp_http_path ?? "/mcp"}`}
             activeModelLabel={activeModelLabel}
@@ -1725,6 +1754,14 @@ export function StudioWorkspace({
             onPreviewGrade={setDraftGrade}
             onCommitGrade={(next) => void handleCommitGrade(next)}
             selectedClip={selectedClip}
+            selectedClips={selectedClips}
+            onApplyBatchCommand={(cmd, lockedSkipped) =>
+              void handleApplyBatchCommand(cmd, lockedSkipped)
+            }
+            onClearSelection={() => {
+              setSelectedClipIds([]);
+              setSelectionAnchorId(null);
+            }}
             activeCaptionPreset={
               activeCaptionClip?.payload.kind === "caption"
                 ? activeCaptionClip.payload.caption.preset
@@ -1755,17 +1792,23 @@ export function StudioWorkspace({
         <TimelinePanel
           tracks={project.tracks}
           mediaPool={project.media_pool}
+          savedAssets={assets}
           playheadSec={playheadSec}
           totalDurationSec={totalDurationSec}
           fps={projectFps}
           canvasLabel={`${aspectBadge} · ${project.canvas.width}×${project.canvas.height}`}
           isPlaying={isPlaying}
-          selectedClipId={selectedClipRef?.clipId ?? null}
-          onSelectClip={(trackId, clipId) => setSelectedClipRef({ trackId, clipId })}
+          selectedClipIds={selectedClipIds}
+          selectionAnchorId={selectionAnchorId}
+          onSelectionChange={(ids, anchorId) => {
+            setSelectedClipIds(ids);
+            setSelectionAnchorId(anchorId);
+          }}
           onTogglePlay={handleTogglePlay}
           onSeek={handleSeekPlayhead}
           onSplitSelected={() => void handleSplitSelectedClip()}
           onDeleteSelected={() => void handleDeleteSelectedClip()}
+          onGroupMove={(deltaSec) => void handleGroupMove(deltaSec)}
           onTrimOrMoveClip={(trackId, clipId, patch) =>
             void handleTrimOrMoveClip(trackId, clipId, patch)
           }
@@ -1775,6 +1818,7 @@ export function StudioWorkspace({
               void handleAddMediaToTimeline(found, trackId, startSec);
             }
           }}
+          onPlaceGfxFromAsset={handlePlaceGfxFromDrop}
           onToggleTrackFlag={(trackId, field, value) =>
             void handleToggleTrackFlag(trackId, field, value)
           }

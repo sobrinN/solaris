@@ -40,14 +40,21 @@ export async function deleteDesktopOpenRouterKey(): Promise<boolean> {
   }
 }
 
+export async function pickDesktopExportFolder(): Promise<string | null> {
+  if (!isDesktopTauri()) return null;
+  return window.__TAURI_INTERNALS__!.invoke<string | null>("pick_export_folder");
+}
+
 export async function saveDesktopExportFile(
   outputPath: string,
   suggestedName?: string,
+  targetDir?: string,
 ): Promise<string | null> {
   if (!isDesktopTauri()) return null;
   return window.__TAURI_INTERNALS__!.invoke<string>("save_export_file", {
     outputPath,
     suggestedName: suggestedName ?? null,
+    targetDir: targetDir ?? null,
   });
 }
 

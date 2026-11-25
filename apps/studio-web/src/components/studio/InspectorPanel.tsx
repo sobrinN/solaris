@@ -7,9 +7,12 @@ import type {
   Clip,
   ColorGrade,
   SavedCodeAsset,
+  TimelineCommand,
   Transform2D,
 } from "@solaris/engine-client";
 import { extractPropFields, lintGfxHtml } from "@solaris/gfx-runtime";
+import type { SelectedClip } from "../../lib/timelineSelection";
+import { BatchInspector } from "./BatchInspector";
 import { ColorWheelControl } from "./ColorWheelControl";
 
 interface InspectorPanelProps {
@@ -19,6 +22,9 @@ interface InspectorPanelProps {
   onPreviewGrade: (next: ColorGrade) => void;
   onCommitGrade: (next: ColorGrade) => void;
   selectedClip: { trackId: string; clip: Clip } | null;
+  selectedClips?: SelectedClip[];
+  onApplyBatchCommand?: (command: TimelineCommand, lockedSkipped?: number) => void;
+  onClearSelection?: () => void;
   activeCaptionPreset?: CaptionPreset | null;
   savedAssets: SavedCodeAsset[];
   onUpdateGfxProps: (
@@ -71,6 +77,9 @@ export function InspectorPanel({
   onPreviewGrade,
   onCommitGrade,
   selectedClip,
+  selectedClips,
+  onApplyBatchCommand,
+  onClearSelection,
   activeCaptionPreset,
   savedAssets,
   onUpdateGfxProps,
@@ -292,6 +301,16 @@ export function InspectorPanel({
     effectiveAudio !== null &&
     onUpdateClipAudio !== undefined &&
     selectedClip.clip.payload.kind === "media";
+
+  if (selectedClips && selectedClips.length > 1 && onApplyBatchCommand) {
+    return (
+      <BatchInspector
+        selection={selectedClips}
+        onApplyBatch={onApplyBatchCommand}
+        onClearSelection={onClearSelection ?? (() => {})}
+      />
+    );
+  }
 
   return (
     <aside className="flex h-full flex-col gap-3 overflow-y-auto rounded-2xl border border-areia/10 bg-carbono/70 p-3 text-xs">

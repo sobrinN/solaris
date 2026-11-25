@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronDown, ChevronRight, Copy, Search, Terminal, Trash2, X } from "lucide-react";
-import type { LogEntry, LogLevel } from "@solaris/engine-client";
+import { Check, Copy, Search, Terminal, Trash2, X } from "lucide-react";
+import type { LogEntry } from "@solaris/engine-client";
+import { DiagnosticLogList } from "./DiagnosticLogList";
 
 interface LogsDrawerProps {
   open: boolean;
@@ -10,19 +11,6 @@ interface LogsDrawerProps {
 }
 
 type LevelFilter = "all" | "error" | "warn" | "info";
-
-function levelBadgeClass(level: LogLevel): string {
-  switch (level) {
-    case "error":
-      return "bg-vermelho-foco text-areia";
-    case "warn":
-      return "bg-laranja-criacao/30 text-areia border border-laranja-criacao/40";
-    case "info":
-      return "bg-amarelo-ideias/20 text-amarelo-ideias";
-    default:
-      return "bg-grafite text-areia/65";
-  }
-}
 
 export function formatLogsForCopy(logs: LogEntry[]): string {
   return logs
@@ -38,7 +26,6 @@ export function formatLogsForCopy(logs: LogEntry[]): string {
 export function LogsDrawer({ open, logs, onClear, onClose }: LogsDrawerProps) {
   const [filter, setFilter] = useState<LevelFilter>("all");
   const [query, setQuery] = useState("");
-  const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
   const [clearing, setClearing] = useState(false);
   const [clearError, setClearError] = useState<string | null>(null);
@@ -76,17 +63,6 @@ export function LogsDrawer({ open, logs, onClear, onClose }: LogsDrawerProps) {
         );
       });
   }, [logs, filter, query]);
-
-  const autoExpandedErrorIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const entry of filtered) {
-      if (entry.level === "error" && entry.details) {
-        ids.add(entry.id);
-        if (ids.size >= 10) break;
-      }
-    }
-    return ids;
-  }, [filtered]);
 
   if (!open) return null;
 
@@ -130,10 +106,6 @@ export function LogsDrawer({ open, logs, onClear, onClose }: LogsDrawerProps) {
     } finally {
       setClearing(false);
     }
-  };
-
-  const toggleExpand = (id: string, currentlyExpanded: boolean) => {
-    setExpandedIds((prev) => ({ ...prev, [id]: !currentlyExpanded }));
   };
 
   return (
@@ -253,70 +225,11 @@ export function LogsDrawer({ open, logs, onClear, onClose }: LogsDrawerProps) {
           </div>
         )}
 
-        <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto p-4 text-[11px]">
-          {filtered.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-areia/12 py-12 text-center text-xs text-areia/45">
-              No diagnostic logs match the current filter.
-            </div>
-          ) : (
-            filtered.map((entry) => {
-              const hasDetails = Boolean(entry.details);
-              const isExpanded =
-                expandedIds[entry.id] ?? autoExpandedErrorIds.has(entry.id);
-              return (
-                <div
-                  key={entry.id}
-                  className={`rounded-xl border px-3 py-2 ${
-                    entry.level === "error"
-                      ? "border-vermelho-foco/45 bg-vermelho-foco/12"
-                      : entry.level === "warn"
-                        ? "border-laranja-criacao/35 bg-laranja-criacao/10"
-                        : "border-areia/10 bg-void/65"
-                  }`}
-                >
-                  <button
-                    type="button"
-                    disabled={!hasDetails}
-                    onClick={() => hasDetails && toggleExpand(entry.id, isExpanded)}
-                    className="flex w-full items-start gap-2 text-left disabled:cursor-default"
-                  >
-                    <span className="mt-0.5 text-areia/45">
-                      {hasDetails ? (
-                        isExpanded ? (
-                          <ChevronDown className="h-3 w-3" />
-                        ) : (
-                          <ChevronRight className="h-3 w-3" />
-                        )
-                      ) : (
-                        <span className="inline-block h-3 w-3" />
-                      )}
-                    </span>
-                    <span className="tabular-nums shrink-0 text-[10px] text-areia/50">
-                      {entry.timestamp.slice(11, 19)}
-                    </span>
-                    <span
-                      className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${levelBadgeClass(
-                        entry.level,
-                      )}`}
-                    >
-                      {entry.level}
-                    </span>
-                    <span className="shrink-0 rounded bg-grafite px-1.5 py-0.5 text-[10px] font-medium text-amarelo-ideias">
-                      {entry.agent_id ? `${entry.source}/${entry.agent_id}` : entry.source}
-                    </span>
-                    <span className="min-w-0 flex-1 break-words text-areia/90">
-                      {entry.message}
-                    </span>
-                  </button>
-                  {hasDetails && isExpanded && (
-                    <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-areia/10 bg-void/90 p-2.5 text-[10px] leading-relaxed text-areia/80">
-                      {entry.details}
-                    </pre>
-                  )}
-                </div>
-              );
-            })
-          )}
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          <DiagnosticLogList
+            logs={filtered}
+            emptyMessage="No diagnostic logs match the current filter."
+          />
         </div>
       </div>
     </div>

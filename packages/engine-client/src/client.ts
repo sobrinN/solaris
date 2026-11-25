@@ -2,7 +2,9 @@ import type {
   AgentRole,
   AgentStatusResponse,
   AspectPreset,
+  AssetDeleteResponse,
   AssetPackImportResponse,
+  AssetRestoreResponse,
   BrandPlaybook,
   BrandReferenceKind,
   CodeAssetPackManifest,
@@ -435,6 +437,22 @@ export class SolarisEngineClient {
     );
   }
 
+  async fetchExportDownload(jobId: string): Promise<Response> {
+    if ((this.authToken || this.hasSession) && Date.now() >= this.ticketExpiresAt - 15_000) {
+      await this.establishSession(true).catch(() => {});
+    }
+    const res = await fetch(this.getExportDownloadUrl(jobId), {
+      method: "GET",
+      credentials: "include",
+      headers: this.headers(),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new EngineApiError(res.status, text);
+    }
+    return res;
+  }
+
   getBrandLut(brandId: string): Promise<ParsedCubeLut> {
     return this.request<ParsedCubeLut>(
       `/api/v1/brands/${encodeURIComponent(brandId)}/lut`,
@@ -467,6 +485,19 @@ export class SolarisEngineClient {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(asset),
+    });
+  }
+
+  deleteAsset(assetId: string): Promise<AssetDeleteResponse> {
+    return this.request<AssetDeleteResponse>(
+      `/api/v1/assets/${encodeURIComponent(assetId)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  restoreStarterAssets(): Promise<AssetRestoreResponse> {
+    return this.request<AssetRestoreResponse>("/api/v1/assets/restore-starters", {
+      method: "POST",
     });
   }
 
