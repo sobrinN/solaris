@@ -15,8 +15,16 @@ use solaris_core_ir::{
 };
 use solaris_media_engine::{
     ExportPlanOptions, execute_export_with_progress,
-    render_project_overlays_via_chromium_with_assets,
+    render_project_overlays_via_chromium_with_progress,
 };
+
+struct TempDirCleanupGuard(PathBuf);
+
+impl Drop for TempDirCleanupGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 use crate::routes::media::{sanitize_file_name, stream_file_with_range};
 use crate::state::{AppState, validate_safe_id};
@@ -187,6 +195,7 @@ pub async fn enqueue_export_job(
             .workspace_dir
             .join("exports")
             .join(format!(".tmp_{job_id_bg}"));
+        let _overlay_tmp_guard = TempDirCleanupGuard(overlay_tmp_dir.clone());
 
         let overlay_images = if has_overlays {
             if state_bg.inner.toolchain.chromium_path.is_none() {
@@ -254,14 +263,45 @@ pub async fn enqueue_export_job(
             let assets_clone = workspace_assets.clone();
             let fonts_clone = brand_fonts.clone();
             let tmp_clone = overlay_tmp_dir.clone();
+            let state_ov = state_bg.clone();
+            let job_ov = job_id_bg.clone();
+            let proj_id_ov = id.clone();
             let render_res = tokio::task::spawn_blocking(move || {
-                render_project_overlays_via_chromium_with_assets(
+                let mut last_emit = Instant::now() - Duration::from_millis(500);
+                render_project_overlays_via_chromium_with_progress(
                     &tc,
                     &proj_clone,
                     &tokens_clone,
                     &assets_clone,
                     &fonts_clone,
                     &tmp_clone,
+                    |ov_prog| {
+                        let is_final = ov_prog.completed_frames >= ov_prog.total_frames;
+                        if is_final || last_emit.elapsed() >= Duration::from_millis(250) {
+                            last_emit = Instant::now();
+                            let frac = (ov_prog.completed_frames as f32
+                                / ov_prog.total_frames.max(1) as f32)
+                                .clamp(0.0, 1.0);
+                            let scaled = 0.15 + frac * 0.45;
+                            let prog_job = ExportJobStatus {
+                                id: job_ov.clone(),
+                                project_id: proj_id_ov.clone(),
+                                state: ExportState::RenderingGfx,
+                                progress: scaled,
+                                stage_label: ov_prog.stage_label,
+                                output_path: None,
+                                error: None,
+                                updated_at: Utc::now(),
+                            };
+                            if let Ok(mut jobs) = state_ov.inner.export_jobs.try_write() {
+                                jobs.insert(job_ov.clone(), prog_job.clone());
+                            }
+                            state_ov.emit(EngineEvent::ExportProgress {
+                                project_id: proj_id_ov.clone(),
+                                job: prog_job,
+                            });
+                        }
+                    },
                 )
             })
             .await;
@@ -269,7 +309,6 @@ pub async fn enqueue_export_job(
             match render_res {
                 Ok(Ok(specs)) => specs,
                 Ok(Err(err)) => {
-                    let _ = tokio::fs::remove_dir_all(&overlay_tmp_dir).await;
                     let failed = ExportJobStatus {
                         id: job_id_bg.clone(),
                         project_id: id.clone(),
@@ -304,7 +343,6 @@ pub async fn enqueue_export_job(
                     return;
                 }
                 Err(join_err) => {
-                    let _ = tokio::fs::remove_dir_all(&overlay_tmp_dir).await;
                     let failed = ExportJobStatus {
                         id: job_id_bg.clone(),
                         project_id: id.clone(),
@@ -343,11 +381,13 @@ pub async fn enqueue_export_job(
             Vec::new()
         };
 
+        let compose_base = if has_overlays { 0.60_f32 } else { 0.15_f32 };
+        let compose_span = 0.98_f32 - compose_base;
         let mut compositing = ExportJobStatus {
             id: job_id_bg.clone(),
             project_id: id.clone(),
             state: ExportState::Compositing,
-            progress: 0.25,
+            progress: compose_base,
             stage_label: "Compositing timeline & -14 LUFS audio master".to_string(),
             output_path: None,
             error: None,
@@ -387,7 +427,7 @@ pub async fn enqueue_export_job(
                 |frac| {
                     if last_emit.elapsed() >= Duration::from_millis(250) {
                         last_emit = Instant::now();
-                        let scaled = 0.25 + frac * 0.73;
+                        let scaled = compose_base + frac * compose_span;
                         let prog_job = ExportJobStatus {
                             id: job_prog.clone(),
                             project_id: proj_id_prog.clone(),

@@ -301,3 +301,17 @@
 - [x] **Frontend Studio Web & Docs Sync (`apps/studio-web`, `skills/`, `README.md`, `ARCHITECTURE.md`)**:
   - Fixed `SwarmCursorLayer` permanent freeze past the 121-event cap (`lastProcessedEventRef`), skipped appending `log_emitted` to `events`, separated `lastRealEventAt` for idle expiry, and aligned `timelineSpan` X mapping.
   - Paused timeline playback on `Source` tab switch, ignored `0×0` hidden `ResizeObserver` measurements, fixed `LogsDrawer` first-click error collapse & chronological clipboard copy + error handling, hardened `SourceMonitor` IN/OUT clamping/cleanup/reframe box, merged HTTP+WS logs cleanly in `App.tsx`, and synced `skills/`, `README.md`, and `ARCHITECTURE.md` (34 tools, overlay-only capture, full-canvas `G1` exemption).
+
+---
+
+## Track 13 — Persistent CDP Export Unblock, Granular Progress & Programmatic QA/Craft Fixes
+
+- [x] **Fix CDP Chromium Keep-Alive Hang & Stream Live Overlay Export Progress (`crates/media-engine/src/gfx_render.rs`, `lib.rs`, `crates/server/src/routes/exports.rs`)**:
+  - Replaced `stream.read_to_end` in `cdp_http_json` with a `Content-Length` / `Transfer-Encoding: chunked` HTTP/1.1 body reader (`read_http_response_body`) so Chromium's keep-alive DevTools HTTP server no longer triggers 5s read timeouts & CLI single-shot screenshot fallbacks (fixing exports stuck at 15% and eliminating hundreds of cold Chrome launches).
+  - Enabled `optimizeForSpeed: true` on CDP `Page.captureScreenshot`, added lightweight headless startup flags, exposed `render_project_overlays_via_chromium_with_progress` (`OverlayRenderProgress`), streamed live per-frame overlay progress (`15% → 60%`) and FFmpeg compositing (`60% → 98%`) in `exports.rs`, and added an RAII `TempDirCleanupGuard` for `.tmp_<job_id>`.
+- [x] **Fix Programmatic Vision QA & Scene Craft Contracts (`crates/agent-runtime/src/swarm/qa/vision.rs`, `swarm/llm.rs`, `skills/captions-and-gfx/SKILL.md`)**:
+  - Added scene-settled timestamp sampling (`compute_project_sample_timestamps`) for programmatic `G1` timelines so Vision QA inspects completed hero frames instead of `0.40s` mid-stagger entrances, and updated Vision QA instructions so `programmatic_zero_asset: true` is never penalized for `0 video clips`.
+  - Updated Director and parallel scene micro-agent prompts to enforce non-overlapping `9:16` vertical zones (`5vh..61vh` foreground G1, `63vh..76vh` clear for `T1` captions, full-height `100vh` ambient backdrop), explicit `<script src=...>` prohibition (`window.gsap` is pre-injected), canonical `01 / N` scene numbering without leaked asset IDs, vertical portrait-first diagram layout, fast `<= 0.35s` headline entrance, and non-duplicative caption narration.
+- [x] **Fix Studio QA Panel Readability & Export Modal Stage Label (`apps/studio-web/src/components/studio/SwarmActivityPanel.tsx`, `ExportModal.tsx`)**:
+  - Replaced `line-clamp-2` and `truncate` in the QA panel with wrapping `break-words leading-snug` inside a taller scrollable container (`max-h-48`) so every QA issue/warning is readable in full; stabilized `ExportModal` progress row truncation for live frame counts.
+- [x] **Tests & Full Verification**: Added keep-alive/chunked CDP HTTP unit test, real persistent CDP Chromium smoke test, programmatic settled-scene QA timestamp test, and ran full Rust + TypeScript verification suite.

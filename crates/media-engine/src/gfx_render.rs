@@ -34,6 +34,13 @@ pub struct BrandFontData {
 
 pub type BrandFontFace = BrandFontData;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayRenderProgress {
+    pub completed_frames: usize,
+    pub total_frames: usize,
+    pub stage_label: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct OverlayImageSpec {
     pub path: PathBuf,
@@ -341,8 +348,15 @@ impl ChromiumCdpSession {
             "--disable-gpu",
             "--hide-scrollbars",
             "--disable-dev-shm-usage",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--disable-extensions",
+            "--disable-sync",
+            "--metrics-recording-only",
+            "--mute-audio",
             "--no-first-run",
             "--no-default-browser-check",
+            "--no-pings",
             "--proxy-server=http://127.0.0.1:1",
             "--proxy-bypass-list=<-loopback>",
             "--host-resolver-rules=MAP * ~NOTFOUND",
@@ -581,6 +595,7 @@ impl ChromiumCdpSession {
             json!({
                 "format": "png",
                 "fromSurface": true,
+                "optimizeForSpeed": true,
             }),
         )?;
         let b64 = res
@@ -611,6 +626,143 @@ fn parse_devtools_port(line: &str) -> Option<u16> {
     port_str.trim().parse::<u16>().ok()
 }
 
+const MAX_CDP_HTTP_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+fn decode_chunked_body(raw: &[u8]) -> Result<Vec<u8>, MediaError> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    loop {
+        let Some(rel_crlf) = raw[pos..].windows(2).position(|w| w == b"\r\n") else {
+            return Err(MediaError::ParseError(
+                "truncated chunked CDP HTTP response".to_string(),
+            ));
+        };
+        let size_line = std::str::from_utf8(&raw[pos..pos + rel_crlf])
+            .map_err(|e| MediaError::ParseError(format!("invalid chunk size line: {e}")))?;
+        let size_hex = size_line.split(';').next().unwrap_or("").trim();
+        let chunk_len = usize::from_str_radix(size_hex, 16)
+            .map_err(|e| MediaError::ParseError(format!("invalid chunk size '{size_hex}': {e}")))?;
+        pos += rel_crlf + 2;
+        if chunk_len == 0 {
+            return Ok(out);
+        }
+        if pos + chunk_len + 2 > raw.len() {
+            return Err(MediaError::ParseError(
+                "incomplete chunk payload in CDP HTTP response".to_string(),
+            ));
+        }
+        if out.len() + chunk_len > MAX_CDP_HTTP_BODY_BYTES {
+            return Err(MediaError::ParseError(
+                "chunked CDP HTTP response exceeded size limit".to_string(),
+            ));
+        }
+        out.extend_from_slice(&raw[pos..pos + chunk_len]);
+        pos += chunk_len + 2;
+    }
+}
+
+/// Reads a single HTTP/1.x response respecting `Content-Length` and `Transfer-Encoding: chunked`
+/// without waiting for TCP EOF (Chromium's DevTools HTTP server ignores `Connection: close` and
+/// keeps the socket open, so `read_to_end` always stalls until read timeout).
+fn read_http_response_body(stream: &mut impl Read) -> Result<(u16, Vec<u8>), MediaError> {
+    let mut buf = Vec::with_capacity(4096);
+    let mut tmp = [0u8; 4096];
+    let header_end = loop {
+        let n = stream
+            .read(&mut tmp)
+            .map_err(|e| MediaError::ProcessFailed(format!("CDP HTTP read failed: {e}")))?;
+        if n == 0 {
+            return Err(MediaError::ParseError(
+                "malformed CDP HTTP response (EOF before headers)".to_string(),
+            ));
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos + 4;
+        }
+        if buf.len() > 64 * 1024 {
+            return Err(MediaError::ParseError(
+                "CDP HTTP response headers exceeded 64 KiB".to_string(),
+            ));
+        }
+    };
+
+    let header_str = std::str::from_utf8(&buf[..header_end - 4])
+        .map_err(|e| MediaError::ParseError(format!("non-UTF8 CDP HTTP headers: {e}")))?;
+    let mut lines = header_str.lines();
+    let status_line = lines.next().unwrap_or("");
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .ok_or_else(|| {
+            MediaError::ParseError(format!("invalid CDP HTTP status line: {status_line}"))
+        })?;
+
+    let mut content_length: Option<usize> = None;
+    let mut is_chunked = false;
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().eq_ignore_ascii_case("content-length") {
+                content_length = v.trim().parse::<usize>().ok();
+            } else if k.trim().eq_ignore_ascii_case("transfer-encoding")
+                && v.to_ascii_lowercase().contains("chunked")
+            {
+                is_chunked = true;
+            }
+        }
+    }
+
+    let mut body = buf[header_end..].to_vec();
+    if let Some(expected_len) = content_length {
+        if expected_len > MAX_CDP_HTTP_BODY_BYTES {
+            return Err(MediaError::ParseError(format!(
+                "CDP HTTP body exceeds max size ({expected_len} bytes)"
+            )));
+        }
+        while body.len() < expected_len {
+            let need = (expected_len - body.len()).min(tmp.len());
+            let n = stream.read(&mut tmp[..need]).map_err(|e| {
+                MediaError::ProcessFailed(format!("CDP HTTP body read failed: {e}"))
+            })?;
+            if n == 0 {
+                return Err(MediaError::ParseError(format!(
+                    "truncated CDP HTTP body (got {} of {expected_len} bytes)",
+                    body.len()
+                )));
+            }
+            body.extend_from_slice(&tmp[..n]);
+        }
+        body.truncate(expected_len);
+        return Ok((status_code, body));
+    }
+
+    if is_chunked {
+        loop {
+            if let Ok(decoded) = decode_chunked_body(&body) {
+                return Ok((status_code, decoded));
+            }
+            let n = stream.read(&mut tmp).map_err(|e| {
+                MediaError::ProcessFailed(format!("CDP HTTP chunk read failed: {e}"))
+            })?;
+            if n == 0 {
+                return Ok((status_code, decode_chunked_body(&body)?));
+            }
+            body.extend_from_slice(&tmp[..n]);
+            if body.len() > MAX_CDP_HTTP_BODY_BYTES {
+                return Err(MediaError::ParseError(
+                    "chunked CDP HTTP response exceeded size limit".to_string(),
+                ));
+            }
+        }
+    }
+
+    stream
+        .read_to_end(&mut body)
+        .map_err(|e| MediaError::ProcessFailed(format!("CDP HTTP read failed: {e}")))?;
+    Ok((status_code, body))
+}
+
 fn cdp_http_json(port: u16, method: &str, path: &str) -> Result<serde_json::Value, MediaError> {
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(3))
@@ -622,16 +774,14 @@ fn cdp_http_json(port: u16, method: &str, path: &str) -> Result<serde_json::Valu
     stream
         .write_all(req.as_bytes())
         .map_err(|e| MediaError::ProcessFailed(format!("CDP HTTP write failed: {e}")))?;
-    let mut resp = Vec::new();
-    stream
-        .read_to_end(&mut resp)
-        .map_err(|e| MediaError::ProcessFailed(format!("CDP HTTP read failed: {e}")))?;
-    let header_end = resp
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|p| p + 4)
-        .ok_or_else(|| MediaError::ParseError("malformed CDP HTTP response".to_string()))?;
-    let body = std::str::from_utf8(&resp[header_end..])
+    let _ = stream.flush();
+    let (status_code, body_bytes) = read_http_response_body(&mut stream)?;
+    if !(200..300).contains(&status_code) {
+        return Err(MediaError::ProcessFailed(format!(
+            "CDP HTTP {method} {path} returned status {status_code}"
+        )));
+    }
+    let body = std::str::from_utf8(&body_bytes)
         .map_err(|e| MediaError::ParseError(format!("non-UTF8 CDP HTTP body: {e}")))?;
     serde_json::from_str(body)
         .map_err(|e| MediaError::ParseError(format!("invalid CDP JSON from {path}: {e}")))
@@ -1480,6 +1630,30 @@ pub fn render_project_overlays_via_chromium_with_assets(
     brand_fonts: &[BrandFontData],
     temp_dir: &Path,
 ) -> Result<Vec<OverlayImageSpec>, MediaError> {
+    render_project_overlays_via_chromium_with_progress(
+        toolchain,
+        project,
+        brand_tokens,
+        assets,
+        brand_fonts,
+        temp_dir,
+        |_| {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_project_overlays_via_chromium_with_progress<F>(
+    toolchain: &MediaToolchain,
+    project: &Project,
+    brand_tokens: &BrandTokens,
+    assets: &[SavedCodeAsset],
+    brand_fonts: &[BrandFontData],
+    temp_dir: &Path,
+    mut on_progress: F,
+) -> Result<Vec<OverlayImageSpec>, MediaError>
+where
+    F: FnMut(OverlayRenderProgress),
+{
     let overlay_clips = collect_overlay_clips(project);
     if overlay_clips.is_empty() {
         return Ok(Vec::new());
@@ -1505,6 +1679,41 @@ pub fn render_project_overlays_via_chromium_with_assets(
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&v| v > 0)
         .unwrap_or(DEFAULT_MAX_ANIMATED_FRAMES);
+
+    let overlay_fps = project_fps.min(30.0);
+    let total_frames: usize = overlay_clips
+        .iter()
+        .filter(|c| c.start_sec.is_finite() && c.duration_sec.is_finite() && c.duration_sec > 0.0)
+        .map(|clip| match &clip.payload {
+            ClipKind::Gfx { .. } => {
+                let Some(body_html) = resolve_gfx_body_html(clip, assets) else {
+                    return 0;
+                };
+                if has_dynamic_gfx_animation(&body_html) && clip.duration_sec > 0.1 {
+                    let raw_frames = (clip.duration_sec * overlay_fps).ceil() as usize;
+                    raw_frames.clamp(2, max_anim_frames)
+                } else {
+                    1
+                }
+            }
+            ClipKind::Caption { caption } => {
+                if caption.words.len() > 1 {
+                    compute_caption_word_slices(clip, caption).len()
+                } else {
+                    1
+                }
+            }
+            _ => 0,
+        })
+        .sum::<usize>()
+        .max(1);
+
+    let mut completed_frames = 0usize;
+    on_progress(OverlayRenderProgress {
+        completed_frames: 0,
+        total_frames,
+        stage_label: format!("Launching Chromium for {total_frames} overlay frame(s)"),
+    });
 
     let mut cdp = match ChromiumCdpSession::launch(chrome, w, h, temp_dir) {
         Ok(session) => Some(session),
@@ -1537,7 +1746,6 @@ pub fn render_project_overlays_via_chromium_with_assets(
                 };
                 idx += 1;
                 if has_dynamic_gfx_animation(&body_html) && clip.duration_sec > 0.1 {
-                    let overlay_fps = project_fps.min(30.0);
                     let raw_frames = (clip.duration_sec * overlay_fps).ceil() as usize;
                     let frame_count = raw_frames.clamp(2, max_anim_frames);
                     // Never clamp effective_fps upward to 1.0 on long animated clips (> max_anim_frames sec)
@@ -1569,6 +1777,14 @@ pub fn render_project_overlays_via_chromium_with_assets(
                                 "window.__solarisSeek({t:.6}); void document.body.offsetHeight;"
                             ))?;
                             session.capture_png(&png_path)?;
+                            completed_frames += 1;
+                            on_progress(OverlayRenderProgress {
+                                completed_frames,
+                                total_frames,
+                                stage_label: format!(
+                                    "Rendering GFX & captions ({completed_frames}/{total_frames} frames)"
+                                ),
+                            });
                         }
                     } else {
                         for f in 0..frame_count {
@@ -1590,6 +1806,14 @@ pub fn render_project_overlays_via_chromium_with_assets(
                             run_chromium_screenshot(
                                 chrome, &html_path, &png_path, gfx_w, gfx_h, gfx_dpr, temp_dir,
                             )?;
+                            completed_frames += 1;
+                            on_progress(OverlayRenderProgress {
+                                completed_frames,
+                                total_frames,
+                                stage_label: format!(
+                                    "Rendering GFX & captions ({completed_frames}/{total_frames} frames)"
+                                ),
+                            });
                         }
                     }
 
@@ -1620,6 +1844,14 @@ pub fn render_project_overlays_via_chromium_with_assets(
                             chrome, &html_path, &png_path, gfx_w, gfx_h, gfx_dpr, temp_dir,
                         )?;
                     }
+                    completed_frames += 1;
+                    on_progress(OverlayRenderProgress {
+                        completed_frames,
+                        total_frames,
+                        stage_label: format!(
+                            "Rendering GFX & captions ({completed_frames}/{total_frames} frames)"
+                        ),
+                    });
                     specs.push(OverlayImageSpec::single(png_path, clip.start_sec, clip_end));
                 }
             }
@@ -1651,6 +1883,14 @@ pub fn render_project_overlays_via_chromium_with_assets(
                             session
                                 .evaluate_js(&format!("window.__solarisSetCaptionWord({wi});"))?;
                             session.capture_png(&png_path)?;
+                            completed_frames += 1;
+                            on_progress(OverlayRenderProgress {
+                                completed_frames,
+                                total_frames,
+                                stage_label: format!(
+                                    "Rendering GFX & captions ({completed_frames}/{total_frames} frames)"
+                                ),
+                            });
                             specs.push(OverlayImageSpec::single(png_path, w_start, w_end));
                         }
                     } else {
@@ -1671,6 +1911,14 @@ pub fn render_project_overlays_via_chromium_with_assets(
                             run_chromium_screenshot(
                                 chrome, &html_path, &png_path, w, h, 1.0, temp_dir,
                             )?;
+                            completed_frames += 1;
+                            on_progress(OverlayRenderProgress {
+                                completed_frames,
+                                total_frames,
+                                stage_label: format!(
+                                    "Rendering GFX & captions ({completed_frames}/{total_frames} frames)"
+                                ),
+                            });
                             specs.push(OverlayImageSpec::single(png_path, w_start, w_end));
                         }
                     }
@@ -1697,6 +1945,14 @@ pub fn render_project_overlays_via_chromium_with_assets(
                             chrome, &html_path, &png_path, w, h, 1.0, temp_dir,
                         )?;
                     }
+                    completed_frames += 1;
+                    on_progress(OverlayRenderProgress {
+                        completed_frames,
+                        total_frames,
+                        stage_label: format!(
+                            "Rendering GFX & captions ({completed_frames}/{total_frames} frames)"
+                        ),
+                    });
                     specs.push(OverlayImageSpec::single(png_path, clip.start_sec, clip_end));
                 }
             }
@@ -2083,5 +2339,89 @@ mod tests {
         // Portrait remains safely clamped at y = 0.32 -> 74.96%
         let portrait_html = build_caption_overlay_html(&clip, &cap, Some(0), 1080, 1920);
         assert!(portrait_html.contains("top:74.96%"));
+    }
+
+    #[test]
+    fn cdp_http_reader_respects_content_length_without_waiting_for_keepalive_eof() {
+        struct KeepAliveReader {
+            data: Vec<u8>,
+            pos: usize,
+        }
+        impl Read for KeepAliveReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.pos >= self.data.len() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "simulated keep-alive stall (EOF never arrives)",
+                    ));
+                }
+                let n = buf.len().min(self.data.len() - self.pos);
+                buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+                self.pos += n;
+                Ok(n)
+            }
+        }
+
+        let json_body =
+            r#"[{"type":"page","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/page/1"}]"#;
+        let raw_resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            json_body.len(),
+            json_body
+        );
+        let mut reader = KeepAliveReader {
+            data: raw_resp.into_bytes(),
+            pos: 0,
+        };
+        let (status, body) = read_http_response_body(&mut reader).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, json_body.as_bytes());
+
+        // Also verify Transfer-Encoding: chunked without EOF
+        let chunked = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+            json_body.len(),
+            json_body
+        );
+        let mut chunked_reader = KeepAliveReader {
+            data: chunked.into_bytes(),
+            pos: 0,
+        };
+        let (c_status, c_body) = read_http_response_body(&mut chunked_reader).unwrap();
+        assert_eq!(c_status, 200);
+        assert_eq!(c_body, json_body.as_bytes());
+    }
+
+    #[test]
+    fn persistent_cdp_session_launches_and_renders_animated_frames_when_chrome_available() {
+        let toolchain = MediaToolchain::from_env();
+        let Some(chrome) = toolchain.chromium_path.as_ref() else {
+            return;
+        };
+
+        let dir = std::env::temp_dir().join(format!("solaris_cdp_test_{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let _guard = TempDirGuard(dir.clone());
+
+        let mut session = ChromiumCdpSession::launch(chrome, 320, 480, &dir)
+            .expect("persistent CDP Chromium session must connect cleanly on keep-alive HTTP");
+        let html_path = dir.join("scene.html");
+        let tokens = solaris_core_ir::BrandPlaybook::solaris_default().tokens;
+        let doc = build_overlay_html(
+            r#"<div class="clip" data-start="0" data-duration="2"><h1 id="t">SOLARIS</h1><script>window.__timelines={};const tl=gsap.timeline({paused:true});tl.fromTo('#t',{opacity:0},{opacity:1,duration:1},0);window.__timelines.main=tl;</script></div>"#,
+            &tokens,
+            &[],
+            2.0,
+            0.0,
+        );
+        fs::write(&html_path, doc).unwrap();
+        session.navigate_and_wait(&html_path).unwrap();
+        session
+            .evaluate_js("window.__solarisSeek(1.0); void document.body.offsetHeight;")
+            .unwrap();
+        let png_path = dir.join("out.png");
+        session.capture_png(&png_path).unwrap();
+        let meta = fs::metadata(&png_path).unwrap();
+        assert!(meta.len() > 200, "expected non-empty PNG from CDP");
     }
 }

@@ -1219,4 +1219,54 @@ mod tests {
             c.id == "overlap-gfx-blocked" && c.severity == QaSeverity::Warning && !c.auto_fixed
         }));
     }
+
+    #[test]
+    fn programmatic_qa_samples_settled_mid_scene_timestamps_not_early_entrance() {
+        let mut proj = Project::new_default("prog_qa_samples", AspectPreset::Vertical9x16);
+        let scenes = [
+            (0.0, 3.5),
+            (3.5, 4.5),
+            (8.0, 4.5),
+            (12.5, 4.5),
+            (17.0, 4.0),
+            (21.0, 3.0),
+        ];
+        for (i, (start, dur)) in scenes.into_iter().enumerate() {
+            proj.tracks[1].clips.push(Clip {
+                id: format!("gfx-s{:02}", i + 1),
+                label: format!("Scene {}", i + 1),
+                start_sec: start,
+                duration_sec: dur,
+                source_in_sec: 0.0,
+                transform: Transform2D::default(),
+                audio: AudioSettings::default(),
+                payload: ClipKind::Gfx {
+                    gfx: GfxInstance {
+                        asset_id: None,
+                        props: json!({}),
+                        inline_html: Some(
+                            r#"<div class="clip" data-start="0" data-duration="4">Scene</div>"#
+                                .into(),
+                        ),
+                    },
+                },
+            });
+        }
+        let samples = vision::compute_project_sample_timestamps(&proj, 0.0, 24.0);
+        assert_eq!(samples.len(), 3);
+        // Hook scene [0.0..3.5]: settled at 1.75s (well past 0.4s entrance stagger)
+        assert!(samples[0] >= 1.0 && samples[0] <= 2.5, "got {}", samples[0]);
+        // Mid scene [12.5..17.0]: settled mid-scene (~14.75s)
+        assert!(
+            samples[1] >= 13.5 && samples[1] <= 16.0,
+            "got {}",
+            samples[1]
+        );
+        // Final scene [21.0..24.0]: settled mid-scene (~22.5s)
+        assert!(
+            samples[2] >= 21.9 && samples[2] <= 23.4,
+            "got {}",
+            samples[2]
+        );
+    }
 }

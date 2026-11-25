@@ -206,18 +206,20 @@ export function ExportModal({
 
           {activeJob && (
             <div className="space-y-2 rounded-xl border border-areia/12 bg-void/75 p-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1.5 font-medium text-areia">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex min-w-0 flex-1 items-center gap-1.5 font-medium text-areia">
                   {activeJob.state === "completed" ? (
-                    <CheckCircle2 className="h-4 w-4 text-amarelo-ideias" />
+                    <CheckCircle2 className="h-4 w-4 shrink-0 text-amarelo-ideias" />
                   ) : activeJob.state === "failed" ? (
-                    <XCircle className="h-4 w-4 text-vermelho-foco" />
+                    <XCircle className="h-4 w-4 shrink-0 text-vermelho-foco" />
                   ) : (
-                    <Loader2 className="h-4 w-4 animate-spin text-laranja-criacao motion-reduce:animate-none" />
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin text-laranja-criacao motion-reduce:animate-none" />
                   )}
-                  <span>{activeJob.stage_label}</span>
+                  <span className="truncate" title={activeJob.stage_label}>
+                    {activeJob.stage_label}
+                  </span>
                 </div>
-                <span className="tabular-nums text-[11px] text-amarelo-ideias">
+                <span className="tabular-nums shrink-0 text-[11px] text-amarelo-ideias">
                   {Math.round(activeJob.progress * 100)}%
                 </span>
               </div>

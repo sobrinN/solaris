@@ -31,9 +31,10 @@ pub use frames::{
     capture_graded_frame_png, capture_overlay_only_frame_png, extract_keyframes_png,
 };
 pub use gfx_render::{
-    BrandFontData, BrandFontFace, OverlayImageSpec, build_caption_overlay_html, build_overlay_html,
-    path_to_file_uri, render_project_overlays_via_chromium,
-    render_project_overlays_via_chromium_with_assets, render_single_frame_overlays_via_chromium,
+    BrandFontData, BrandFontFace, OverlayImageSpec, OverlayRenderProgress,
+    build_caption_overlay_html, build_overlay_html, path_to_file_uri,
+    render_project_overlays_via_chromium, render_project_overlays_via_chromium_with_assets,
+    render_project_overlays_via_chromium_with_progress, render_single_frame_overlays_via_chromium,
 };
 pub use lut::{ParsedCubeLut, parse_cube_file, parse_cube_str};
 pub use probe::{ProbeSummary, parse_ffprobe_json, probe_media};

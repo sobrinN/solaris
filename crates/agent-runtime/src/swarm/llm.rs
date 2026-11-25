@@ -256,10 +256,10 @@ pub(crate) async fn build_openrouter_director_plan(
             "PRODUCTION MODE: PROGRAMMATIC ZERO-ASSET VIDEO (no footage/images imported). \
              Solaris will synthesize the ENTIRE {:.1}s video in PARALLEL using dedicated scene micro-agents on G1 \
              and synchronized kinetic captions on T1 (`captions.place_script`). \
-             Do NOT invent fake media_ids or ask for imported footage. \
-             In `art_direction`, define a cohesive visual system (backdrop lighting, accent glow, SVG diagram style, card geometry, motion rhythm) so all parallel scene agents look like ONE unified studio film. \
+             Do NOT invent fake media_ids or ask for imported footage, and NEVER put internal asset IDs (like `progress-bar-solar`) into visible text specs. \
+             In `art_direction`, define ONE unified visual system shared by all scenes (rich full-height layered radial glow + subtle architectural grid backdrop across 100vh so lower regions are never pitch-black, consistent top scene badge format `01 / N`, bold editorial typography, vertical-friendly diagram geometry, crisp brand accent glow). \
              In `scenes`, output 5 to 7 contiguous scene objects covering 0.0s to {:.1}s with ZERO gaps: \
-             each object MUST have `scene_index` (1..N), `title`, `start_sec`, `duration_sec`, `visual_brief` (specific diagram/UI/visual focal point in upper 72%), `motion_cue` (specific GSAP entrance/kinetic beat), and `narration` (punchy spoken/caption beat for that window). \
+             each object MUST have `scene_index` (1..N), `title`, `start_sec`, `duration_sec`, `visual_brief` (specific diagram/UI/visual focal point contained cleanly inside `5vh..61vh` for 9:16 so `63vh..76vh` stays clear for T1 captions), `motion_cue` (fast headline entrance <= 0.35s + living mid-scene motion, NO fade-to-black before scene end), and `narration` (natural punchy voiceover line that complements the on-screen graphic rather than repeating the headline verbatim). \
              Mirror the narration timeline concisely in `captions_notes` and brief summary in `gfx_notes`. \
              Set `spine_notes`, `broll_notes`, `grade_notes`, and `mix_notes` to brief 1-line notes (\"Programmatic G1/T1 mode\").",
             inferred_duration_sec, inferred_duration_sec
@@ -810,12 +810,12 @@ pub(crate) async fn run_llm_worker_loop(
                  - Program 6 to 8 distinct, contiguous full-canvas HTML/CSS/SVG/GSAP scenes via `gfx_place` (`inline_html`), covering `0.0s` through `{:.1}s` with ZERO black gaps (each scene ~3.0–4.5s, contiguous `start_sec`).\n\
                  - **CRITICAL PACING & TOKEN RULE**: Place ONLY **1 or 2 scenes per turn**! NEVER batch 4+ full-canvas HTML tool calls into one response (that overflows output tokens and truncates JSON).\n\
                  - **Call `gfx_place` directly** — it ALREADY runs deterministic HTML linting automatically and returns exact errors if anything needs fixing. Do NOT waste tokens calling `gfx_lint_html` first.\n\
-                 - Keep each scene compact (~2–4 KB of crisp HTML/CSS/SVG/GSAP) yet visually rich: fill the full canvas (`position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;`), build layered gradient/ambient-glow/grid backdrops, bold editorial typography, bespoke inline `<svg viewBox=...>` diagrams, UI cards, flowcharts, and icons.\n\
-                 - Use responsive viewport units (`vw`, `vh`, `vmin`, `clamp(...)`, `%`, `<svg viewBox>`) so every scene renders identically in both compact Studio preview and full {}x{} export.\n\
-                 - Drive smooth deterministic animation with GSAP (`window.__timelines = window.__timelines || {{}}; const tl = gsap.timeline({{paused:true}}); ... window.__timelines['main'] = tl;`) OR CSS `@keyframes` (both are scrubbed deterministically by Solaris!).\n\
-                 - Use brand CSS variables (`--brand-bg`, `--brand-surface`, `--brand-ink`, `--brand-accent`, `--brand-accent-secondary`, `--brand-font-display`, `--brand-font-body`).\n\
-                 - Keep the primary visual composition in the upper 72% of the frame (leave bottom 24% clean for `T1` captions) and leave `transform` at `(0,0)` for full-canvas scenes.\n\
-                 - Follow strict sandbox rules: root `<div class=\"clip\" data-start=\"0\" data-duration=\"...\">`, ZERO external URLs/CDNs, ZERO `Math.random`, `Date.now`, `setInterval`, `setTimeout`, `requestAnimationFrame`, `fetch`.\n\
+                 - Keep each scene compact (~2–4 KB of crisp HTML/CSS/SVG/GSAP) yet visually rich: fill the full canvas (`position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;`), extend layered gradient/ambient-glow/grid atmosphere across the FULL `100vh` (so the bottom half never looks like a dead pitch-black void), and build bold editorial typography, bespoke inline `<svg viewBox=...>` diagrams, UI cards, and icons.\n\
+                 - Use responsive viewport units (`vw`, `vh`, `vmin`, `clamp(...)`, `%`, `<svg viewBox>`) so every scene renders identically in both compact Studio preview and full {}x{} export. In vertical 9:16, stack diagrams vertically (1–2 columns max, NEVER 4 horizontal columns) and keep readable labels `>= 14px`.\n\
+                 - `window.gsap` is ALREADY pre-loaded globally offline — NEVER write `<script src=...>` or `<link>` tags; write ONLY inline `<script>...</script>` (`window.__timelines = window.__timelines || {{}}; const tl = gsap.timeline({{paused:true}}); ... window.__timelines['main'] = tl;`) OR CSS `@keyframes`. Complete primary headline entrance by `t <= 0.35s` and keep elements visible (no fade-to-black before exit).\n\
+                 - Use brand CSS variables (`--brand-bg`, `--brand-surface`, `--brand-ink`, `--brand-accent`, `--brand-accent-secondary`, `--brand-font-display`, `--brand-font-body`). Never print internal Solaris asset IDs (e.g. `progress-bar-solar`) as visible text.\n\
+                 - Non-overlapping vertical bands: in 9:16 portrait, keep ALL foreground G1 content (pill, headline, cards, diagrams) cleanly inside `5vh..61vh` so the `63vh..76vh` band stays 100% clear for `T1` captions (`y: 0.25`) and `78vh..100vh` stays clear for social UI (only ambient backdrop/glow extends full `100vh`). Leave `transform` at `(0,0)` for full-canvas scenes.\n\
+                 - Follow strict sandbox rules: root `<div class=\"clip\" data-start=\"0\" data-duration=\"...\">`, ZERO `<script src=...>`, ZERO external URLs/CDNs, ZERO `Math.random`, `Date.now`, `setInterval`, `setTimeout`, `requestAnimationFrame`, `fetch`.\n\
                  - After all scenes cover `0.0s..{:.1}s`, save 1 reusable custom scene template via `assets_save`. Director runs final Vision QA automatically after specialists finish.",
                 target_duration_sec,
                 target_duration_sec,
@@ -826,7 +826,7 @@ pub(crate) async fn run_llm_worker_loop(
             AgentRole::Caps => format!(
                 "\n\n## PROGRAMMATIC ZERO-ASSET CAPTIONS MODE\n\
                  No audio transcript exists yet. Use `captions_place_script` (NOT `captions_generate_from_transcript`) to place synchronized, punchy kinetic caption bursts covering `0.0s` through `{:.1}s` on `t1`.\n\
-                 - Supply 6 to 10 clear, self-contained narration segments matching each scene beat (keep each segment a crisp complete phrase so bursts never split mid-clause), `words_per_burst: 3`, `y: 0.24`, and an editorial preset (`neon_glow` or `karaoke` for 9:16; `minimal` or `mono_caps` for 16:9).\n\
+                 - Supply 6 to 10 clear, self-contained spoken narration segments matching each scene beat (complement the on-screen G1 headline rather than duplicating it word-for-word; keep each segment a crisp complete phrase so bursts never split mid-clause), `words_per_burst: 3`, `y: 0.25` (for 9:16) or `y: 0.34` (for 16:9), and an editorial preset (`neon_glow` or `karaoke` for 9:16; `minimal` or `mono_caps` for 16:9).\n\
                  - Once placed (and optionally verified with 1 `preview_capture_frame`), stop and reply concisely — Director runs full QA automatically after all specialists finish.",
                 target_duration_sec
             ),
@@ -1240,17 +1240,26 @@ pub(crate) async fn run_programmatic_scene_worker(
         "Do NOT call `assets_save` (scene 1 handles saving the template)."
     };
 
+    let is_portrait = project.canvas.height > project.canvas.width;
+    let layout_zone_rule = if is_portrait {
+        "VERTICAL 9:16 SAFE-BAND LAYOUT (CRITICAL — ZERO CAPTION OVERLAP): Keep ALL foreground content (top pill, headline, cards, diagrams, lower badges) strictly between `top: 5vh` and `61vh` (`max-height: 56vh` container starting at `5vh`). NEVER place cards, diagrams, or lower-third bars below `62vh` — `63vh..76vh` is reserved for `T1` kinetic captions (`y=0.25`) and `78vh..100vh` is the bottom social UI safe zone. Stack cards/diagrams vertically (1–2 columns max, NEVER 4 side-by-side horizontal columns in 9:16) and keep all readable body/SVG label text >= 14px (SVG `font-size >= 18` in a `540`-wide `viewBox`)."
+    } else {
+        "WIDESCREEN/SQUARE SAFE-BAND LAYOUT: Keep ALL foreground content cleanly inside `6vh..72vh` so `75vh..88vh` stays completely clear for `T1` kinetic captions. Keep all readable body/diagram text >= 15px."
+    };
+    let canonical_badge = format!("{:02} / {:02}", scene.scene_index, total_scenes);
+
     let system_prompt = format!(
         "You are Solaris motion-design micro-agent '{agent_id}' authoring Scene {idx}/{total_scenes} for project '{}'.\n\
          You own ONLY this single scene window on track `g1`: `start_sec={:.2}`, `duration_sec={:.2}` (`clip_id=\"{clip_id}\"`).\n\
          ## STUDIO CRAFT & SANDBOX CONTRACT\n\
          - Call `gfx_place` DIRECTLY with `inline_html` on Turn 1 (do NOT call `gfx_lint_html` first; `gfx_place` lints automatically and returns exact errors if anything needs fixing).\n\
-         - Fill the entire canvas (`position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;`) with a cohesive, broadcast-grade visual composition: layered dark ambient radial glow + subtle architectural grid/depth backdrop, bold editorial display typography, bespoke inline `<svg viewBox=...>` diagrams/UI cards/icons/charts/connectors.\n\
-         - Keep the hero composition in the upper 72% of the frame (leave the bottom 24% clean for `T1` kinetic captions). Keep `transform` at default `(0,0)`.\n\
+         - Fill the entire canvas (`position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;`) with a cohesive, broadcast-grade visual composition: extend rich layered ambient radial glows, subtle architectural grid/mesh lines, and subtle bottom horizon glow across the ENTIRE `100vh` (so the bottom 40% never looks like an empty pitch-black void), with bold editorial typography and bespoke inline `<svg viewBox=...>` diagrams/cards/icons.\n\
+         - {layout_zone_rule} Keep `transform` at default `(0,0)`.\n\
+         - CONSISTENT SCENE CHROME: Use the EXACT scene badge `{canonical_badge}` (never invent a different denominator like `01/03`). NEVER print internal Solaris asset/tool IDs (such as `progress-bar-solar`, `chapter-title-solar`, `stat-card-solar`, `lower-third-solar`) as visible text.\n\
          - Use responsive viewport units (`vw`, `vh`, `vmin`, `clamp(...)`, `%`, `<svg viewBox>`) so the scene scales crisply across Studio preview and {}x{} export.\n\
          - Use Brand CSS variables (`--brand-bg`, `--brand-surface`, `--brand-ink`, `--brand-accent`, `--brand-accent-secondary`, `--brand-font-display`, `--brand-font-body`) with clean fallbacks matching the brand tokens.\n\
-         - Drive smooth deterministic choreography with bundled GSAP 3 (`window.__timelines = window.__timelines || {{}}; const tl = gsap.timeline({{paused:true}}); ... window.__timelines['main'] = tl;`) — staggered entrance in the first 0.6s, living mid-scene accent/draw/orbit motion, clean settle before exit.\n\
-         - Strict sandbox rules: root `<div class=\"clip\" data-start=\"0\" data-duration=\"{:.2}\">`, ZERO external URLs/CDNs, ZERO `Math.random`, `Date.now`, `new Date`, `setInterval`, `setTimeout`, `requestAnimationFrame`, `fetch`, `XMLHttpRequest`, `WebSocket`, `import()`.\n\
+         - GSAP 3 (`window.gsap`) IS ALREADY INJECTED GLOBALLY OFFLINE — NEVER write `<script src=...>` or `<link>` tags! Write ONLY an inline `<script>...</script>` (`window.__timelines = window.__timelines || {{}}; const tl = gsap.timeline({{paused:true}}); ... window.__timelines['main'] = tl;`). Complete the primary headline entrance by `t <= 0.35s` (immediately readable hook!), stagger diagrams/cards cleanly by `0.75s` with living mid-scene motion, and keep all core elements at full opacity through the end of the clip (do NOT fade the scene out to black before exit).\n\
+         - Strict sandbox rules: root `<div class=\"clip\" data-start=\"0\" data-duration=\"{:.2}\">`, ZERO `<script src=...>`, ZERO external URLs/CDNs, ZERO `Math.random`, `Date.now`, `new Date`, `setInterval`, `setTimeout`, `requestAnimationFrame`, `fetch`, `XMLHttpRequest`, `WebSocket`, `import()`.\n\
          - Keep `inline_html` crisp and focused (~2.5–5 KB) so it renders fast and cleanly.\n\
          - {save_note}\n\
          - Once placed, stop and reply concisely — Director runs Vision QA automatically.",

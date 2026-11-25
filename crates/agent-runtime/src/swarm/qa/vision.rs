@@ -97,6 +97,60 @@ pub(super) fn compute_sample_timestamps(span_start: f64, span_end: f64) -> Vec<f
     sample_times
 }
 
+pub(super) fn compute_project_sample_timestamps(
+    project: &Project,
+    span_start: f64,
+    span_end: f64,
+) -> Vec<f64> {
+    let has_video_clips = project
+        .tracks
+        .iter()
+        .filter(|t| (t.id == "v1" || t.id == "v2") && !t.muted)
+        .any(|t| t.clips.iter().any(|c| c.duration_sec > 0.0));
+
+    if !has_video_clips && let Some(g1) = project.tracks.iter().find(|t| t.id == "g1" && !t.muted) {
+        let mut scenes: Vec<(f64, f64)> = g1
+            .clips
+            .iter()
+            .filter(|c| {
+                c.start_sec.is_finite() && c.duration_sec.is_finite() && c.duration_sec > 0.05
+            })
+            .map(|c| (c.start_sec.max(0.0), c.duration_sec))
+            .collect();
+        scenes.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+        if !scenes.is_empty() {
+            // Sample settled mid-scene hero moments (after GSAP entrance stagger finishes,
+            // before any end-of-scene transition) for Hook, Mid, and Climax/Outro scenes.
+            let mut indices = vec![0usize];
+            if scenes.len() >= 3 {
+                indices.push(scenes.len() / 2);
+                indices.push(scenes.len() - 1);
+            } else if scenes.len() == 2 {
+                indices.push(1);
+            }
+            let mut sample_times = Vec::with_capacity(indices.len());
+            for idx in indices {
+                let (s, dur) = scenes[idx];
+                let settled_offset = if dur >= 1.6 {
+                    (dur * 0.50).clamp(0.95, dur - 0.55)
+                } else {
+                    dur * 0.55
+                };
+                let t = (s + settled_offset).clamp(s, (s + dur - 0.02).max(s));
+                if sample_times.last().is_none_or(|prev| t > *prev + 0.02) {
+                    sample_times.push(t);
+                }
+            }
+            if !sample_times.is_empty() {
+                return sample_times;
+            }
+        }
+    }
+
+    compute_sample_timestamps(span_start, span_end)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn inspect_playback_frames(
     backend: &dyn SolarisBackend,
@@ -118,7 +172,7 @@ pub(super) async fn inspect_playback_frames(
         return (0, None);
     }
 
-    let sample_times = compute_sample_timestamps(span_start, span_end);
+    let sample_times = compute_project_sample_timestamps(project, span_start, span_end);
     if sample_times.is_empty() {
         return (0, None);
     }
@@ -185,16 +239,32 @@ pub(super) async fn inspect_playback_frames(
             .map(|t| t.clips.len())
             .unwrap_or(0);
 
+        let is_programmatic_zero_asset = video_clips == 0 && gfx_clips > 0;
+        let task_prompt = if is_programmatic_zero_asset {
+            "Review these Solaris programmatic motion-graphics playback frames (hook, mid, climax). \
+             IMPORTANT: `programmatic_zero_asset` is TRUE — this project intentionally has 0 imported video_clips and is a pure HTML/CSS/SVG/GSAP motion-graphics video on G1 + captions on T1. \
+             Do NOT report '0 video clips' or 'no camera footage' as an issue or defect! \
+             Evaluate the motion graphics as a studio explainer: put genuine critical defects (completely blank/unrendered frame, unreadable/clipped text, severe overlap where captions cover diagrams/headlines, broken layout) in \"issues\", and minor polish notes (spacing, font sizing, badge consistency, caption copy redundancy) in \"warnings\". \
+             Reply ONLY with JSON: {\"summary\": string, \"issues\": [string], \"warnings\": [string]}."
+        } else {
+            "Review these Solaris timeline playback frames (hook, mid, climax) for visual completeness, composition, legibility, contrast, and broadcast polish. Put critical defects (blank/pitch-black background, missing scene graphics, unreadable/clipped text, broken framing) in \"issues\" and minor polish notes in \"warnings\". Reply ONLY with JSON: {\"summary\": string, \"issues\": [string], \"warnings\": [string]}."
+        };
+        let system_prompt = if is_programmatic_zero_asset {
+            "You are Solaris Multimodal QA Director reviewing a programmatic motion-graphics video (G1 HTML/SVG/GSAP + T1 captions, intentionally 0 camera clips). Never penalize the absence of camera footage; judge graphic craft, legibility, safe-zone separation, and composition honestly. Reply ONLY with valid JSON."
+        } else {
+            "You are Solaris Multimodal QA Director. Be strict and honest: blank/pitch-black backgrounds or missing visual graphics are critical issues, not minor warnings. Reply ONLY with valid JSON."
+        };
+
         let mut parts = vec![ContentPart::text(
             json!({
-                "task": "Review these Solaris timeline playback frames (hook, mid, climax) for visual completeness, composition, legibility, contrast, and broadcast polish. Put critical defects (blank/pitch-black background, missing scene graphics, unreadable/clipped text, broken framing) in \"issues\" and minor polish notes in \"warnings\". Reply ONLY with JSON: {\"summary\": string, \"issues\": [string], \"warnings\": [string]}.",
+                "task": task_prompt,
                 "canvas": project.canvas,
                 "active_grade": project.active_grade,
                 "timeline_context": {
                     "video_clips": video_clips,
                     "gfx_clips": gfx_clips,
                     "caption_clips": caption_clips,
-                    "programmatic_zero_asset": video_clips == 0,
+                    "programmatic_zero_asset": is_programmatic_zero_asset,
                 },
             })
             .to_string(),
@@ -212,9 +282,7 @@ pub(super) async fn inspect_playback_frames(
             model: req_model,
             models: req_models,
             messages: vec![
-                ChatMessage::system(
-                    "You are Solaris Multimodal QA Director. Be strict and honest: blank/pitch-black backgrounds or missing visual graphics are critical issues, not minor warnings. Reply ONLY with valid JSON.",
-                ),
+                ChatMessage::system(system_prompt),
                 ChatMessage::user_parts(parts),
             ],
             session_id: Some(format!("solaris-qa-{}", project.id)),

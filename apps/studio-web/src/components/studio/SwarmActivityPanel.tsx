@@ -319,12 +319,12 @@ export function SwarmActivityPanel({
             </span>
           </div>
           {latestQaReport.multimodal_summary && (
-            <p className="mt-1 line-clamp-2 text-[10px] text-areia/75">
+            <p className="mt-1 break-words leading-snug text-[10px] text-areia/75">
               {latestQaReport.multimodal_summary}
             </p>
           )}
           {latestQaReport.checks.length > 0 && (
-            <div className="mt-1 max-h-24 space-y-0.5 overflow-y-auto pr-0.5">
+            <div className="mt-1.5 max-h-48 space-y-1 overflow-y-auto pr-0.5">
               {[...latestQaReport.checks]
                 .sort((a, b) => {
                   const rank = { issue: 0, warning: 1, fixed: 2, pass: 3 };
@@ -333,10 +333,10 @@ export function SwarmActivityPanel({
                 .map((chk) => (
                   <div
                     key={chk.id}
-                    className="flex items-center gap-1.5 text-[10px] text-areia/80"
+                    className="flex items-start gap-1.5 text-[10px] text-areia/85"
                   >
                     <span
-                      className={`shrink-0 rounded px-1 py-0.5 text-[10px] font-semibold uppercase ${
+                      className={`mt-0.5 shrink-0 rounded px-1 py-0.5 text-[10px] font-semibold uppercase leading-none ${
                         chk.severity === "issue"
                           ? "bg-vermelho-foco text-areia"
                           : chk.severity === "warning"
@@ -348,7 +348,9 @@ export function SwarmActivityPanel({
                     >
                       {chk.severity}
                     </span>
-                    <span className="truncate">{chk.message}</span>
+                    <span className="min-w-0 flex-1 break-words leading-snug">
+                      {chk.message}
+                    </span>
                   </div>
                 ))}
             </div>
