@@ -309,7 +309,7 @@ export function AiSettingsModal({
                   <span>OpenRouter Model Advisor</span>
                 </div>
                 <p className="mt-0.5 text-[10px] text-areia/55">
-                  Automatically ranks models by native video + audio + image + tool calling capabilities.
+                  Curated top models: native Omni-Modal (video + audio + tools) and fast, low-cost Programmatic editors.
                 </p>
               </div>
               <button
@@ -340,17 +340,17 @@ export function AiSettingsModal({
                   BEST MATCH · OMNI-MODAL
                 </span>
                 <p className="mt-1.5 text-[11px] leading-relaxed text-areia/85">
-                  Video + Audio + Image + Text + Tools. Sees raw footage, hears pacing,
-                  and inspects QA frames natively.
+                  Video + Audio + Image + Text + Tools (Gemini 4, MiMo 2.6 Pro, Muse Ember).
+                  Sees raw footage, hears pacing, and inspects QA frames natively.
                 </p>
               </div>
               <div className="rounded-xl border border-areia/12 bg-carbono/80 p-2.5">
                 <span className="inline-block rounded-full border border-laranja-criacao/45 bg-laranja-criacao/15 px-2 py-0.5 text-[10px] font-semibold text-areia">
-                  SMART FALLBACK · VISION + TEXT
+                  PROGRAMMATIC · FAST &amp; CHEAP
                 </span>
                 <p className="mt-1.5 text-[11px] leading-relaxed text-areia/75">
-                  Image + Text + Tools (Claude / GPT). Uses compressed keyframe contact
-                  sheets, full word-level transcripts, and silence/beat JSON.
+                  Vision + Text + Tools (Haiku 5.5, Kimi K3.1 Pro, Hy4, DeepSeek V4.1).
+                  Edits timelines &amp; GFX programmatically using keyframes, transcripts, and beat JSON.
                 </p>
               </div>
             </div>
@@ -373,8 +373,8 @@ export function AiSettingsModal({
               </div>
 
               {directorCandidates.length > 0 ? (
-                <div className="max-h-48 space-y-1.5 overflow-y-auto pr-1">
-                  {directorCandidates.slice(0, 6).map((cand) => {
+                <div className="max-h-72 space-y-1.5 overflow-y-auto pr-1">
+                  {directorCandidates.slice(0, 12).map((cand) => {
                     const omni = isOmniModalModel(cand);
                     const isAutoPrimary = !selectedModelOverride && modelAdvisor?.director.primary === cand.id;
                     const active = selectedModelOverride === cand.id || isAutoPrimary;
@@ -400,11 +400,11 @@ export function AiSettingsModal({
                             )}
                             {omni ? (
                               <span className="shrink-0 rounded bg-amarelo-ideias px-1.5 py-0.5 text-[10px] font-bold text-void">
-                                BEST MATCH
+                                OMNI-MODAL
                               </span>
                             ) : (
-                              <span className="shrink-0 rounded bg-grafite px-1.5 py-0.5 text-[10px] font-semibold text-areia/80">
-                                FALLBACK
+                              <span className="shrink-0 rounded border border-laranja-criacao/35 bg-laranja-criacao/15 px-1.5 py-0.5 text-[10px] font-semibold text-areia/90">
+                                PROGRAMMATIC
                               </span>
                             )}
                           </div>
@@ -428,7 +428,7 @@ export function AiSettingsModal({
                 </div>
               ) : null}
 
-              {directorCandidates.length > 6 && (
+              {directorCandidates.length > 12 && (
                 <SolarSelect
                   variant="field"
                   wrapperClassName="w-full"
@@ -439,13 +439,13 @@ export function AiSettingsModal({
                   className="bg-carbono"
                 >
                   <option value="" className="bg-carbono">
-                    Auto Recommended ({modelAdvisor?.director.primary ?? "google/gemini-flash-latest"})
+                    Auto Recommended ({modelAdvisor?.director.primary ?? "google/gemini-4-hydrogen"})
                   </option>
                   {directorCandidates.map((cand) => {
                     const badge = isOmniModalModel(cand)
-                      ? "[Best Match]"
+                      ? "[Omni-Modal]"
                       : isVisionFallbackModel(cand)
-                        ? "[Fallback]"
+                        ? "[Programmatic]"
                         : "[Tools]";
                     const price =
                       typeof cand.prompt_usd_per_m === "number"

@@ -119,9 +119,9 @@ export function PreEditorChat({
 
   const activeIsOmni = activeDirectorCandidate
     ? isOmniModalModel(activeDirectorCandidate)
-    : (selectedModelOverride || modelAdvisor?.director.primary || "")
-        .toLowerCase()
-        .includes("gemini");
+    : /gemini|muse-ember|mimo-v2\.6/i.test(
+        selectedModelOverride || modelAdvisor?.director.primary || "",
+      );
 
   useEffect(() => {
     if (!recentOpen) return;
@@ -437,7 +437,7 @@ export function PreEditorChat({
                       title={
                         activeIsOmni
                           ? "Sees raw footage, hears pacing, and inspects QA frames natively"
-                          : "Uses keyframe contact sheets, word-level transcripts, and silence/beat telemetry"
+                          : "Fast, low-cost programmatic video & GFX editing using keyframes, transcripts, and silence/beat telemetry"
                       }
                       className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.1em] ${
                         activeIsOmni
@@ -450,7 +450,7 @@ export function PreEditorChat({
                           activeIsOmni ? "bg-amarelo-ideias" : "bg-laranja-criacao"
                         }`}
                       />
-                      {activeIsOmni ? "Omni-Modal" : "Vision + Text"}
+                      {activeIsOmni ? "Omni-Modal" : "Programmatic"}
                     </span>
                     {modelAdvisor ? (
                       <SolarSelect
@@ -463,11 +463,18 @@ export function PreEditorChat({
                         <option value="" className="bg-carbono">
                           Auto: {modelAdvisor.director.primary}
                         </option>
-                        {modelAdvisor.director.candidates.slice(0, 8).map((c) => (
-                          <option key={c.id} value={c.id} className="bg-carbono">
-                            {c.id} {isOmniModalModel(c) ? "(Video+Audio)" : "(Vision)"}
-                          </option>
-                        ))}
+                        {modelAdvisor.director.candidates.slice(0, 12).map((c) => {
+                          const price =
+                            typeof c.prompt_usd_per_m === "number"
+                              ? ` · $${c.prompt_usd_per_m.toFixed(2)}/M`
+                              : "";
+                          return (
+                            <option key={c.id} value={c.id} className="bg-carbono">
+                              {c.id} {isOmniModalModel(c) ? "(Video+Audio)" : "(Programmatic)"}
+                              {price}
+                            </option>
+                          );
+                        })}
                       </SolarSelect>
                     ) : (
                       <span className="truncate text-[11px] text-areia/60">

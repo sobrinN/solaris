@@ -12,6 +12,44 @@ use crate::openrouter::{OpenRouterClient, OpenRouterModel};
 const CATALOG_CACHE_TTL: Duration = Duration::from_secs(900); // 15 min
 const CATALOG_ERROR_COOLDOWN: Duration = Duration::from_secs(60);
 
+/// Curated roster of vetted high-quality OpenRouter models for Director planning & Vision QA:
+/// - Tier 1: Native Omni-Modal (video + audio + image + text + tools)
+/// - Tier 2: Fast, low-cost Programmatic / Vision editors (image + text + tools)
+const CURATED_DIRECTOR_MODELS: &[&str] = &[
+    "google/gemini-4-hydrogen",
+    "google/gemini-4-neon",
+    "xiaomi/mimo-v2.6-pro",
+    "meta/muse-ember",
+    "anthropic/claude-haiku-5.5",
+    "moonshotai/kimi-k3.1-pro",
+    "tencent/hy4",
+    "deepseek/deepseek-v4.1-flash-1017",
+];
+
+/// Curated roster for parallel specialist tool workers, prioritizing low-latency, low-cost
+/// high-reliability tool-callers first while keeping flagship omni-modal models available.
+const CURATED_WORKER_MODELS: &[&str] = &[
+    "meta/muse-ember",
+    "anthropic/claude-haiku-5.5",
+    "deepseek/deepseek-v4.1-flash-1017",
+    "xiaomi/mimo-v2.6-pro",
+    "tencent/hy4",
+    "moonshotai/kimi-k3.1-pro",
+    "google/gemini-4-hydrogen",
+    "google/gemini-4-neon",
+];
+
+fn curated_rank(role: ModelRoleKind, model_id: &str) -> Option<usize> {
+    let roster = match role {
+        ModelRoleKind::DirectorMultimodal => CURATED_DIRECTOR_MODELS,
+        ModelRoleKind::SpecialistToolWorker => CURATED_WORKER_MODELS,
+        ModelRoleKind::TranscriptionStt => return None,
+    };
+    roster
+        .iter()
+        .position(|candidate| candidate.eq_ignore_ascii_case(model_id))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelRoleKind {
@@ -213,7 +251,7 @@ impl ModelAdvisor {
         let primary = fallbacks
             .first()
             .cloned()
-            .unwrap_or_else(|| "~google/gemini-flash-latest".to_string());
+            .unwrap_or_else(|| "google/gemini-4-hydrogen".to_string());
         ModelRecommendation {
             role,
             primary,
@@ -331,14 +369,14 @@ impl ModelAdvisor {
 fn default_fallbacks(role: ModelRoleKind) -> Vec<String> {
     match role {
         ModelRoleKind::DirectorMultimodal => vec![
-            "~google/gemini-flash-latest".to_string(),
-            "~anthropic/claude-sonnet-latest".to_string(),
-            "~openai/gpt-latest".to_string(),
+            "google/gemini-4-hydrogen".to_string(),
+            "xiaomi/mimo-v2.6-pro".to_string(),
+            "meta/muse-ember".to_string(),
         ],
         ModelRoleKind::SpecialistToolWorker => vec![
-            "~anthropic/claude-sonnet-latest".to_string(),
-            "~openai/gpt-latest".to_string(),
-            "~google/gemini-flash-latest".to_string(),
+            "meta/muse-ember".to_string(),
+            "anthropic/claude-haiku-5.5".to_string(),
+            "deepseek/deepseek-v4.1-flash-1017".to_string(),
         ],
         ModelRoleKind::TranscriptionStt => vec!["openai/whisper-1".to_string()],
     }
@@ -387,9 +425,9 @@ fn modalities_from_catalog_or_heuristic(
     {
         return arch.input_modalities.clone();
     }
-    // Heuristic for offline alias fallback (e.g. `~google/gemini-flash-latest`)
+    // Heuristic for offline fallback when live catalog is unavailable
     let lower = strip_model_variant(model_id).to_ascii_lowercase();
-    if lower.contains("gemini") {
+    if lower.contains("gemini") || lower.contains("muse-ember") || lower.contains("mimo-v2.6") {
         vec![
             "text".to_string(),
             "image".to_string(),
@@ -437,7 +475,8 @@ fn is_expired_model(expiration_date: Option<&str>, now: DateTime<Utc>) -> bool {
 
 pub fn rank_models(models: &[OpenRouterModel], role: ModelRoleKind) -> Vec<ModelCandidate> {
     let now = Utc::now();
-    let mut out = Vec::new();
+    let mut curated_out: Vec<(usize, ModelCandidate)> = Vec::new();
+    let mut fallback_out: Vec<ModelCandidate> = Vec::new();
     for m in models {
         if is_expired_model(m.expiration_date.as_deref(), now) || is_batch_variant_model(&m.id) {
             continue;
@@ -481,6 +520,26 @@ pub fn rank_models(models: &[OpenRouterModel], role: ModelRoleKind) -> Vec<Model
         };
 
         let is_free = is_free_tier_model(&m.id, prompt_m, completion_m);
+        if !is_free && let Some(rank_idx) = curated_rank(role, &m.id) {
+            let curated_score = 200.0 - (rank_idx as f64) * 5.0;
+            curated_out.push((
+                rank_idx,
+                ModelCandidate {
+                    id: m.id.clone(),
+                    name: m.name.clone(),
+                    context_length: ctx,
+                    prompt_usd_per_m: prompt_m,
+                    completion_usd_per_m: completion_m,
+                    input_modalities: inputs,
+                    output_modalities: outputs,
+                    supports_tools,
+                    match_tier,
+                    score: curated_score,
+                },
+            ));
+            continue;
+        }
+
         let mut score = 0.0_f64;
         if role == ModelRoleKind::DirectorMultimodal {
             if has_video {
@@ -518,7 +577,7 @@ pub fn rank_models(models: &[OpenRouterModel], role: ModelRoleKind) -> Vec<Model
             score -= 80.0;
         }
 
-        out.push(ModelCandidate {
+        fallback_out.push(ModelCandidate {
             id: m.id.clone(),
             name: m.name.clone(),
             context_length: ctx,
@@ -532,11 +591,18 @@ pub fn rank_models(models: &[OpenRouterModel], role: ModelRoleKind) -> Vec<Model
         });
     }
 
+    // When curated models are available in the catalog, recommend ONLY vetted models
+    // (preventing noisy/legacy/experimental catalog entries from polluting Solaris's advisor).
+    if !curated_out.is_empty() {
+        curated_out.sort_by(|(ra, a), (rb, b)| ra.cmp(rb).then_with(|| a.id.cmp(&b.id)));
+        return curated_out.into_iter().map(|(_, c)| c).collect();
+    }
+
     // If non-free candidates exist, keep free-tier candidates strictly below all paid models
-    let has_non_free = out
+    let has_non_free = fallback_out
         .iter()
         .any(|c| !is_free_tier_model(&c.id, c.prompt_usd_per_m, c.completion_usd_per_m));
-    out.sort_by(|a, b| {
+    fallback_out.sort_by(|a, b| {
         if has_non_free {
             let a_free = is_free_tier_model(&a.id, a.prompt_usd_per_m, a.completion_usd_per_m);
             let b_free = is_free_tier_model(&b.id, b.prompt_usd_per_m, b.completion_usd_per_m);
@@ -546,7 +612,7 @@ pub fn rank_models(models: &[OpenRouterModel], role: ModelRoleKind) -> Vec<Model
         }
         b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id))
     });
-    out
+    fallback_out
 }
 
 #[cfg(test)]
@@ -921,5 +987,124 @@ mod tests {
         assert!((ranked[0].score - ranked[1].score).abs() < 1e-9);
         assert_eq!(ranked[0].id, "a-vendor/whisper-a");
         assert_eq!(ranked[1].id, "z-vendor/whisper-b");
+    }
+
+    #[test]
+    fn rank_models_curates_only_vetted_omni_and_programmatic_models() {
+        let mk = |id: &str, inputs: &[&str], prompt: &str| OpenRouterModel {
+            id: id.to_string(),
+            name: id.to_string(),
+            context_length: Some(1_048_576),
+            architecture: Some(ModelArchitecture {
+                input_modalities: inputs.iter().map(|s| (*s).to_string()).collect(),
+                output_modalities: vec!["text".to_string()],
+            }),
+            pricing: Some(ModelPricing {
+                prompt: Some(prompt.to_string()),
+                completion: Some("0.000001".to_string()),
+            }),
+            supported_parameters: vec![
+                "tools".to_string(),
+                "tool_choice".to_string(),
+                "response_format".to_string(),
+            ],
+            expiration_date: None,
+        };
+
+        let catalog = vec![
+            // Noisy / experimental / low-quality / batch models that must be excluded
+            mk(
+                "xiaomi/mimo-v2.6-flash-mopd",
+                &["text", "image", "video", "audio"],
+                "0.00000001",
+            ),
+            mk(
+                "z-ai/glm-5.3-flashx-legal",
+                &["text", "image", "video"],
+                "0.00000005",
+            ),
+            mk(
+                "meta/muse-spark-1.2-contributor",
+                &["text", "image", "video", "audio"],
+                "0.00000001",
+            ),
+            mk(
+                "google/gemini-4-neon:batch",
+                &["text", "image", "video", "audio"],
+                "0.0000015",
+            ),
+            // Vetted 4 Omni-Modal + 4 Cheap Programmatic/Vision models (intentionally shuffled)
+            mk(
+                "deepseek/deepseek-v4.1-flash-1017",
+                &["text", "image"],
+                "0.00000015",
+            ),
+            mk("tencent/hy4", &["text", "image"], "0.000000417"),
+            mk(
+                "moonshotai/kimi-k3.1-pro",
+                &["text", "image", "video"],
+                "0.00000024",
+            ),
+            mk(
+                "anthropic/claude-haiku-5.5",
+                &["text", "image"],
+                "0.0000001",
+            ),
+            mk(
+                "meta/muse-ember",
+                &["text", "image", "video", "audio"],
+                "0.0000001",
+            ),
+            mk(
+                "xiaomi/mimo-v2.6-pro",
+                &["text", "image", "video", "audio"],
+                "0.000000435",
+            ),
+            mk(
+                "google/gemini-4-neon",
+                &["text", "image", "video", "audio"],
+                "0.000003",
+            ),
+            mk(
+                "google/gemini-4-hydrogen",
+                &["text", "image", "video", "audio"],
+                "0.0000015",
+            ),
+        ];
+
+        let dir = rank_models(&catalog, ModelRoleKind::DirectorMultimodal);
+        let dir_ids: Vec<&str> = dir.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            dir_ids,
+            vec![
+                "google/gemini-4-hydrogen",
+                "google/gemini-4-neon",
+                "xiaomi/mimo-v2.6-pro",
+                "meta/muse-ember",
+                "anthropic/claude-haiku-5.5",
+                "moonshotai/kimi-k3.1-pro",
+                "tencent/hy4",
+                "deepseek/deepseek-v4.1-flash-1017",
+            ]
+        );
+        // First 4 are omni-modal (`best_match`), next 4 are programmatic vision (`smart_fallback`)
+        assert!(dir[..4].iter().all(|c| c.match_tier == "best_match"));
+        assert!(dir[4..].iter().all(|c| c.match_tier == "smart_fallback"));
+
+        let worker = rank_models(&catalog, ModelRoleKind::SpecialistToolWorker);
+        let worker_ids: Vec<&str> = worker.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            worker_ids,
+            vec![
+                "meta/muse-ember",
+                "anthropic/claude-haiku-5.5",
+                "deepseek/deepseek-v4.1-flash-1017",
+                "xiaomi/mimo-v2.6-pro",
+                "tencent/hy4",
+                "moonshotai/kimi-k3.1-pro",
+                "google/gemini-4-hydrogen",
+                "google/gemini-4-neon",
+            ]
+        );
     }
 }
