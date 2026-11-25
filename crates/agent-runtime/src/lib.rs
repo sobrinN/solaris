@@ -25,7 +25,7 @@ pub use planner::{
 };
 pub use skills::{
     SkillDoc, SkillResourceDoc, get_skill, get_skill_resource, install_skills_to_dir,
-    list_skill_resources, list_skills, skills_for_role,
+    list_skill_resources, list_skills, skill_references_for_role, skills_for_role,
 };
 pub use stt::transcribe_audio_openrouter;
 pub use swarm::{SwarmRunRequest, prepare_swarm_request, run_qa_pass, run_swarm};

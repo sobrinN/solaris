@@ -177,6 +177,20 @@ pub fn skills_for_role(role: AgentRole) -> Vec<SkillDoc> {
     names.iter().filter_map(|n| get_skill(n)).collect()
 }
 
+/// Returns progressive-disclosure reference docs needed directly by internal
+/// Rust swarm roles (which cannot call MCP `resources/read`).
+pub fn skill_references_for_role(role: AgentRole) -> Vec<SkillResourceDoc> {
+    let uris: &[&str] = match role {
+        AgentRole::Director => &["skill://director-core/references/direction-and-pacing.md"],
+        AgentRole::Gfx => &[
+            "skill://captions-and-gfx/references/gfx-contract.md",
+            "skill://captions-and-gfx/references/starter-assets.md",
+        ],
+        _ => &[],
+    };
+    uris.iter().filter_map(|u| get_skill_resource(u)).collect()
+}
+
 fn write_dir_recursive(
     dir: &Dir<'_>,
     root_prefix: &Path,
@@ -272,6 +286,12 @@ mod tests {
         }
         let root = get_skill_resource("skill://director-core").expect("root skill lookup");
         assert_eq!(root.relative_path, "SKILL.md");
+
+        let gfx_refs = skill_references_for_role(AgentRole::Gfx);
+        assert!(gfx_refs.iter().any(|r| r.uri.ends_with("gfx-contract.md")));
+        assert!(gfx_refs.iter().any(|r| r.uri.ends_with("starter-assets.md")));
+        let dir_refs = skill_references_for_role(AgentRole::Director);
+        assert!(dir_refs.iter().any(|r| r.uri.ends_with("direction-and-pacing.md")));
     }
 
     #[test]

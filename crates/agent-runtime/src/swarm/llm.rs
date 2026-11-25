@@ -16,7 +16,7 @@ use crate::openrouter::{
     OpenRouterClient, ProviderPreferences, ReasoningConfig, ToolDefinition, truncate_msg,
 };
 use crate::planner::CreativePlan;
-use crate::skills::skills_for_role;
+use crate::skills::{skill_references_for_role, skills_for_role};
 use crate::swarm::speech::narration_expected;
 use crate::swarm::{DirectorPlan, SceneSpec, SwarmRunMode, is_voice_hint};
 use crate::tools::{
@@ -232,11 +232,14 @@ pub(crate) async fn build_openrouter_director_plan(
         return Err(AgentError::Cancelled);
     }
 
-    let skill_text = skills_for_role(AgentRole::Director)
+    let mut skill_sections: Vec<String> = skills_for_role(AgentRole::Director)
         .into_iter()
         .map(|s| format!("## {}\n{}", s.name, s.content))
-        .collect::<Vec<_>>()
-        .join("\n\n");
+        .collect();
+    for r in skill_references_for_role(AgentRole::Director) {
+        skill_sections.push(format!("## {}/{}\n{}", r.skill_name, r.relative_path, r.content));
+    }
+    let skill_text = skill_sections.join("\n\n");
 
     let media_summary: Vec<serde_json::Value> = project
         .media_pool
@@ -812,11 +815,14 @@ pub(crate) async fn run_llm_worker_loop(
     cancel: &CancellationToken,
     ops_counter: &Arc<AtomicU32>,
 ) -> Result<u32, AgentError> {
-    let skills = skills_for_role(role)
+    let mut skill_sections: Vec<String> = skills_for_role(role)
         .into_iter()
         .map(|s| format!("## {}\n{}", s.name, s.content))
-        .collect::<Vec<_>>()
-        .join("\n\n");
+        .collect();
+    for r in skill_references_for_role(role) {
+        skill_sections.push(format!("## {}/{}\n{}", r.skill_name, r.relative_path, r.content));
+    }
+    let skills = skill_sections.join("\n\n");
 
     let compact_media: Vec<serde_json::Value> = project
         .media_pool
@@ -904,9 +910,14 @@ pub(crate) async fn run_llm_worker_loop(
         String::new()
     };
 
+    let mode_override = if mode == SwarmRunMode::Refine {
+        "\n\n## REFINEMENT MODE OVERRIDE\nYou are refining an EXISTING timeline. Only invoke your provided edit-in-place tools (e.g. `gfx_update_clip`, `captions_update_clip`, `timeline_trim_clip`, `timeline_delete_clip`, `timeline_set_transform`, `color_set_grade`, `audio_set_mix`). Ignore any skill instructions that ask to place new clips, regenerate tracks, or lock/unlock tracks."
+    } else {
+        " Track locking and pre-edit keyframe scouting are handled automatically by the runtime; only call tools present in your provided tool schema."
+    };
     let system_prompt = format!(
         "You are Solaris specialist '{agent_id}' ({role:?}) on project '{}'. \
-         You may ONLY mutate tracks {:?}. Call only the provided tools to make clean atomic edits, then reply concisely when finished.{programmatic_role_brief}\n\n{skills}",
+         You may ONLY mutate tracks {:?}. Call only the provided tools to make clean atomic edits, then reply concisely when finished.{mode_override}{programmatic_role_brief}\n\n{skills}",
         project.id, allowed_tracks
     );
     let user_prompt = json!({

@@ -254,7 +254,8 @@ impl McpServer {
                     "serverInfo": {
                         "name": "solaris-mcp",
                         "version": env!("CARGO_PKG_VERSION")
-                    }
+                    },
+                    "instructions": "Solaris is a 7-track AI video editor (T1, G1, V2, V1, FX, A1, A2). Before mutating a timeline, read the `skill://director-core` resource (and relevant craft skills/references via `resources/list` and `resources/read`) for workflow, safe-zone, color, audio, and HTML/GSAP GFX rules."
                 }))
             }
             "ping" => Ok(json!({})),
@@ -790,6 +791,12 @@ mod tests {
         let init_res = init.result.unwrap();
         assert_eq!(init_res["serverInfo"]["name"], "solaris-mcp");
         assert_eq!(init_res["protocolVersion"], "2025-06-18");
+        assert!(
+            init_res["instructions"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("skill://director-core")
+        );
 
         // Explicit "id": null must return -32600 (Invalid Request), not be dropped as notification
         let null_id = server

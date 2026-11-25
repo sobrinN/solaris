@@ -385,7 +385,7 @@ pub fn all_tools() -> Vec<ToolSpec> {
         ToolSpec {
             mcp_name: "captions.generate_from_transcript",
             llm_name: "captions_generate_from_transcript",
-            description: "Generate 2-4 word social safe-zone caption clips on T1 from stored media transcripts, aligned to placed V1 clips.",
+            description: "Generate 2-4 word social safe-zone caption clips on T1 from stored media transcripts, aligned to placed V1 and A1 clips.",
             input_schema: json!({
                 "type": "object",
                 "properties": {

@@ -6,7 +6,7 @@ use tracing_subscriber::EnvFilter;
 
 fn print_usage() {
     eprintln!(
-        "Usage: solaris-mcp [serve | list-skills | install-skills [--target codex|antigravity|claude|cursor] [--path <dir>]]"
+        "Usage: solaris-mcp [serve | list-skills | install-skills [--target codex|antigravity|gemini|claude|cursor] [--path <dir>]]"
     );
 }
 
@@ -86,7 +86,8 @@ fn resolve_install_dir(rest: &[String]) -> Result<PathBuf, String> {
             "--target" => {
                 let Some(val) = rest.get(i + 1) else {
                     return Err(
-                        "--target requires a value (codex|antigravity|claude|cursor)".to_string(),
+                        "--target requires a value (codex|antigravity|gemini|claude|cursor)"
+                            .to_string(),
                     );
                 };
                 target = Some(val.as_str());

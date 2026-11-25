@@ -54,10 +54,10 @@ Solaris renders animations by seeking the document to exact local time `t` (in s
 
 ## 4. Hard Sandbox & Size Limits
 
-Enforced identically by `gfx.lint_html`, `assets.save`, and `gfx.place`:
+Enforced across `gfx.lint_html`, `assets.save`, `gfx.place`, and `gfx.update_clip`:
 
-- **Required root attributes**: Root container must declare `class="clip"`, `data-start`, and `data-duration`.
-- **Max size**: `128 KB` (`131,072` bytes) per HTML snippet.
+- **Recommended root attributes**: Root container should declare `class="clip"`, `data-start`, and `data-duration` (`gfx.lint_html` warns if `data-start`/`data-duration` or `--brand-` CSS variables are missing).
+- **Max size**: `128 KB` (`131,072` bytes) per HTML snippet (enforced on `assets.save`, `gfx.place`, and `gfx.update_clip`).
 - **Asset ID format** (`assets.save`): `^[a-zA-Z0-9_-]{1,64}$`.
 - **Allowed**: Inline `<style>`, inline `<script>`, inline `<svg>`, `data:` image URIs.
 - **Strictly Forbidden** (will fail `gfx.lint_html`):

@@ -2,7 +2,7 @@
 
 ## Table of Contents
 
-1. [Complete 34-Tool Surface](#1-complete-34-tool-surface)
+1. [Complete 36-Tool Surface](#1-complete-36-tool-surface)
 2. [Track Architecture & Role Hints](#2-track-architecture--role-hints)
 3. [Transform2D Normalized Coordinate System](#3-transform2d-normalized-coordinate-system)
 4. [MCP Resources & Export Status Polling](#4-mcp-resources--export-status-polling)
@@ -10,7 +10,7 @@
 
 ---
 
-## 1. Complete 34-Tool Surface
+## 1. Complete 36-Tool Surface
 
 External MCP uses dotted names (`project.get`); internal OpenRouter swarm uses underscored names (`project_get`). Both normalize identically in the Rust backend.
 
@@ -65,7 +65,7 @@ External MCP uses dotted names (`project.get`); internal OpenRouter swarm uses u
 | `assets.save` | `id`, `name`, `html_source` | `category`, `tags`, `props_schema`, `default_props`, `default_duration_sec`. Lints HTML and validates ID regex `[a-zA-Z0-9_-]{1,64}`. |
 | `gfx.place` | `project_id`, `clip_id`, `label`, `start_sec`, `duration_sec` | `asset_id` + `props` (deep-merged over `default_props`), OR `inline_html`. Enforces `lint_gfx_html` server-side automatically. Always places at default `x:0, y:0, scale:1`—call `timeline.set_transform` afterward for floating cards (keep full-canvas programmatic scenes at `(0,0)`). |
 | `gfx.update_clip` | `project_id`, `clip_id` | `label`, `start_sec`, `duration_sec`, `asset_id`, `props` (deep-merged), `inline_html` (linted). Edits ONE existing `G1` clip in place as a single undo step. |
-| `gfx.lint_html` | `html` | Validates seekable & sandbox rules (`class="clip"`, `data-start`, `data-duration`, no banned APIs/URLs, `<= 128 KB`). Use to pre-verify or debug rejections (`gfx.place` also runs it automatically). |
+| `gfx.lint_html` | `html` | Validates sandbox rules (rejects banned APIs/URLs/tags; warns if `data-start`/`data-duration` or `--brand-` tokens are missing). Use to pre-verify or debug rejections (`gfx.place`, `gfx.update_clip`, and `assets.save` run it automatically and enforce the `128 KB` size limit). |
 
 ### Audio Mix (3 tools)
 
