@@ -101,7 +101,8 @@ Best for: proving 2–4 real sourced metrics on the drop or payoff beat.
       box-shadow:inset 0 1px 0 rgba(255,255,255,.42),inset 0 0 0 1px rgba(255,255,255,.12),0 28px 60px -24px rgba(0,0,0,.65)}
     .tile::after{content:"";position:absolute;inset:0;pointer-events:none;mix-blend-mode:screen;
       background:linear-gradient(110deg,transparent calc(var(--sheen,-45%) - 18%),rgba(255,255,255,.28) var(--sheen,-45%),transparent calc(var(--sheen,-45%) + 18%))}
-    .tile.hero{box-shadow:inset 0 1px 0 rgba(255,255,255,.55),inset 0 0 0 2px color-mix(in srgb,var(--brand-accent,#F05A00) 75%,white),0 28px 70px -20px color-mix(in srgb,var(--brand-accent,#F05A00) 45%,transparent)}
+    .hero-ring{position:absolute;inset:0;border-radius:inherit;pointer-events:none;opacity:0;
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.55),inset 0 0 0 2px color-mix(in srgb,var(--brand-accent,#F05A00) 75%,white),0 28px 70px -20px color-mix(in srgb,var(--brand-accent,#F05A00) 45%,transparent)}
     .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:1.2vmin}
     .lbl{font-size:clamp(12px,2.5vmin,18px);font-weight:600;opacity:.72}
     .delta{font-size:clamp(11px,2.1vmin,15px);font-weight:700;padding:.3em .65em;border-radius:999px;color:#2BD67B;background:rgba(43,214,123,.16);font-variant-numeric:tabular-nums}
@@ -113,7 +114,7 @@ Best for: proving 2–4 real sourced metrics on the drop or payoff beat.
   <div class="stage" id="rig">
     <div class="eyebrow" id="ey">02 / 05 · VERIFIED RESULTS</div>
     <div class="grid">
-      <div class="tile" id="t0"><div class="top"><span class="lbl">Revenue</span><span class="delta">+32%</span></div><div class="num" id="n0"></div><svg class="sp" viewBox="0 0 200 48"><path id="p0" d="M4,40 C40,36 72,30 110,22 C145,15 170,12 196,6"/></svg></div>
+      <div class="tile" id="t0"><span class="hero-ring" id="hr0"></span><div class="top"><span class="lbl">Revenue</span><span class="delta">+32%</span></div><div class="num" id="n0"></div><svg class="sp" viewBox="0 0 200 48"><path id="p0" d="M4,40 C40,36 72,30 110,22 C145,15 170,12 196,6"/></svg></div>
       <div class="tile" id="t1"><div class="top"><span class="lbl">Retention</span><span class="delta">+18%</span></div><div class="num" id="n1"></div><svg class="sp" viewBox="0 0 200 48"><path id="p1" d="M4,38 C45,35 80,28 120,24 C155,20 175,14 196,10"/></svg></div>
     </div>
   </div>
@@ -137,7 +138,7 @@ Best for: proving 2–4 real sourced metrics on the drop or payoff beat.
       tl.to(path, { attr: { "stroke-dashoffset": 0 }, duration: 1.0, ease: "power3.inOut" }, at + 0.22);
     });
     tl.to("#t0", { y: -10, scale: 1.04, duration: 0.55, ease: "back.out(1.8)" }, 2.0);
-    tl.call(() => document.querySelector("#t0").classList.add("hero"), null, 2.0);
+    tl.to("#hr0", { opacity: 1, duration: 0.4, ease: "power2.out" }, 2.0);
     tl.to("#t1", { opacity: 0.55, filter: "blur(2px)", duration: 0.45, ease: "power2.inOut" }, 2.0);
     window.__timelines = { main: tl };
   </script>

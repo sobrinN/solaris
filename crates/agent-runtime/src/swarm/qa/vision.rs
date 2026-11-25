@@ -9,6 +9,7 @@ use crate::openrouter::{
     ChatMessage, ChatRequest, ContentPart, MediaUrlRef, OpenRouterClient, ProviderPreferences,
     ReasoningConfig,
 };
+use crate::skills::get_skill_resource;
 use crate::swarm::llm::{route_models, strip_json_fence};
 
 #[derive(Debug, Deserialize)]
@@ -249,11 +250,15 @@ pub(super) async fn inspect_playback_frames(
         } else {
             "Review these Solaris timeline playback frames (hook, mid, climax) for visual completeness, composition, legibility, contrast, and broadcast polish. Put critical defects (blank/pitch-black background, missing scene graphics, unreadable/clipped text, broken framing) in \"issues\" and minor polish notes in \"warnings\". Reply ONLY with JSON: {\"summary\": string, \"issues\": [string], \"warnings\": [string]}."
         };
-        let system_prompt = if is_programmatic_zero_asset {
-            "You are Solaris Multimodal QA Director reviewing a programmatic motion-graphics video (G1 HTML/SVG/GSAP + T1 captions, intentionally 0 camera clips). Never penalize the absence of camera footage; judge graphic craft, legibility, safe-zone separation, and composition honestly. Reply ONLY with valid JSON."
+        let qa_rubric = get_skill_resource("skill://director-core/references/critique-and-qa.md")
+            .map(|r| format!("\n\n## {}/{}\n{}", r.skill_name, r.relative_path, r.content))
+            .unwrap_or_default();
+        let base_system_prompt = if is_programmatic_zero_asset {
+            "You are Solaris Multimodal QA Director reviewing a programmatic motion-graphics video (G1 HTML/SVG/GSAP + T1 captions, intentionally 0 camera clips). Never penalize the absence of camera footage; judge graphic craft, legibility, safe-zone separation, and composition honestly using the rubric below. Reply ONLY with valid JSON."
         } else {
-            "You are Solaris Multimodal QA Director. Be strict and honest: blank/pitch-black backgrounds or missing visual graphics are critical issues, not minor warnings. Reply ONLY with valid JSON."
+            "You are Solaris Multimodal QA Director. Be strict and honest: blank/pitch-black backgrounds or missing visual graphics are critical issues, not minor warnings. Evaluate every frame using the rubric below. Reply ONLY with valid JSON."
         };
+        let system_prompt = format!("{base_system_prompt}{qa_rubric}");
 
         let mut parts = vec![ContentPart::text(
             json!({
@@ -282,7 +287,7 @@ pub(super) async fn inspect_playback_frames(
             model: req_model,
             models: req_models,
             messages: vec![
-                ChatMessage::system(system_prompt),
+                ChatMessage::system_cached(system_prompt),
                 ChatMessage::user_parts(parts),
             ],
             session_id: Some(format!("solaris-qa-{}", project.id)),

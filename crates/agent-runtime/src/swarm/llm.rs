@@ -892,7 +892,7 @@ pub(crate) async fn run_llm_worker_loop(
                  - Use responsive viewport units (`vw`, `vh`, `vmin`, `clamp(...)`, `%`, `<svg viewBox>`) so every scene renders identically in both compact Studio preview and full {}x{} export. In vertical 9:16, stack diagrams vertically (1–2 columns max, NEVER 4 horizontal columns) and keep readable labels `>= 14px`.\n\
                  - `window.gsap` is ALREADY pre-loaded globally offline — NEVER write `<script src=...>` or `<link>` tags; write ONLY inline `<script>...</script>` (`window.__timelines = window.__timelines || {{}}; const tl = gsap.timeline({{paused:true}}); ... window.__timelines['main'] = tl;`) OR CSS `@keyframes`. Complete primary headline entrance by `t <= 0.35s` and keep elements visible (no fade-to-black before exit).\n\
                  - Use brand CSS variables (`--brand-bg`, `--brand-surface`, `--brand-ink`, `--brand-accent`, `--brand-accent-secondary`, `--brand-font-display`, `--brand-font-body`). Never print internal Solaris asset IDs (e.g. `progress-bar-solar`) as visible text.\n\
-                 - Non-overlapping vertical bands: in 9:16 portrait, keep ALL foreground G1 content (pill, headline, cards, diagrams) cleanly inside `5vh..61vh` so the `63vh..76vh` band stays 100% clear for `T1` captions (`y: 0.25`) and `78vh..100vh` stays clear for social UI (only ambient backdrop/glow extends full `100vh`). Leave `transform` at `(0,0)` for full-canvas scenes.\n\
+                 - Non-overlapping vertical bands: in 9:16 portrait, keep ALL foreground G1 content (pill, headline, cards, diagrams) cleanly inside `5vh..61vh` so the `63vh..76vh` band stays 100% clear for `T1` captions (`y: 0.20`) and `78vh..100vh` stays clear for social UI (only ambient backdrop/glow extends full `100vh`). Leave `transform` at `(0,0)` for full-canvas scenes.\n\
                  - Follow strict sandbox rules: root `<div class=\"clip\" data-start=\"0\" data-duration=\"...\">`, ZERO `<script src=...>`, ZERO external URLs/CDNs, ZERO `Math.random`, `Date.now`, `setInterval`, `setTimeout`, `requestAnimationFrame`, `fetch`.\n\
                  - After all scenes cover `0.0s..{:.1}s`, save 1 reusable custom scene template via `assets_save`. Director runs final Vision QA automatically after specialists finish.",
                 target_duration_sec,
@@ -1325,13 +1325,14 @@ pub(crate) async fn run_programmatic_scene_worker(
 
     let is_portrait = project.canvas.height > project.canvas.width;
     let layout_zone_rule = if is_portrait {
-        "VERTICAL 9:16 SAFE-BAND LAYOUT (CRITICAL — ZERO CAPTION OVERLAP): Keep ALL foreground content (top pill, headline, cards, diagrams, lower badges) strictly between `top: 5vh` and `61vh` (`max-height: 56vh` container starting at `5vh`). NEVER place cards, diagrams, or lower-third bars below `62vh` — `63vh..76vh` is reserved for `T1` kinetic captions (`y=0.25`) and `78vh..100vh` is the bottom social UI safe zone. Stack cards/diagrams vertically (1–2 columns max, NEVER 4 side-by-side horizontal columns in 9:16) and keep all readable body/SVG label text >= 14px (SVG `font-size >= 18` in a `540`-wide `viewBox`)."
+        "VERTICAL 9:16 SAFE-BAND LAYOUT (CRITICAL — ZERO CAPTION OVERLAP): Keep ALL foreground content (top pill, headline, cards, diagrams, lower badges) strictly between `top: 5vh` and `61vh` (`max-height: 56vh` container starting at `5vh`). NEVER place cards, diagrams, or lower-third bars below `62vh` — `63vh..76vh` is reserved for `T1` kinetic captions (`y=0.20`) and `78vh..100vh` is the bottom social UI safe zone. Stack cards/diagrams vertically (1–2 columns max, NEVER 4 side-by-side horizontal columns in 9:16) and keep all readable body/SVG label text >= 14px (SVG `font-size >= 18` in a `540`-wide `viewBox`)."
     } else {
         "WIDESCREEN/SQUARE SAFE-BAND LAYOUT: Keep ALL foreground content cleanly inside `6vh..72vh` so `75vh..88vh` stays completely clear for `T1` kinetic captions. Keep all readable body/diagram text >= 15px."
     };
     let canonical_badge = format!("{:02} / {:02}", scene.scene_index, total_scenes);
 
     let craft_refs: String = [
+        "skill://captions-and-gfx/references/gfx-contract.md",
         "skill://captions-and-gfx/references/motion-craft.md",
         "skill://captions-and-gfx/references/move-playbook.md",
     ]
@@ -1341,36 +1342,33 @@ pub(crate) async fn run_programmatic_scene_worker(
     .collect::<Vec<_>>()
     .join("\n\n");
 
+    // Keep the entire system prompt static across sibling scene workers so
+    // prefix-based prompt caching hits across all parallel scenes in the run.
     let system_prompt = format!(
-        "You are Solaris motion-design micro-agent '{agent_id}' authoring Scene {idx}/{total_scenes} for project '{}'.\n\
-         You own ONLY this single scene window on track `g1`: `start_sec={:.2}`, `duration_sec={:.2}` (`clip_id=\"{clip_id}\"`).\n\
+        "You are a Solaris motion-design micro-agent authoring a SINGLE programmatic full-canvas scene on track `g1` for the scene assignment provided in the user JSON.\n\
          ## STUDIO CRAFT & SANDBOX CONTRACT\n\
          - Call `gfx_place` DIRECTLY with `inline_html` on Turn 1 (do NOT call `gfx_lint_html` first; `gfx_place` lints automatically and returns exact errors if anything needs fixing).\n\
          - Fill the entire canvas (`position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;`) with a cohesive, broadcast-grade visual composition: extend rich layered ambient radial glows, subtle architectural grid/mesh lines, and subtle bottom horizon glow across the ENTIRE `100vh` (so the bottom 40% never looks like an empty pitch-black void), with bold editorial typography and bespoke inline `<svg viewBox=...>` diagrams/cards/icons.\n\
          - {layout_zone_rule} Keep `transform` at default `(0,0)`.\n\
-         - CONSISTENT SCENE CHROME: Use the EXACT scene badge `{canonical_badge}` (never invent a different denominator like `01/03`). NEVER print internal Solaris asset/tool IDs (such as `progress-bar-solar`, `chapter-title-solar`, `stat-card-solar`, `lower-third-solar`) as visible text.\n\
+         - CONSISTENT SCENE CHROME: Use the EXACT `scene.canonical_badge` from the user JSON (never invent a different denominator like `01/03`). NEVER print internal Solaris asset/tool IDs (such as `progress-bar-solar`, `chapter-title-solar`, `stat-card-solar`, `lower-third-solar`) as visible text.\n\
          - Use responsive viewport units (`vw`, `vh`, `vmin`, `clamp(...)`, `%`, `<svg viewBox>`) so the scene scales crisply across Studio preview and {}x{} export.\n\
          - Use Brand CSS variables (`--brand-bg`, `--brand-surface`, `--brand-ink`, `--brand-accent`, `--brand-accent-secondary`, `--brand-font-display`, `--brand-font-body`) with clean fallbacks matching the brand tokens.\n\
          - GSAP 3 (`window.gsap`) IS ALREADY INJECTED GLOBALLY OFFLINE — NEVER write `<script src=...>` or `<link>` tags! Write ONLY an inline `<script>...</script>` (`window.__timelines = window.__timelines || {{}}; const tl = gsap.timeline({{paused:true}}); ... window.__timelines['main'] = tl;`). Complete the primary headline entrance by `t <= 0.35s` (immediately readable hook!), stagger diagrams/cards cleanly by `0.75s` with living mid-scene motion, and keep all core elements at full opacity through the end of the clip (do NOT fade the scene out to black before exit).\n\
-         - Strict sandbox rules: root `<div class=\"clip\" data-start=\"0\" data-duration=\"{:.2}\">`, ZERO `<script src=...>`, ZERO external URLs/CDNs, ZERO `Math.random`, `Date.now`, `new Date`, `setInterval`, `setTimeout`, `requestAnimationFrame`, `fetch`, `XMLHttpRequest`, `WebSocket`, `import()`.\n\
-         - Keep `inline_html` crisp and focused (~2.5–5 KB) so it renders fast and cleanly.\n\
-         - {save_note}\n\
-         - Once placed, stop and reply concisely — Director runs Vision QA automatically.\n\n{craft_refs}",
-        project.id,
-        scene.start_sec,
-        scene.duration_sec,
+         - Strict sandbox rules: root `<div class=\"clip\" data-start=\"0\" data-duration=\"<scene.duration_sec>\">`, ZERO `<script src=...>`, ZERO external URLs/CDNs, ZERO `Math.random`, `Date.now`, `new Date`, `setInterval`, `setTimeout`, `requestAnimationFrame`, `fetch`, `XMLHttpRequest`, `WebSocket`, `import()`.\n\
+         - Keep `inline_html` crisp and focused (~2.5–6 KB) so it renders fast and cleanly.\n\
+         - Follow `scene.save_instruction` from the user JSON. Once placed, stop and reply concisely — Director runs Vision QA automatically.\n\n{craft_refs}",
         project.canvas.width,
         project.canvas.height,
-        scene.duration_sec,
-        idx = scene.scene_index,
     );
 
     let user_prompt = json!({
+        "agent_id": agent_id,
         "user_request": prompt,
         "art_direction": art_direction,
         "scene": {
             "scene_index": scene.scene_index,
             "total_scenes": total_scenes,
+            "canonical_badge": canonical_badge,
             "clip_id": clip_id,
             "title": scene.title,
             "start_sec": scene.start_sec,
@@ -1378,6 +1376,7 @@ pub(crate) async fn run_programmatic_scene_worker(
             "visual_brief": scene.visual_brief,
             "motion_cue": scene.motion_cue,
             "synchronized_narration": scene.narration,
+            "save_instruction": save_note,
         },
         "project_id": project.id,
         "canvas": project.canvas,
