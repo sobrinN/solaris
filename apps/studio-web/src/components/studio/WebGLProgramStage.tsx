@@ -668,6 +668,7 @@ export function WebGLProgramStage({
       const rect = el.getBoundingClientRect();
       const w = Math.floor(rect.width);
       const h = Math.floor(rect.height);
+      if (w <= 0 || h <= 0) return;
       setStageWellSize((prev) => (prev.w === w && prev.h === h ? prev : { w, h }));
     };
     measure();
@@ -677,15 +678,40 @@ export function WebGLProgramStage({
   }, []);
 
   const aspectRatio = width / Math.max(1, height);
-  const fittedStageStyle = useMemo(() => {
+  const fittedDims = useMemo(() => {
     if (stageWellSize.w > 0 && stageWellSize.h > 0) {
       const wellRatio = stageWellSize.w / stageWellSize.h;
       const fitW =
         wellRatio > aspectRatio ? stageWellSize.h * aspectRatio : stageWellSize.w;
       const fitH = fitW / aspectRatio;
       return {
-        width: `${Math.max(1, Math.floor(fitW))}px`,
-        height: `${Math.max(1, Math.floor(fitH))}px`,
+        w: Math.max(1, Math.floor(fitW)),
+        h: Math.max(1, Math.floor(fitH)),
+        measured: true,
+      };
+    }
+    return { w: 0, h: 0, measured: false };
+  }, [stageWellSize.w, stageWellSize.h, aspectRatio]);
+
+  // Canonical virtual design coordinate space matching the canvas aspect ratio so GFX
+  // overlays scale identically across narrow 9:16 monitors, widescreen panes, and exports.
+  const gfxDesignSize = useMemo(() => {
+    if (aspectRatio < 0.85) {
+      return { w: 540, h: Math.round(540 / Math.max(0.25, aspectRatio)) };
+    }
+    if (aspectRatio > 1.2) {
+      return { w: 960, h: Math.round(960 / aspectRatio) };
+    }
+    return { w: 720, h: Math.round(720 / Math.max(0.25, aspectRatio)) };
+  }, [aspectRatio]);
+
+  const gfxScale = fittedDims.measured ? fittedDims.w / gfxDesignSize.w : 1;
+
+  const fittedStageStyle = useMemo(() => {
+    if (fittedDims.measured) {
+      return {
+        width: `${fittedDims.w}px`,
+        height: `${fittedDims.h}px`,
       };
     }
     return {
@@ -695,7 +721,7 @@ export function WebGLProgramStage({
       width: aspectRatio >= 1 ? "100%" : "auto",
       height: aspectRatio >= 1 ? "auto" : "100%",
     };
-  }, [stageWellSize.w, stageWellSize.h, aspectRatio, width, height]);
+  }, [fittedDims, aspectRatio, width, height]);
 
   return (
     <div
@@ -775,44 +801,53 @@ export function WebGLProgramStage({
         }`}
       />
 
-      {!hasVisualMedia && (
+      {!hasVisualMedia && activeGfxClips.length === 0 && !activeCaptionClip && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-4 text-center">
           <Sparkles className="h-6 w-6 text-laranja-criacao" />
           <span className="text-xs font-medium text-areia/80">
             Solaris Program Stage
           </span>
           <span className="text-[10px] text-areia/45">
-            Import media or click GFX assets
+            Import media or direct Swarm to program visuals
           </span>
         </div>
       )}
 
-      {/* Sandboxed HTML/GSAP GFX Layer (composited under T1 captions) */}
+      {/* Sandboxed HTML/GSAP GFX Layer (composited under T1 captions in canonical design coordinates) */}
       {gfxDocs.map(({ clipId, startSec, transform, doc }) => (
-        <SandboxedGfxFrame
+        <div
           key={clipId}
-          client={client}
-          ticketVersion={ticketVersion}
-          doc={doc}
-          title={`GFX ${clipId}`}
-          iframeRef={(el) => {
-            iframeRefs.current[clipId] = el;
-          }}
-          onLoad={(e) => {
-            const win = e.currentTarget.contentWindow;
-            if (win) {
-              win.postMessage(
-                { type: "solaris:seek", time: Math.max(0, playheadRef.current - startSec) },
-                "*",
-              );
-            }
-          }}
+          className="pointer-events-none absolute top-0 left-0 origin-top-left"
           style={{
-            transform: `translate(${(transform.x * 100).toFixed(2)}%, ${(transform.y * 100).toFixed(2)}%) scale(${transform.scale}) rotate(${transform.rotation_deg}deg)`,
+            width: `${gfxDesignSize.w}px`,
+            height: `${gfxDesignSize.h}px`,
+            transform: `scale(${gfxScale})`,
             opacity: transform.opacity,
           }}
-          className="pointer-events-none absolute inset-0 h-full w-full border-0 bg-transparent"
-        />
+        >
+          <SandboxedGfxFrame
+            client={client}
+            ticketVersion={ticketVersion}
+            doc={doc}
+            title={`GFX ${clipId}`}
+            iframeRef={(el) => {
+              iframeRefs.current[clipId] = el;
+            }}
+            onLoad={(e) => {
+              const win = e.currentTarget.contentWindow;
+              if (win) {
+                win.postMessage(
+                  { type: "solaris:seek", time: Math.max(0, playheadRef.current - startSec) },
+                  "*",
+                );
+              }
+            }}
+            style={{
+              transform: `translate(${(transform.x * 100).toFixed(2)}%, ${(transform.y * 100).toFixed(2)}%) scale(${transform.scale}) rotate(${transform.rotation_deg}deg)`,
+            }}
+            className="pointer-events-none h-full w-full border-0 bg-transparent"
+          />
+        </div>
       ))}
 
       {/* Authentic 80% Title-Safe Word-Synced Captions (clear of bottom 22% social chrome) */}
@@ -821,6 +856,13 @@ export function WebGLProgramStage({
           clip={activeCaptionClip}
           caption={captionData}
           playheadSec={playheadSec}
+          stageWidth={fittedDims.measured ? fittedDims.w : 240}
+          stageHeight={
+            fittedDims.measured
+              ? fittedDims.h
+              : Math.round(240 / Math.max(0.25, aspectRatio))
+          }
+          isPortrait={height > width}
         />
       )}
       </div>
@@ -828,19 +870,40 @@ export function WebGLProgramStage({
   );
 }
 
+function resolveCaptionFontFamily(fontFamily?: string): string {
+  const trimmed = fontFamily?.trim();
+  if (
+    !trimmed ||
+    trimmed.toLowerCase() === "sora" ||
+    trimmed.toLowerCase() === "sora variable"
+  ) {
+    return '"Sora Variable", "Sora", -apple-system, BlinkMacSystemFont, sans-serif';
+  }
+  const safe = trimmed.replace(/"/g, "");
+  return `"${safe}", "Sora Variable", "Sora", -apple-system, BlinkMacSystemFont, sans-serif`;
+}
+
 function CaptionOverlay({
   clip,
   caption,
   playheadSec,
+  stageWidth,
+  stageHeight,
+  isPortrait,
 }: {
   clip: Clip;
   caption: CaptionBlock;
   playheadSec: number;
+  stageWidth: number;
+  stageHeight: number;
+  isPortrait: boolean;
 }) {
-  // Map normalized transform.y in [-0.35, 0.35] into 80% title-safe vertical position (staying clear of bottom 22%)
-  const clampedY = Math.max(-0.35, Math.min(0.28, clip.transform.y));
+  // Align vertical clamp & font scaling with gfx_render.rs Chromium export
+  const maxY = isPortrait ? 0.32 : 0.42;
+  const maxTop = isPortrait ? 76 : 84;
+  const clampedY = Math.max(-0.35, Math.min(maxY, clip.transform.y));
   const clampedX = Math.max(-0.3, Math.min(0.3, clip.transform.x));
-  const topPct = Math.max(12, Math.min(72, 50 + clampedY * 78));
+  const topPct = Math.max(12, Math.min(maxTop, 50 + clampedY * 78));
   const leftPct = 50 + clampedX * 100;
 
   const words =
@@ -848,27 +911,33 @@ function CaptionOverlay({
       ? caption.words
       : [{ text: clip.label, start_sec: clip.start_sec, end_sec: clip.start_sec + clip.duration_sec }];
 
+  const rawFontPx = isPortrait ? stageWidth * 0.052 : stageHeight * 0.054;
+  const responsiveFontPx = Math.max(11, Math.min(24, Math.round(rawFontPx)));
+
   const presetBoxClass =
     caption.preset === "mono_caps"
-      ? "rounded bg-void/90 px-3 py-1 text-[11px] font-bold uppercase tracking-[0.18em] border border-areia/20"
+      ? "rounded-lg bg-void/90 px-3 py-1 font-extrabold uppercase tracking-[0.12em] border border-areia/20 shadow-[0_8px_24px_rgba(0,0,0,0.65)]"
       : caption.preset === "karaoke"
-        ? "rounded-xl bg-carbono/90 px-3 py-1.5 text-xs font-extrabold tracking-tight border border-amarelo-ideias/35 shadow-lg"
+        ? "rounded-full bg-carbono/90 px-3.5 py-1.5 font-extrabold tracking-tight border border-amarelo-ideias/35 shadow-[0_8px_26px_rgba(0,0,0,0.65)]"
         : caption.preset === "minimal"
-          ? "rounded-md bg-void/65 px-2.5 py-0.5 text-[11px] font-medium tracking-normal"
-          : "rounded-xl bg-void/85 px-3 py-1.5 text-xs font-bold uppercase tracking-wide shadow-[0_0_18px_rgba(247,183,51,0.4)] border border-laranja-criacao/35";
+          ? "rounded-lg bg-void/65 px-3 py-1 font-semibold tracking-normal shadow-[0_4px_16px_rgba(0,0,0,0.55)]"
+          : "rounded-2xl bg-void/80 px-3.5 py-1.5 font-extrabold uppercase tracking-[0.02em] border border-areia/15 shadow-[0_10px_30px_rgba(0,0,0,0.7)]";
 
   return (
     <div
-      className="pointer-events-none absolute z-10 max-w-[80%] text-center"
+      className="pointer-events-none absolute z-10 w-[86%] text-center"
       style={{
         top: `${topPct}%`,
         left: `${leftPct}%`,
         transform: `translate(-50%, -50%) scale(${clip.transform.scale}) rotate(${clip.transform.rotation_deg}deg)`,
         opacity: clip.transform.opacity,
-        fontFamily: caption.font_family || "var(--font-sans)",
+        fontFamily: resolveCaptionFontFamily(caption.font_family),
+        fontSize: `${responsiveFontPx}px`,
+        lineHeight: 1.15,
+        textWrap: "balance",
       }}
     >
-      <div className={`inline-flex flex-wrap items-center justify-center gap-x-1.5 gap-y-0.5 ${presetBoxClass}`}>
+      <div className={`inline-flex max-w-full flex-wrap items-center justify-center gap-x-[0.28em] gap-y-0.5 ${presetBoxClass}`}>
         {words.map((w, idx) => {
           const isActive =
             playheadSec >= w.start_sec && playheadSec <= Math.max(w.end_sec, w.start_sec + 0.05);
@@ -885,7 +954,7 @@ function CaptionOverlay({
                         caption.preset === "karaoke" ? activeColor : "transparent",
                       textShadow:
                         caption.preset === "neon_glow"
-                          ? `0 0 12px ${activeColor}`
+                          ? `0 0 16px ${activeColor}, 0 0 4px ${activeColor}`
                           : undefined,
                     }
                   : {
@@ -893,7 +962,7 @@ function CaptionOverlay({
                         caption.preset === "karaoke" && isSpoken
                           ? activeColor
                           : "#F7F5EF",
-                      opacity: caption.preset === "minimal" && !isActive ? 0.82 : 1,
+                      opacity: caption.preset === "minimal" && !isActive ? 0.84 : 0.94,
                     }
               }
               className={`rounded px-0.5 transition-transform duration-100 motion-reduce:transition-none ${

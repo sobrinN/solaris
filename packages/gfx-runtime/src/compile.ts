@@ -81,6 +81,7 @@ export function buildSandboxedGfxDoc({
 <html>
 <head>
 <meta charset="utf-8" />
+<meta name="color-scheme" content="dark" />
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src data:;" />
 <style>
 ${BUNDLED_SORA_FONT_CSS}
@@ -88,6 +89,7 @@ ${safeFontCss}
 ${cssTokens}
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body {
+  color-scheme: dark;
   width: 100%;
   height: 100%;
   background: transparent !important;

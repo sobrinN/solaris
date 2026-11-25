@@ -36,52 +36,132 @@ fn is_interval_covered_by_track(project: &Project, track_id: &str, start: f64, e
 }
 
 pub(super) fn check_timeline_pacing(project: &Project, checks: &mut Vec<QaCheckItem>) {
-    let earliest_video = project
+    let has_v_clips = project
         .tracks
         .iter()
         .filter(|t| matches!(t.kind, TrackKind::ARoll | TrackKind::BRoll) && !t.muted)
+        .any(|t| t.clips.iter().any(|c| c.duration_sec > 0.0));
+
+    let has_g1_clips = project
+        .tracks
+        .iter()
+        .find(|t| t.id == "g1" && !t.muted)
+        .is_some_and(|t| t.clips.iter().any(|c| c.duration_sec > 0.0));
+
+    if !has_v_clips && !has_g1_clips {
+        checks.push(QaCheckItem {
+            id: "visuals-empty".to_string(),
+            category: "timeline".to_string(),
+            severity: QaSeverity::Issue,
+            message:
+                "No visual clips on V1, V2, or G1 — program canvas is blank behind captions/audio."
+                    .to_string(),
+            time_sec: Some(0.0),
+            auto_fixed: false,
+        });
+        return;
+    }
+
+    let earliest_visual = project
+        .tracks
+        .iter()
+        .filter(|t| {
+            !t.muted
+                && if has_v_clips {
+                    matches!(t.kind, TrackKind::ARoll | TrackKind::BRoll)
+                } else {
+                    t.kind == TrackKind::Gfx
+                }
+        })
         .flat_map(|t| t.clips.iter())
+        .filter(|c| c.duration_sec > 0.0)
         .map(|c| c.start_sec)
         .fold(f64::INFINITY, f64::min);
 
-    if earliest_video.is_finite() && earliest_video > 0.5 {
+    if earliest_visual.is_finite() && earliest_visual > 0.5 {
         checks.push(QaCheckItem {
             id: "hook-lead-gap".to_string(),
             category: "timeline".to_string(),
             severity: QaSeverity::Warning,
             message: format!(
-                "First video clip starts at {earliest_video:.2}s; hook should begin <= 0.50s."
+                "First visual clip starts at {earliest_visual:.2}s; hook should begin <= 0.50s."
             ),
             time_sec: Some(0.0),
             auto_fixed: false,
         });
     }
 
-    if let Some(v1) = project.tracks.iter().find(|t| t.id == "v1" && !t.muted) {
-        let mut sorted: Vec<&Clip> = v1.clips.iter().collect();
+    let primary_track_id = if has_v_clips { "v1" } else { "g1" };
+    if let Some(primary) = project
+        .tracks
+        .iter()
+        .find(|t| t.id == primary_track_id && !t.muted)
+    {
+        let mut sorted: Vec<&Clip> = primary
+            .clips
+            .iter()
+            .filter(|c| c.duration_sec > 0.0)
+            .collect();
         sorted.sort_by(|a, b| a.start_sec.total_cmp(&b.start_sec));
         let mut max_end: Option<f64> = None;
+        let mut covered_sec = 0.0_f64;
+        let mut cur_s = 0.0_f64;
+        let mut cur_e = 0.0_f64;
+        let mut gap_reported = false;
         for clip in sorted {
             if let Some(prev_end) = max_end {
                 let gap = clip.start_sec - prev_end;
-                if gap > 0.4
-                    && !is_interval_covered_by_track(project, "v2", prev_end, clip.start_sec)
-                {
+                let covered = has_v_clips
+                    && is_interval_covered_by_track(project, "v2", prev_end, clip.start_sec);
+                if !gap_reported && gap > 0.4 && !covered {
                     checks.push(QaCheckItem {
-                        id: format!("v1-gap-{prev_end:.2}"),
+                        id: format!("{primary_track_id}-gap-{prev_end:.2}"),
                         category: "timeline".to_string(),
                         severity: QaSeverity::Warning,
                         message: format!(
-                            "V1 has an uncovered {gap:.2}s dead gap at {prev_end:.2}s between clips."
+                            "{} has an uncovered {gap:.2}s dead gap at {prev_end:.2}s between clips.",
+                            primary_track_id.to_uppercase()
                         ),
                         time_sec: Some(prev_end),
                         auto_fixed: false,
                     });
-                    break;
+                    gap_reported = true;
                 }
             }
-            let clip_end = clip.start_sec + clip.duration_sec;
+            let s = clip.start_sec.max(0.0);
+            let clip_end = (clip.start_sec + clip.duration_sec).max(s);
+            if s > cur_e {
+                covered_sec += cur_e - cur_s;
+                cur_s = s;
+                cur_e = clip_end;
+            } else {
+                cur_e = cur_e.max(clip_end);
+            }
             max_end = Some(max_end.map_or(clip_end, |m| m.max(clip_end)));
+        }
+        covered_sec += cur_e - cur_s;
+
+        if !has_v_clips {
+            let total_dur = project
+                .tracks
+                .iter()
+                .filter(|t| !t.muted)
+                .flat_map(|t| t.clips.iter())
+                .filter(|c| c.duration_sec > 0.0)
+                .map(|c| c.start_sec + c.duration_sec)
+                .fold(0.0_f64, f64::max);
+            if total_dur >= 2.0 && covered_sec < total_dur * 0.70 {
+                checks.push(QaCheckItem {
+                    id: "g1-coverage-low".to_string(),
+                    category: "timeline".to_string(),
+                    severity: QaSeverity::Issue,
+                    message: format!(
+                        "Programmatic G1 visuals cover only {covered_sec:.1}s of {total_dur:.1}s — large blank gaps remain."
+                    ),
+                    time_sec: Some(0.0),
+                    auto_fixed: false,
+                });
+            }
         }
     }
 }
@@ -392,9 +472,11 @@ pub(super) async fn check_and_fix_audio(
     any_mutated
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn check_and_fix_safe_zones(
     backend: &dyn SolarisBackend,
     project: &mut Project,
+    assets: &[SavedCodeAsset],
     auto_fix: bool,
     cancel: &CancellationToken,
     ops_counter: Option<&AtomicU32>,
@@ -571,6 +653,11 @@ pub(super) async fn check_and_fix_safe_zones(
             if cancel.is_cancelled() {
                 return any_mutated;
             }
+            // Full-canvas programmatic scenes sit at (0,0) and reserve bottom safe space internally;
+            // never shift a full-bleed 100vw/100vh background off-screen to dodge captions.
+            if is_full_canvas_gfx(gfx, assets) {
+                continue;
+            }
             let gfx_end = gfx.start_sec + gfx.duration_sec;
             let overlapping_caps: Vec<&Clip> = t1
                 .clips
@@ -588,15 +675,15 @@ pub(super) async fn check_and_fix_safe_zones(
                 let primary_candidate = if cap.transform.y >= 0.0 { -0.22 } else { 0.22 };
                 let candidates = [primary_candidate, -primary_candidate, 0.0, -0.30, 0.30];
                 // Pick the first vertical band that does not collide with ANY overlapping caption
-                let target_y = candidates
-                    .into_iter()
-                    .find(|&cand| {
-                        overlapping_caps
-                            .iter()
-                            .all(|other| (cand - other.transform.y).abs() >= 0.08)
-                    })
-                    .unwrap_or(primary_candidate);
-                if auto_fix {
+                let target_y = candidates.into_iter().find(|&cand| {
+                    overlapping_caps
+                        .iter()
+                        .all(|other| (cand - other.transform.y).abs() >= 0.08)
+                });
+                if auto_fix
+                    && let Some(target_y) = target_y
+                    && (gfx.transform.y - target_y).abs() >= 1e-4
+                {
                     let mut next = gfx.transform.clone();
                     next.y = target_y;
                     let fixed = apply_locked_op(
@@ -643,10 +730,17 @@ pub(super) async fn check_and_fix_safe_zones(
                         id: format!("overlap-{}", gfx.id),
                         category: "safe_zone".to_string(),
                         severity: QaSeverity::Warning,
-                        message: format!(
-                            "GFX '{}' overlaps caption band at {:.2}s.",
-                            gfx.label, gfx.start_sec
-                        ),
+                        message: if auto_fix && target_y.is_none() {
+                            format!(
+                                "GFX '{}' overlaps caption band at {:.2}s (no collision-free vertical band available).",
+                                gfx.label, gfx.start_sec
+                            )
+                        } else {
+                            format!(
+                                "GFX '{}' overlaps caption band at {:.2}s.",
+                                gfx.label, gfx.start_sec
+                            )
+                        },
                         time_sec: Some(gfx.start_sec),
                         auto_fixed: false,
                     });
@@ -722,4 +816,71 @@ pub(super) fn check_gfx_lint(
             auto_fixed: false,
         });
     }
+}
+
+fn declaration_block_is_fixed_full_viewport(block: &str) -> bool {
+    let compact: String = block
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    if !compact.contains("position:fixed") {
+        return false;
+    }
+    compact.contains("inset:0")
+        || (compact.contains("top:0")
+            && compact.contains("left:0")
+            && compact.contains("right:0")
+            && compact.contains("bottom:0"))
+        || (compact.contains("width:100%") && compact.contains("height:100%"))
+}
+
+pub(super) fn is_full_canvas_gfx(clip: &Clip, assets: &[SavedCodeAsset]) -> bool {
+    let ClipKind::Gfx { gfx } = &clip.payload else {
+        return false;
+    };
+    let Some(html) = gfx.inline_html.as_deref().or_else(|| {
+        gfx.asset_id
+            .as_deref()
+            .and_then(|aid| assets.iter().find(|a| a.id == aid))
+            .map(|a| a.html_source.as_str())
+    }) else {
+        return false;
+    };
+    let lower = html.to_ascii_lowercase();
+    if lower.contains("100vw") && (lower.contains("100vh") || lower.contains("100dvh")) {
+        return true;
+    }
+    // Check CSS declaration blocks `{ ... }` independently so a child `.card::before { inset: 0 }`
+    // never false-matches as a full-viewport fixed canvas.
+    let mut rest = lower.as_str();
+    while let Some(open) = rest.find('{') {
+        let after_open = &rest[open + 1..];
+        if let Some(close) = after_open.find('}') {
+            let block = &after_open[..close];
+            if declaration_block_is_fixed_full_viewport(block) {
+                return true;
+            }
+            rest = &after_open[close + 1..];
+        } else {
+            break;
+        }
+    }
+    // Check inline `style="..."` and `style='...'` attribute values independently.
+    for quote in ['"', '\''] {
+        let needle = format!("style={quote}");
+        let mut s = lower.as_str();
+        while let Some(pos) = s.find(&needle) {
+            let after = &s[pos + needle.len()..];
+            if let Some(end) = after.find(quote) {
+                if declaration_block_is_fixed_full_viewport(&after[..end]) {
+                    return true;
+                }
+                s = &after[end + 1..];
+            } else {
+                break;
+            }
+        }
+    }
+    false
 }

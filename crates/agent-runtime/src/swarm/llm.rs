@@ -1,21 +1,53 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::Utc;
 use serde_json::json;
-use solaris_core_ir::{AgentRole, BrandPlaybook, CommandMeta, MediaKind, Project, SavedCodeAsset};
+use solaris_core_ir::{
+    AgentRole, BrandPlaybook, CommandMeta, LogEntry, LogLevel, MediaKind, Project, SavedCodeAsset,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::backend::SolarisBackend;
 use crate::error::AgentError;
 use crate::openrouter::{
-    ChatMessage, ChatRequest, ContentPart, InputAudioPayload, MediaUrlRef, OpenRouterClient,
-    ProviderPreferences, truncate_msg,
+    ChatMessage, ChatRequest, ContentPart, InputAudioPayload, MediaUrlRef, MessageContent,
+    OpenRouterClient, ProviderPreferences, ReasoningConfig, truncate_msg,
 };
 use crate::skills::skills_for_role;
-use crate::swarm::{DirectorPlan, is_voice_hint};
+use crate::swarm::{DirectorPlan, SceneSpec, is_voice_hint};
 use crate::tools::{execute_tool, is_mutating_tool, normalize_tool_name, tools_for_role};
 
 const MAX_LLM_VIDEO_PROXY_BYTES: usize = 4 * 1024 * 1024;
+const DIRECTOR_MAX_TOKENS_INITIAL: u32 = 4096;
+const DIRECTOR_MAX_TOKENS_RETRY: u32 = 8192;
+const WORKER_MAX_TOKENS: u32 = 16384;
+const SCENE_WORKER_MAX_TOKENS: u32 = 10240;
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_swarm_log(
+    backend: &dyn SolarisBackend,
+    level: LogLevel,
+    source: &str,
+    project_id: &str,
+    run_id: &str,
+    agent_id: Option<&str>,
+    message: impl Into<String>,
+    details: Option<String>,
+) {
+    backend.emit_log(LogEntry {
+        id: uuid::Uuid::new_v4().to_string(),
+        timestamp: Utc::now(),
+        level,
+        source: source.to_string(),
+        project_id: Some(project_id.to_string()),
+        run_id: Some(run_id.to_string()),
+        agent_id: agent_id.map(str::to_string),
+        message: message.into(),
+        details,
+    });
+}
 
 pub(crate) fn route_models(
     primary: &str,
@@ -58,6 +90,29 @@ fn brand_context_json(brand: &BrandPlaybook) -> serde_json::Value {
     })
 }
 
+fn strip_reasoning_details(messages: &mut [ChatMessage]) {
+    for msg in messages {
+        if msg.role == "assistant" {
+            msg.reasoning_details = None;
+        }
+    }
+}
+
+fn push_coaching_user_message(messages: &mut Vec<ChatMessage>, coaching: impl Into<String>) {
+    if messages.last().is_some_and(|m| m.role == "user") {
+        messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: Some(MessageContent::Text(
+                "Understood; retrying with a smaller, valid payload.".to_string(),
+            )),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_details: None,
+        });
+    }
+    messages.push(ChatMessage::user_text(coaching));
+}
+
 fn validate_worker_tool_scope(
     role: AgentRole,
     tool_name: &str,
@@ -66,32 +121,14 @@ fn validate_worker_tool_scope(
 ) -> Result<(), String> {
     let norm = normalize_tool_name(tool_name.trim());
 
-    // Role-level tool authorization check
-    match norm {
-        "color.set_grade" if role != AgentRole::Grade && role != AgentRole::Director => {
-            return Err(format!(
-                "role {role:?} is not permitted to mutate color grade"
-            ));
-        }
-        "gfx.place" if role != AgentRole::Gfx => {
-            return Err(format!("role {role:?} is not permitted to place GFX on g1"));
-        }
-        "captions.generate_from_transcript" | "captions.set_style" if role != AgentRole::Caps => {
-            return Err(format!(
-                "role {role:?} is not permitted to mutate captions on t1"
-            ));
-        }
-        "audio.enable_ducking" if role != AgentRole::Mix => {
-            return Err(format!(
-                "role {role:?} is not permitted to mutate a2 ducking"
-            ));
-        }
-        "audio.normalize_lufs" if role != AgentRole::Mix => {
-            return Err(format!(
-                "role {role:?} is not permitted to normalize speech LUFS"
-            ));
-        }
-        _ => {}
+    // Strict role allowlist enforcement matching `tools_for_role(role)`
+    let role_allowed = tools_for_role(role)
+        .into_iter()
+        .any(|def| normalize_tool_name(&def.function.name) == norm);
+    if !role_allowed {
+        return Err(format!(
+            "role {role:?} is not permitted to invoke tool '{norm}'"
+        ));
     }
 
     // Track-level scope enforcement for mutating timeline/audio/color tools
@@ -155,6 +192,11 @@ pub(crate) async fn build_openrouter_director_plan(
     audio_fallbacks: &[String],
     supports_native_video: bool,
     supports_native_audio: bool,
+    supports_json_mode: bool,
+    director_supports_reasoning: bool,
+    programmatic_visuals: bool,
+    inferred_duration_sec: f64,
+    run_id: &str,
     project: &Project,
     brand: &BrandPlaybook,
     assets: &[SavedCodeAsset],
@@ -207,14 +249,36 @@ pub(crate) async fn build_openrouter_director_plan(
         .map(|a| format!("{} ({})", a.id, a.name))
         .collect();
 
+    let mode_guidance = if programmatic_visuals {
+        format!(
+            "PRODUCTION MODE: PROGRAMMATIC ZERO-ASSET VIDEO (no footage/images imported). \
+             Solaris will synthesize the ENTIRE {:.1}s video in PARALLEL using dedicated scene micro-agents on G1 \
+             and synchronized kinetic captions on T1 (`captions.place_script`). \
+             Do NOT invent fake media_ids or ask for imported footage. \
+             In `art_direction`, define a cohesive visual system (backdrop lighting, accent glow, SVG diagram style, card geometry, motion rhythm) so all parallel scene agents look like ONE unified studio film. \
+             In `scenes`, output 5 to 7 contiguous scene objects covering 0.0s to {:.1}s with ZERO gaps: \
+             each object MUST have `scene_index` (1..N), `title`, `start_sec`, `duration_sec`, `visual_brief` (specific diagram/UI/visual focal point in upper 72%), `motion_cue` (specific GSAP entrance/kinetic beat), and `narration` (punchy spoken/caption beat for that window). \
+             Mirror the narration timeline concisely in `captions_notes` and brief summary in `gfx_notes`. \
+             Set `spine_notes`, `broll_notes`, `grade_notes`, and `mix_notes` to brief 1-line notes (\"Programmatic G1/T1 mode\").",
+            inferred_duration_sec, inferred_duration_sec
+        )
+    } else {
+        "PRODUCTION MODE: FOOTAGE EDIT. Plan cuts, B-roll, color grade, captions, GFX, and audio mix grounded in the supplied media_pool. Set `scenes` to [].".to_string()
+    };
+
     let sys = format!(
-        "You are Solaris Director. Output ONLY valid JSON matching: \
-         {{\"hook_summary\": string, \"target_duration_sec\": number, \"spine_notes\": string, \
-         \"broll_notes\": string, \"grade_notes\": string, \"captions_notes\": string, \
-         \"gfx_notes\": string, \"mix_notes\": string}}.\n\n{skill_text}"
+        "You are Solaris Director. Output ONLY a single compact, valid raw JSON object (no markdown fences, no commentary) matching:\n\
+         {{\"hook_summary\": string, \"target_duration_sec\": number, \"art_direction\": string, \
+         \"spine_notes\": string, \"broll_notes\": string, \"grade_notes\": string, \
+         \"captions_notes\": string, \"gfx_notes\": string, \"mix_notes\": string, \
+         \"scenes\": [{{\"scene_index\": number, \"title\": string, \"start_sec\": number, \"duration_sec\": number, \"visual_brief\": string, \"motion_cue\": string, \"narration\": string}}]}}.\n\
+         Keep every field crisp and high-signal so the JSON always terminates cleanly.\n\
+         {mode_guidance}\n\n{skill_text}"
     );
     let user_json = json!({
         "prompt": prompt,
+        "production_mode": if programmatic_visuals { "programmatic_zero_asset" } else { "footage_edit" },
+        "suggested_duration_sec": inferred_duration_sec,
         "canvas": project.canvas,
         "brand": brand_context_json(brand),
         "media_pool": media_summary,
@@ -334,36 +398,196 @@ pub(crate) async fn build_openrouter_director_plan(
     let require_params = (attached_native_video || attached_native_audio).then_some(true);
 
     let (req_model, req_models) = route_models(model, active_fallbacks);
-    let req = ChatRequest {
-        model: req_model,
-        models: req_models,
-        messages: vec![ChatMessage::system(sys), user_msg],
-        session_id: Some(format!("solaris-dir-{}", project.id)),
-        provider: Some(ProviderPreferences {
-            allow_fallbacks: Some(true),
-            require_parameters: require_params,
-            ..ProviderPreferences::default()
-        }),
-        max_tokens: Some(1400),
-        temperature: Some(0.2),
-        ..ChatRequest::default()
-    };
+    let mut messages = vec![ChatMessage::system(sys), user_msg];
 
-    let resp = openrouter.chat_stream(&req, Some(cancel), |_| {}).await?;
-    let text = resp
-        .choices
-        .first()
-        .and_then(|c| c.message.content.as_ref())
-        .map(|c| c.as_text())
-        .unwrap_or_default();
+    for attempt in 1..=2usize {
+        if cancel.is_cancelled() {
+            return Err(AgentError::Cancelled);
+        }
+        let max_tokens = if attempt == 1 {
+            DIRECTOR_MAX_TOKENS_INITIAL
+        } else {
+            DIRECTOR_MAX_TOKENS_RETRY
+        };
+        let use_json_format = attempt == 1 && supports_json_mode;
 
-    let cleaned = strip_json_fence(&text);
-    serde_json::from_str::<DirectorPlan>(cleaned).map_err(|e| {
-        AgentError::Serialization(format!(
-            "Director returned malformed plan JSON: {e} (raw: {})",
-            truncate_msg(cleaned)
-        ))
-    })
+        emit_swarm_log(
+            backend,
+            LogLevel::Info,
+            "openrouter",
+            &project.id,
+            run_id,
+            Some("director-01"),
+            format!(
+                "Director planning request (attempt {attempt}/2, model={model}, max_tokens={max_tokens}, json_mode={use_json_format})"
+            ),
+            None,
+        );
+
+        let req = ChatRequest {
+            model: req_model.clone(),
+            models: req_models.clone(),
+            messages: messages.clone(),
+            session_id: Some(format!("solaris-dir-{}", project.id)),
+            provider: Some(ProviderPreferences {
+                allow_fallbacks: Some(true),
+                require_parameters: require_params,
+                ..ProviderPreferences::default()
+            }),
+            reasoning: director_supports_reasoning.then(|| ReasoningConfig {
+                effort: Some("low".to_string()),
+                ..ReasoningConfig::default()
+            }),
+            max_tokens: Some(max_tokens),
+            temperature: Some(if attempt == 1 { 0.2 } else { 0.1 }),
+            response_format: use_json_format.then(|| json!({ "type": "json_object" })),
+            ..ChatRequest::default()
+        };
+
+        let resp = match openrouter.chat_stream(&req, Some(cancel), |_| {}).await {
+            Ok(r) => r,
+            Err(err) => {
+                emit_swarm_log(
+                    backend,
+                    LogLevel::Error,
+                    "openrouter",
+                    &project.id,
+                    run_id,
+                    Some("director-01"),
+                    format!("Director OpenRouter call failed on attempt {attempt}: {err}"),
+                    Some(format!("model={model}, fallbacks={active_fallbacks:?}")),
+                );
+                return Err(err);
+            }
+        };
+
+        let served_model = resp.model.as_deref().unwrap_or(model).to_string();
+        let finish_reason = resp.finish_reason().unwrap_or("unknown").to_string();
+        let usage = resp.usage_summary();
+        let text = resp
+            .choices
+            .first()
+            .and_then(|c| c.message.content.as_ref())
+            .map(|c| c.as_text())
+            .unwrap_or_default();
+
+        let cleaned = strip_json_fence(&text);
+        match parse_director_plan(cleaned, inferred_duration_sec) {
+            Ok(plan) => {
+                emit_swarm_log(
+                    backend,
+                    LogLevel::Info,
+                    "openrouter",
+                    &project.id,
+                    run_id,
+                    Some("director-01"),
+                    format!(
+                        "Director plan ready ({served_model}, finish={finish_reason}, {usage}, target={:.1}s)",
+                        plan.target_duration_sec
+                    ),
+                    Some(format!(
+                        "hook: {}\ngfx_notes: {}\ncaptions_notes: {}",
+                        plan.hook_summary, plan.gfx_notes, plan.captions_notes
+                    )),
+                );
+                return Ok(plan);
+            }
+            Err(parse_err) => {
+                let is_truncated = finish_reason == "length";
+                let diagnostic = format!(
+                    "model={served_model}\nfinish_reason={finish_reason}\nusage={usage}\nparse_error={parse_err}\nraw_len={} chars\nraw_output:\n{}",
+                    cleaned.chars().count(),
+                    cleaned.chars().take(6000).collect::<String>()
+                );
+                if attempt == 1 {
+                    emit_swarm_log(
+                        backend,
+                        LogLevel::Warn,
+                        "openrouter",
+                        &project.id,
+                        run_id,
+                        Some("director-01"),
+                        format!(
+                            "Director returned {} JSON on attempt 1 ({served_model}, finish={finish_reason}, {usage}); retrying with max_tokens={DIRECTOR_MAX_TOKENS_RETRY}",
+                            if is_truncated {
+                                "truncated"
+                            } else {
+                                "malformed"
+                            }
+                        ),
+                        Some(diagnostic),
+                    );
+                    let prev_assistant = if text.trim().is_empty() {
+                        "{".to_string()
+                    } else {
+                        text.chars().take(1200).collect::<String>()
+                    };
+                    messages.push(ChatMessage {
+                        role: "assistant".to_string(),
+                        content: Some(MessageContent::Text(prev_assistant)),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        reasoning_details: None,
+                    });
+                    let retry_prompt = if programmatic_visuals {
+                        format!(
+                            "Your previous JSON output failed to parse ({parse_err}; finish_reason={finish_reason}). \
+                             Output ONLY a single compact, valid, complete raw JSON object (no markdown fences) with keys: \
+                             hook_summary, target_duration_sec, art_direction, spine_notes, broll_notes, grade_notes, \
+                             captions_notes, gfx_notes, mix_notes, and scenes. \
+                             REQUIRED for programmatic mode: include `art_direction` (1-2 crisp sentences) AND a compact `scenes` array \
+                             of 5-7 contiguous objects covering 0.0 to {inferred_duration_sec:.1}s with keys \
+                             `scene_index`, `title`, `start_sec`, `duration_sec`, `visual_brief`, `motion_cue`, `narration` \
+                             (keep every string under 25 words so the JSON terminates cleanly)."
+                        )
+                    } else {
+                        format!(
+                            "Your previous JSON output failed to parse ({parse_err}; finish_reason={finish_reason}). \
+                             Output ONLY a single compact, valid, complete raw JSON object with keys: \
+                             hook_summary, target_duration_sec, art_direction, spine_notes, broll_notes, grade_notes, captions_notes, gfx_notes, mix_notes, scenes ([]). \
+                             Keep every string short (1-2 sentences, total JSON under 250 words) and do NOT wrap in markdown code fences."
+                        )
+                    };
+                    messages.push(ChatMessage::user_text(retry_prompt));
+                    continue;
+                }
+
+                emit_swarm_log(
+                    backend,
+                    LogLevel::Error,
+                    "openrouter",
+                    &project.id,
+                    run_id,
+                    Some("director-01"),
+                    format!(
+                        "Director returned malformed plan JSON after retry ({served_model}, finish={finish_reason}, {usage}): {parse_err}"
+                    ),
+                    Some(diagnostic),
+                );
+                return Err(AgentError::Serialization(format!(
+                    "Director returned malformed plan JSON ({served_model}, finish={finish_reason}, {usage}): {parse_err} (raw: {})",
+                    truncate_msg(cleaned)
+                )));
+            }
+        }
+    }
+
+    Err(AgentError::Serialization(
+        "Director failed to produce a valid plan JSON".to_string(),
+    ))
+}
+
+pub(crate) fn parse_director_plan(
+    cleaned: &str,
+    fallback_duration_sec: f64,
+) -> Result<DirectorPlan, serde_json::Error> {
+    let mut plan = serde_json::from_str::<DirectorPlan>(cleaned)?;
+    if !plan.target_duration_sec.is_finite() || plan.target_duration_sec < 2.0 {
+        plan.target_duration_sec = fallback_duration_sec;
+    } else {
+        plan.target_duration_sec = plan.target_duration_sec.clamp(3.0, 180.0);
+    }
+    Ok(plan)
 }
 
 pub(crate) fn strip_json_fence(raw: &str) -> &str {
@@ -395,12 +619,108 @@ pub(crate) fn strip_json_fence(raw: &str) -> &str {
     trimmed
 }
 
+fn now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn default_anchor_for_role(role: AgentRole, allowed_tracks: &[&str]) -> String {
+    match role {
+        AgentRole::Grade => "color.inspector".to_string(),
+        AgentRole::Caps => "timeline.track.t1".to_string(),
+        AgentRole::Gfx => "timeline.track.g1".to_string(),
+        AgentRole::Mix => "timeline.track.a2".to_string(),
+        AgentRole::BRoll => "timeline.track.v2".to_string(),
+        AgentRole::Razor => "timeline.track.v1".to_string(),
+        _ => allowed_tracks
+            .first()
+            .map(|t| format!("timeline.track.{t}"))
+            .unwrap_or_else(|| "timeline".to_string()),
+    }
+}
+
+fn anchor_for_tool_call(
+    role: AgentRole,
+    tool_name: &str,
+    args: &serde_json::Value,
+    fallback_anchor: &str,
+) -> String {
+    let norm = normalize_tool_name(tool_name);
+    match norm {
+        "gfx.place" => {
+            if let Some(s) = args.get("start_sec").and_then(|v| v.as_f64())
+                && s.is_finite()
+                && s >= 0.0
+            {
+                return format!("timeline.track.g1@{s:.2}");
+            }
+            "timeline.track.g1".to_string()
+        }
+        "timeline.place_clip" => {
+            let tid = args
+                .get("track_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("v1");
+            if let Some(s) = args.get("start_sec").and_then(|v| v.as_f64())
+                && s.is_finite()
+                && s >= 0.0
+            {
+                return format!("timeline.track.{tid}@{s:.2}");
+            }
+            format!("timeline.track.{tid}")
+        }
+        "timeline.split_clip" => {
+            let tid = args
+                .get("track_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("v1");
+            if let Some(s) = args.get("split_at_timeline_sec").and_then(|v| v.as_f64())
+                && s.is_finite()
+                && s >= 0.0
+            {
+                return format!("timeline.track.{tid}@{s:.2}");
+            }
+            format!("timeline.track.{tid}")
+        }
+        "captions.place_script" => {
+            if let Some(s) = args
+                .get("segments")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+                .and_then(|seg| seg.get("start_sec"))
+                .and_then(|v| v.as_f64())
+                && s.is_finite()
+                && s >= 0.0
+            {
+                return format!("timeline.track.t1@{s:.2}");
+            }
+            "timeline.track.t1".to_string()
+        }
+        "captions.generate_from_transcript" | "captions.set_style" => {
+            "timeline.track.t1".to_string()
+        }
+        "color.set_grade" | "color.apply_lut" => "color.inspector".to_string(),
+        "audio.set_mix" | "audio.normalize_lufs" => "audio.mixer".to_string(),
+        "assets.save" | "assets.search" => "effects.library".to_string(),
+        _ => {
+            let _ = role;
+            fallback_anchor.to_string()
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_llm_worker_loop(
     backend: &Arc<dyn SolarisBackend>,
     openrouter: &OpenRouterClient,
     model: &str,
     fallbacks: &[String],
+    low_reasoning: bool,
+    run_id: &str,
+    programmatic_visuals: bool,
+    target_duration_sec: f64,
     project: &Project,
     brand: &BrandPlaybook,
     assets: &[SavedCodeAsset],
@@ -474,14 +794,50 @@ pub(crate) async fn run_llm_worker_loop(
 
     let attached_documents = collect_document_excerpts(backend.as_ref(), project, cancel).await?;
 
+    let programmatic_role_brief = if programmatic_visuals {
+        match role {
+            AgentRole::Gfx => format!(
+                "\n\n## PROGRAMMATIC ZERO-ASSET MOTION GRAPHICS MODE\n\
+                 No camera footage or images were imported. You are building the ENTIRE {:.1}s visual video programmatically on track `g1`!\n\
+                 - Program 6 to 8 distinct, contiguous full-canvas HTML/CSS/SVG/GSAP scenes via `gfx_place` (`inline_html`), covering `0.0s` through `{:.1}s` with ZERO black gaps (each scene ~3.0–4.5s, contiguous `start_sec`).\n\
+                 - **CRITICAL PACING & TOKEN RULE**: Place ONLY **1 or 2 scenes per turn**! NEVER batch 4+ full-canvas HTML tool calls into one response (that overflows output tokens and truncates JSON).\n\
+                 - **Call `gfx_place` directly** — it ALREADY runs deterministic HTML linting automatically and returns exact errors if anything needs fixing. Do NOT waste tokens calling `gfx_lint_html` first.\n\
+                 - Keep each scene compact (~2–4 KB of crisp HTML/CSS/SVG/GSAP) yet visually rich: fill the full canvas (`position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;`), build layered gradient/ambient-glow/grid backdrops, bold editorial typography, bespoke inline `<svg viewBox=...>` diagrams, UI cards, flowcharts, and icons.\n\
+                 - Use responsive viewport units (`vw`, `vh`, `vmin`, `clamp(...)`, `%`, `<svg viewBox>`) so every scene renders identically in both compact Studio preview and full {}x{} export.\n\
+                 - Drive smooth deterministic animation with GSAP (`window.__timelines = window.__timelines || {{}}; const tl = gsap.timeline({{paused:true}}); ... window.__timelines['main'] = tl;`) OR CSS `@keyframes` (both are scrubbed deterministically by Solaris!).\n\
+                 - Use brand CSS variables (`--brand-bg`, `--brand-surface`, `--brand-ink`, `--brand-accent`, `--brand-accent-secondary`, `--brand-font-display`, `--brand-font-body`).\n\
+                 - Keep the primary visual composition in the upper 72% of the frame (leave bottom 24% clean for `T1` captions) and leave `transform` at `(0,0)` for full-canvas scenes.\n\
+                 - Follow strict sandbox rules: root `<div class=\"clip\" data-start=\"0\" data-duration=\"...\">`, ZERO external URLs/CDNs, ZERO `Math.random`, `Date.now`, `setInterval`, `setTimeout`, `requestAnimationFrame`, `fetch`.\n\
+                 - After all scenes cover `0.0s..{:.1}s`, save 1 reusable custom scene template via `assets_save`. Director runs final Vision QA automatically after specialists finish.",
+                target_duration_sec,
+                target_duration_sec,
+                project.canvas.width,
+                project.canvas.height,
+                target_duration_sec
+            ),
+            AgentRole::Caps => format!(
+                "\n\n## PROGRAMMATIC ZERO-ASSET CAPTIONS MODE\n\
+                 No audio transcript exists yet. Use `captions_place_script` (NOT `captions_generate_from_transcript`) to place synchronized, punchy kinetic caption bursts covering `0.0s` through `{:.1}s` on `t1`.\n\
+                 - Supply 6 to 10 clear, self-contained narration segments matching each scene beat (keep each segment a crisp complete phrase so bursts never split mid-clause), `words_per_burst: 3`, `y: 0.24`, and an editorial preset (`neon_glow` or `karaoke` for 9:16; `minimal` or `mono_caps` for 16:9).\n\
+                 - Once placed (and optionally verified with 1 `preview_capture_frame`), stop and reply concisely — Director runs full QA automatically after all specialists finish.",
+                target_duration_sec
+            ),
+            _ => String::new(),
+        }
+    } else {
+        String::new()
+    };
+
     let system_prompt = format!(
         "You are Solaris specialist '{agent_id}' ({role:?}) on project '{}'. \
-         You may ONLY mutate tracks {:?}. Call only the provided tools to make clean atomic edits, then reply concisely when finished.\n\n{skills}",
+         You may ONLY mutate tracks {:?}. Call only the provided tools to make clean atomic edits, then reply concisely when finished.{programmatic_role_brief}\n\n{skills}",
         project.id, allowed_tracks
     );
     let user_prompt = json!({
         "task": instruction,
         "project_id": project.id,
+        "production_mode": if programmatic_visuals { "programmatic_zero_asset" } else { "footage_edit" },
+        "target_duration_sec": target_duration_sec,
         "canvas": project.canvas,
         "brand": brand_context_json(brand),
         "media_pool": compact_media,
@@ -501,39 +857,202 @@ pub(crate) async fn run_llm_worker_loop(
         role,
         reason: Some("swarm worker".to_string()),
     };
-    let (req_model, req_models) = route_models(model, fallbacks);
+    let mut model_candidates: Vec<String> = vec![model.to_string()];
+    for fb in fallbacks {
+        if !model_candidates.iter().any(|x| x == fb) {
+            model_candidates.push(fb.clone());
+        }
+    }
+    let base_anchor = default_anchor_for_role(role, allowed_tracks);
+    let mut active_model_idx: usize = 0;
     let mut mutating_ops_succeeded = 0u32;
     let mut tool_errors = 0u32;
+    let mut stream_recoveries = 0u8;
+    let mut coverage_nudges = 0u8;
 
-    for _turn in 0..max_turns {
+    for turn in 0..max_turns {
         if cancel.is_cancelled() {
             return Err(AgentError::Cancelled);
         }
+        let current_primary = &model_candidates[active_model_idx];
+        let remaining_fallbacks = if active_model_idx + 1 < model_candidates.len() {
+            &model_candidates[active_model_idx + 1..]
+        } else {
+            &[]
+        };
+        let use_low_reasoning = low_reasoning && active_model_idx == 0;
+        let (req_model, req_models) = if use_low_reasoning {
+            (Some(current_primary.clone()), None)
+        } else {
+            route_models(current_primary, remaining_fallbacks)
+        };
         let req = ChatRequest {
-            model: req_model.clone(),
-            models: req_models.clone(),
+            model: req_model,
+            models: req_models,
             messages: messages.clone(),
             tools: Some(tools.clone()),
             session_id: Some(format!("solaris-{}-{agent_id}", project.id)),
             provider: Some(ProviderPreferences {
                 allow_fallbacks: Some(true),
-                require_parameters: Some(true),
+                require_parameters: if use_low_reasoning { None } else { Some(true) },
                 ..ProviderPreferences::default()
             }),
-            max_tokens: Some(1200),
+            reasoning: use_low_reasoning.then(|| ReasoningConfig {
+                effort: Some("low".to_string()),
+                ..ReasoningConfig::default()
+            }),
+            max_tokens: Some(WORKER_MAX_TOKENS),
             temperature: Some(0.2),
             ..ChatRequest::default()
         };
 
-        let resp = openrouter.chat_stream(&req, Some(cancel), |_| {}).await?;
+        let last_pulse_ms = Arc::new(AtomicU64::new(0));
+        let pulse_backend = backend.clone();
+        let pulse_pid = project.id.clone();
+        let pulse_agent = agent_id.to_string();
+        let pulse_anchor = base_anchor.clone();
+        let pulse_label = format!("editing turn {}", turn + 1);
+
+        let resp = match openrouter
+            .chat_stream(&req, Some(cancel), |_| {
+                let now = now_epoch_ms();
+                let prev = last_pulse_ms.load(Ordering::Relaxed);
+                if now.saturating_sub(prev) >= 850
+                    && last_pulse_ms
+                        .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
+                {
+                    let b = pulse_backend.clone();
+                    let pid = pulse_pid.clone();
+                    let aid = pulse_agent.clone();
+                    let anc = pulse_anchor.clone();
+                    let lbl = pulse_label.clone();
+                    tokio::spawn(async move {
+                        let _ = b.emit_cursor_pulse(&pid, &aid, role, &anc, &lbl).await;
+                    });
+                }
+            })
+            .await
+        {
+            Ok(r) => r,
+            Err(err) => {
+                let is_recoverable_truncation = matches!(&err, AgentError::StreamError(msg) if {
+                    let lower = msg.to_ascii_lowercase();
+                    lower.contains("truncated")
+                        || lower.contains("invalid json")
+                        || lower.contains("missing function name")
+                });
+                if is_recoverable_truncation && stream_recoveries < 2 && turn + 1 < max_turns {
+                    stream_recoveries += 1;
+                    tool_errors += 1;
+                    let prev_model = current_primary.clone();
+                    if active_model_idx + 1 < model_candidates.len() {
+                        active_model_idx += 1;
+                        strip_reasoning_details(&mut messages);
+                    }
+                    let next_model = &model_candidates[active_model_idx];
+                    emit_swarm_log(
+                        backend.as_ref(),
+                        LogLevel::Warn,
+                        "openrouter",
+                        &project.id,
+                        run_id,
+                        Some(agent_id),
+                        format!(
+                            "Specialist '{agent_id}' tool call truncated on turn {} ({prev_model}); recovering on {next_model} with smaller per-turn calls",
+                            turn + 1
+                        ),
+                        Some(err.to_string()),
+                    );
+                    let coaching = if role == AgentRole::Gfx {
+                        "Your previous tool call was truncated mid-JSON because the payload was too large. Emit ONLY 1 compact scene per turn by calling `gfx_place` directly (do NOT call `gfx_lint_html` first — `gfx_place` already lints HTML automatically). Keep each scene's `inline_html` concise (~2-4 KB) and continue placing scenes until the full timeline is covered."
+                    } else {
+                        "Your previous tool call was truncated or had invalid JSON arguments. Emit 1 smaller, valid JSON tool call per turn and continue."
+                    };
+                    push_coaching_user_message(&mut messages, coaching);
+                    continue;
+                }
+                emit_swarm_log(
+                    backend.as_ref(),
+                    LogLevel::Error,
+                    "openrouter",
+                    &project.id,
+                    run_id,
+                    Some(agent_id),
+                    format!(
+                        "Specialist '{agent_id}' OpenRouter error on turn {}: {err}",
+                        turn + 1
+                    ),
+                    Some(format!("model={current_primary}")),
+                );
+                return Err(err);
+            }
+        };
+
+        let served_model = resp.model.as_deref().unwrap_or(current_primary).to_string();
+        let finish_reason = resp.finish_reason().unwrap_or("unknown").to_string();
+        let usage = resp.usage_summary();
+
         let Some(choice) = resp.choices.into_iter().next() else {
             break;
         };
         let assistant_msg = choice.message;
         let tool_calls = assistant_msg.tool_calls.clone().unwrap_or_default();
+
+        emit_swarm_log(
+            backend.as_ref(),
+            if finish_reason == "length" {
+                LogLevel::Warn
+            } else {
+                LogLevel::Debug
+            },
+            "openrouter",
+            &project.id,
+            run_id,
+            Some(agent_id),
+            format!(
+                "{agent_id} turn {} ({served_model}, finish={finish_reason}, {usage}, {} tool call(s))",
+                turn + 1,
+                tool_calls.len()
+            ),
+            assistant_msg
+                .content
+                .as_ref()
+                .map(|c| c.as_text())
+                .filter(|s| !s.trim().is_empty()),
+        );
+
         messages.push(assistant_msg);
 
         if tool_calls.is_empty() {
+            if programmatic_visuals
+                && role == AgentRole::Gfx
+                && coverage_nudges < 1
+                && turn + 1 < max_turns
+                && let Ok(latest) = backend.get_project(&project.id).await
+            {
+                let (clip_count, covered_sec) =
+                    measure_track_coverage(&latest, "g1", target_duration_sec);
+                if clip_count == 0 || covered_sec < target_duration_sec * 0.75 {
+                    coverage_nudges += 1;
+                    emit_swarm_log(
+                        backend.as_ref(),
+                        LogLevel::Warn,
+                        "swarm",
+                        &project.id,
+                        run_id,
+                        Some(agent_id),
+                        format!(
+                            "{agent_id} paused early with {clip_count} scene(s) covering {covered_sec:.1}s/{target_duration_sec:.1}s; nudging to complete G1"
+                        ),
+                        None,
+                    );
+                    messages.push(ChatMessage::user_text(format!(
+                        "Track `g1` currently has {clip_count} clip(s) covering only {covered_sec:.1}s of the required {target_duration_sec:.1}s. Call `gfx_place` directly (1-2 scenes per turn, concise ~2-4 KB full-canvas HTML/CSS/SVG/GSAP each) to cover the remaining timeline with ZERO black gaps."
+                    )));
+                    continue;
+                }
+            }
             break;
         }
 
@@ -553,6 +1072,19 @@ pub(crate) async fn run_llm_worker_loop(
             let reply_str = match parsed_args {
                 Err(parse_err) => {
                     tool_errors += 1;
+                    emit_swarm_log(
+                        backend.as_ref(),
+                        LogLevel::Warn,
+                        "tool",
+                        &project.id,
+                        run_id,
+                        Some(agent_id),
+                        format!(
+                            "Tool '{}' received malformed JSON args: {parse_err}",
+                            tc.function.name
+                        ),
+                        Some(truncate_msg(raw_args)),
+                    );
                     json!({ "ok": false, "error": format!("invalid tool JSON arguments: {parse_err}") })
                         .to_string()
                 }
@@ -561,8 +1093,23 @@ pub(crate) async fn run_llm_worker_loop(
                         validate_worker_tool_scope(role, &tc.function.name, &args, allowed_tracks)
                     {
                         tool_errors += 1;
+                        emit_swarm_log(
+                            backend.as_ref(),
+                            LogLevel::Warn,
+                            "tool",
+                            &project.id,
+                            run_id,
+                            Some(agent_id),
+                            format!(
+                                "Blocked out-of-scope tool '{}': {scope_err}",
+                                tc.function.name
+                            ),
+                            None,
+                        );
                         json!({ "ok": false, "error": scope_err }).to_string()
                     } else {
+                        let tool_anchor =
+                            anchor_for_tool_call(role, &tc.function.name, &args, &base_anchor);
                         let tool_res = tokio::select! {
                             _ = cancel.cancelled() => return Err(AgentError::Cancelled),
                             r = execute_tool(backend.as_ref(), &tc.function.name, args, meta.clone()) => r,
@@ -572,7 +1119,26 @@ pub(crate) async fn run_llm_worker_loop(
                                 if is_mutating_tool(&tc.function.name) {
                                     mutating_ops_succeeded += 1;
                                     ops_counter.fetch_add(1, Ordering::Relaxed);
+                                    let _ = backend
+                                        .emit_cursor_pulse(
+                                            &project.id,
+                                            agent_id,
+                                            role,
+                                            &tool_anchor,
+                                            &out.text.chars().take(28).collect::<String>(),
+                                        )
+                                        .await;
                                 }
+                                emit_swarm_log(
+                                    backend.as_ref(),
+                                    LogLevel::Info,
+                                    "tool",
+                                    &project.id,
+                                    run_id,
+                                    Some(agent_id),
+                                    format!("{}: {}", tc.function.name, out.text),
+                                    None,
+                                );
                                 for b64 in out.all_images_base64() {
                                     captured_images
                                         .push((tc.function.name.clone(), b64.to_string()));
@@ -582,6 +1148,16 @@ pub(crate) async fn run_llm_worker_loop(
                             }
                             Err(err) => {
                                 tool_errors += 1;
+                                emit_swarm_log(
+                                    backend.as_ref(),
+                                    LogLevel::Warn,
+                                    "tool",
+                                    &project.id,
+                                    run_id,
+                                    Some(agent_id),
+                                    format!("Tool '{}' failed: {err}", tc.function.name),
+                                    None,
+                                );
                                 json!({ "ok": false, "error": err.to_string() }).to_string()
                             }
                         }
@@ -615,9 +1191,479 @@ pub(crate) async fn run_llm_worker_loop(
     Ok(mutating_ops_succeeded)
 }
 
+/// Dedicated high-craft micro-agent that authors and places a SINGLE programmatic full-canvas
+/// HTML/CSS/SVG/GSAP scene on `g1` in parallel with sibling scene agents.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_programmatic_scene_worker(
+    backend: &Arc<dyn SolarisBackend>,
+    openrouter: &OpenRouterClient,
+    model: &str,
+    fallbacks: &[String],
+    low_reasoning: bool,
+    run_id: &str,
+    run_tag: &str,
+    project: &Project,
+    brand: &BrandPlaybook,
+    art_direction: &str,
+    prompt: &str,
+    scene: &SceneSpec,
+    total_scenes: usize,
+    save_reusable_asset: bool,
+    agent_id: &str,
+    mutation_agent_id: &str,
+    cancel: &CancellationToken,
+    ops_counter: &Arc<AtomicU32>,
+) -> Result<u32, AgentError> {
+    let scene_anchor = format!("timeline.track.g1@{:.2}", scene.start_sec);
+    let _ = backend
+        .emit_cursor_pulse(
+            &project.id,
+            agent_id,
+            AgentRole::Gfx,
+            &scene_anchor,
+            &format!("designing S{}", scene.scene_index),
+        )
+        .await;
+
+    let clip_id = format!("gfx-s{:02}-{run_tag}", scene.scene_index);
+    let save_note = if save_reusable_asset {
+        "After placing this scene with `gfx_place`, also save it as a reusable template via `assets_save` (id: `explainer-scene-solar`)."
+    } else {
+        "Do NOT call `assets_save` (scene 1 handles saving the template)."
+    };
+
+    let system_prompt = format!(
+        "You are Solaris motion-design micro-agent '{agent_id}' authoring Scene {idx}/{total_scenes} for project '{}'.\n\
+         You own ONLY this single scene window on track `g1`: `start_sec={:.2}`, `duration_sec={:.2}` (`clip_id=\"{clip_id}\"`).\n\
+         ## STUDIO CRAFT & SANDBOX CONTRACT\n\
+         - Call `gfx_place` DIRECTLY with `inline_html` on Turn 1 (do NOT call `gfx_lint_html` first; `gfx_place` lints automatically and returns exact errors if anything needs fixing).\n\
+         - Fill the entire canvas (`position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;`) with a cohesive, broadcast-grade visual composition: layered dark ambient radial glow + subtle architectural grid/depth backdrop, bold editorial display typography, bespoke inline `<svg viewBox=...>` diagrams/UI cards/icons/charts/connectors.\n\
+         - Keep the hero composition in the upper 72% of the frame (leave the bottom 24% clean for `T1` kinetic captions). Keep `transform` at default `(0,0)`.\n\
+         - Use responsive viewport units (`vw`, `vh`, `vmin`, `clamp(...)`, `%`, `<svg viewBox>`) so the scene scales crisply across Studio preview and {}x{} export.\n\
+         - Use Brand CSS variables (`--brand-bg`, `--brand-surface`, `--brand-ink`, `--brand-accent`, `--brand-accent-secondary`, `--brand-font-display`, `--brand-font-body`) with clean fallbacks matching the brand tokens.\n\
+         - Drive smooth deterministic choreography with bundled GSAP 3 (`window.__timelines = window.__timelines || {{}}; const tl = gsap.timeline({{paused:true}}); ... window.__timelines['main'] = tl;`) — staggered entrance in the first 0.6s, living mid-scene accent/draw/orbit motion, clean settle before exit.\n\
+         - Strict sandbox rules: root `<div class=\"clip\" data-start=\"0\" data-duration=\"{:.2}\">`, ZERO external URLs/CDNs, ZERO `Math.random`, `Date.now`, `new Date`, `setInterval`, `setTimeout`, `requestAnimationFrame`, `fetch`, `XMLHttpRequest`, `WebSocket`, `import()`.\n\
+         - Keep `inline_html` crisp and focused (~2.5–5 KB) so it renders fast and cleanly.\n\
+         - {save_note}\n\
+         - Once placed, stop and reply concisely — Director runs Vision QA automatically.",
+        project.id,
+        scene.start_sec,
+        scene.duration_sec,
+        project.canvas.width,
+        project.canvas.height,
+        scene.duration_sec,
+        idx = scene.scene_index,
+    );
+
+    let user_prompt = json!({
+        "user_request": prompt,
+        "art_direction": art_direction,
+        "scene": {
+            "scene_index": scene.scene_index,
+            "total_scenes": total_scenes,
+            "clip_id": clip_id,
+            "title": scene.title,
+            "start_sec": scene.start_sec,
+            "duration_sec": scene.duration_sec,
+            "visual_brief": scene.visual_brief,
+            "motion_cue": scene.motion_cue,
+            "synchronized_narration": scene.narration,
+        },
+        "project_id": project.id,
+        "canvas": project.canvas,
+        "brand": brand_context_json(brand),
+    })
+    .to_string();
+
+    let mut messages = vec![
+        ChatMessage::system_cached(system_prompt),
+        ChatMessage::user_text(user_prompt),
+    ];
+    let allowed_scene_tools: &[&str] = if save_reusable_asset {
+        &[
+            "gfx.place",
+            "gfx.lint_html",
+            "brand.get_playbook",
+            "assets.save",
+        ]
+    } else {
+        &["gfx.place", "gfx.lint_html", "brand.get_playbook"]
+    };
+    let tools: Vec<_> = tools_for_role(AgentRole::Gfx)
+        .into_iter()
+        .filter(|t| allowed_scene_tools.contains(&normalize_tool_name(&t.function.name)))
+        .collect();
+    let meta = CommandMeta {
+        agent_id: mutation_agent_id.to_string(),
+        role: AgentRole::Gfx,
+        reason: Some(format!(
+            "scene {} micro-agent ({agent_id})",
+            scene.scene_index
+        )),
+    };
+
+    let mut model_candidates: Vec<String> = vec![model.to_string()];
+    for fb in fallbacks {
+        if !model_candidates.iter().any(|x| x == fb) {
+            model_candidates.push(fb.clone());
+        }
+    }
+    let mut active_model_idx: usize = 0;
+    let mut placed_scene = false;
+    let mut saved_asset = !save_reusable_asset;
+    let mut mutating_ops_succeeded = 0u32;
+    let mut tool_errors = 0u32;
+    let mut stream_recoveries = 0u8;
+    let max_turns = 4usize;
+
+    for turn in 0..max_turns {
+        if cancel.is_cancelled() {
+            return Err(AgentError::Cancelled);
+        }
+        let current_primary = &model_candidates[active_model_idx];
+        let remaining_fallbacks = if active_model_idx + 1 < model_candidates.len() {
+            &model_candidates[active_model_idx + 1..]
+        } else {
+            &[]
+        };
+        let use_low_reasoning = low_reasoning && active_model_idx == 0;
+        let (req_model, req_models) = if use_low_reasoning {
+            (Some(current_primary.clone()), None)
+        } else {
+            route_models(current_primary, remaining_fallbacks)
+        };
+        let req = ChatRequest {
+            model: req_model,
+            models: req_models,
+            messages: messages.clone(),
+            tools: Some(tools.clone()),
+            session_id: Some(format!("solaris-{}-{agent_id}", project.id)),
+            provider: Some(ProviderPreferences {
+                allow_fallbacks: Some(true),
+                require_parameters: if use_low_reasoning { None } else { Some(true) },
+                ..ProviderPreferences::default()
+            }),
+            reasoning: use_low_reasoning.then(|| ReasoningConfig {
+                effort: Some("low".to_string()),
+                ..ReasoningConfig::default()
+            }),
+            max_tokens: Some(SCENE_WORKER_MAX_TOKENS),
+            temperature: Some(0.25),
+            ..ChatRequest::default()
+        };
+
+        let last_pulse_ms = Arc::new(AtomicU64::new(0));
+        let pulse_backend = backend.clone();
+        let pulse_pid = project.id.clone();
+        let pulse_agent = agent_id.to_string();
+        let pulse_anchor = scene_anchor.clone();
+        let pulse_label = format!(
+            "S{}: {}",
+            scene.scene_index,
+            scene.title.chars().take(18).collect::<String>()
+        );
+
+        let resp = match openrouter
+            .chat_stream(&req, Some(cancel), |_| {
+                let now = now_epoch_ms();
+                let prev = last_pulse_ms.load(Ordering::Relaxed);
+                if now.saturating_sub(prev) >= 800
+                    && last_pulse_ms
+                        .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
+                {
+                    let b = pulse_backend.clone();
+                    let pid = pulse_pid.clone();
+                    let aid = pulse_agent.clone();
+                    let anc = pulse_anchor.clone();
+                    let lbl = pulse_label.clone();
+                    tokio::spawn(async move {
+                        let _ = b
+                            .emit_cursor_pulse(&pid, &aid, AgentRole::Gfx, &anc, &lbl)
+                            .await;
+                    });
+                }
+            })
+            .await
+        {
+            Ok(r) => r,
+            Err(err) => {
+                let is_recoverable_truncation = matches!(&err, AgentError::StreamError(msg) if {
+                    let lower = msg.to_ascii_lowercase();
+                    lower.contains("truncated")
+                        || lower.contains("invalid json")
+                        || lower.contains("missing function name")
+                });
+                if is_recoverable_truncation && stream_recoveries < 2 && turn + 1 < max_turns {
+                    stream_recoveries += 1;
+                    tool_errors += 1;
+                    if active_model_idx + 1 < model_candidates.len() {
+                        active_model_idx += 1;
+                        strip_reasoning_details(&mut messages);
+                    }
+                    emit_swarm_log(
+                        backend.as_ref(),
+                        LogLevel::Warn,
+                        "openrouter",
+                        &project.id,
+                        run_id,
+                        Some(agent_id),
+                        format!(
+                            "Scene worker '{agent_id}' truncated on turn {}; retrying on {}",
+                            turn + 1,
+                            model_candidates[active_model_idx]
+                        ),
+                        Some(err.to_string()),
+                    );
+                    push_coaching_user_message(
+                        &mut messages,
+                        "Your previous `gfx_place` JSON was truncated. Emit a cleaner, tighter ~2.5 KB `inline_html` scene directly via `gfx_place`.",
+                    );
+                    continue;
+                }
+                emit_swarm_log(
+                    backend.as_ref(),
+                    LogLevel::Error,
+                    "openrouter",
+                    &project.id,
+                    run_id,
+                    Some(agent_id),
+                    format!("Scene worker '{agent_id}' OpenRouter error: {err}"),
+                    Some(format!("model={current_primary}")),
+                );
+                return Err(err);
+            }
+        };
+
+        let served_model = resp.model.as_deref().unwrap_or(current_primary).to_string();
+        let finish_reason = resp.finish_reason().unwrap_or("unknown").to_string();
+        let usage = resp.usage_summary();
+        let Some(choice) = resp.choices.into_iter().next() else {
+            break;
+        };
+        let assistant_msg = choice.message;
+        let tool_calls = assistant_msg.tool_calls.clone().unwrap_or_default();
+
+        emit_swarm_log(
+            backend.as_ref(),
+            if finish_reason == "length" {
+                LogLevel::Warn
+            } else {
+                LogLevel::Debug
+            },
+            "openrouter",
+            &project.id,
+            run_id,
+            Some(agent_id),
+            format!(
+                "{agent_id} turn {} ({served_model}, finish={finish_reason}, {usage}, {} tool call(s))",
+                turn + 1,
+                tool_calls.len()
+            ),
+            None,
+        );
+
+        messages.push(assistant_msg);
+        if tool_calls.is_empty() {
+            if !placed_scene && turn + 1 < max_turns {
+                messages.push(ChatMessage::user_text(format!(
+                    "Call `gfx_place` now to place clip `{clip_id}` at `start_sec: {:.2}`, `duration_sec: {:.2}` on `g1`.",
+                    scene.start_sec, scene.duration_sec
+                )));
+                continue;
+            }
+            break;
+        }
+
+        for tc in tool_calls {
+            if cancel.is_cancelled() {
+                return Err(AgentError::Cancelled);
+            }
+            let raw_args = tc.function.arguments.trim();
+            let parsed_args: Result<serde_json::Value, _> = if raw_args.is_empty() {
+                Ok(json!({}))
+            } else {
+                serde_json::from_str(raw_args)
+            };
+            let reply_str = match parsed_args {
+                Err(parse_err) => {
+                    tool_errors += 1;
+                    json!({ "ok": false, "error": format!("invalid tool JSON arguments: {parse_err}") })
+                        .to_string()
+                }
+                Ok(mut args) => {
+                    // Enforce exact scene window & clip_id on `gfx_place` so parallel scene agents
+                    // never collide on duplicate clip IDs or leave timestamp gaps.
+                    let norm_name = normalize_tool_name(tc.function.name.trim());
+                    if !allowed_scene_tools.contains(&norm_name) {
+                        tool_errors += 1;
+                        json!({
+                            "ok": false,
+                            "error": format!("scene micro-agent '{agent_id}' is not permitted to invoke tool '{norm_name}'")
+                        })
+                        .to_string()
+                    } else {
+                        if norm_name == "gfx.place"
+                            && let Some(obj) = args.as_object_mut()
+                        {
+                            obj.insert("clip_id".to_string(), json!(clip_id));
+                            obj.insert("start_sec".to_string(), json!(scene.start_sec));
+                            obj.insert("duration_sec".to_string(), json!(scene.duration_sec));
+                            if obj
+                                .get("label")
+                                .and_then(|v| v.as_str())
+                                .is_none_or(|s| s.trim().is_empty())
+                            {
+                                obj.insert("label".to_string(), json!(scene.title));
+                            }
+                        }
+
+                        if let Err(scope_err) = validate_worker_tool_scope(
+                            AgentRole::Gfx,
+                            &tc.function.name,
+                            &args,
+                            &["g1"],
+                        ) {
+                            tool_errors += 1;
+                            json!({ "ok": false, "error": scope_err }).to_string()
+                        } else {
+                            let tool_anchor = anchor_for_tool_call(
+                                AgentRole::Gfx,
+                                &tc.function.name,
+                                &args,
+                                &scene_anchor,
+                            );
+                            let tool_res = tokio::select! {
+                                _ = cancel.cancelled() => return Err(AgentError::Cancelled),
+                                r = execute_tool(backend.as_ref(), &tc.function.name, args, meta.clone()) => r,
+                            };
+                            match tool_res {
+                                Ok(out) => {
+                                    if is_mutating_tool(&tc.function.name) {
+                                        mutating_ops_succeeded += 1;
+                                        ops_counter.fetch_add(1, Ordering::Relaxed);
+                                        if norm_name == "gfx.place" {
+                                            placed_scene = true;
+                                            let _ = backend
+                                                .emit_cursor_pulse(
+                                                    &project.id,
+                                                    agent_id,
+                                                    AgentRole::Gfx,
+                                                    &tool_anchor,
+                                                    &format!("placed S{}", scene.scene_index),
+                                                )
+                                                .await;
+                                            if scene.scene_index == 1 {
+                                                let preview_t = (scene.start_sec
+                                                    + scene.duration_sec * 0.35)
+                                                    .max(0.4);
+                                                let _ = backend
+                                                    .emit_playhead_seek(
+                                                        &project.id,
+                                                        preview_t,
+                                                        agent_id,
+                                                        AgentRole::Gfx,
+                                                    )
+                                                    .await;
+                                            }
+                                        } else if norm_name == "assets.save" {
+                                            saved_asset = true;
+                                        }
+                                    }
+                                    emit_swarm_log(
+                                        backend.as_ref(),
+                                        LogLevel::Info,
+                                        "tool",
+                                        &project.id,
+                                        run_id,
+                                        Some(agent_id),
+                                        format!("{}: {}", tc.function.name, out.text),
+                                        None,
+                                    );
+                                    json!({ "ok": true, "summary": out.text, "data": out.structured })
+                                        .to_string()
+                                }
+                                Err(err) => {
+                                    tool_errors += 1;
+                                    emit_swarm_log(
+                                        backend.as_ref(),
+                                        LogLevel::Warn,
+                                        "tool",
+                                        &project.id,
+                                        run_id,
+                                        Some(agent_id),
+                                        format!("Tool '{}' failed: {err}", tc.function.name),
+                                        None,
+                                    );
+                                    json!({ "ok": false, "error": err.to_string() }).to_string()
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            messages.push(ChatMessage::tool_result(tc.id, reply_str));
+        }
+
+        if placed_scene && saved_asset {
+            break;
+        }
+    }
+
+    if !placed_scene {
+        return Err(AgentError::ToolError(format!(
+            "scene worker '{agent_id}' did not place scene {} ({tool_errors} tool error(s))",
+            scene.scene_index
+        )));
+    }
+    Ok(mutating_ops_succeeded)
+}
+
+pub(crate) fn measure_track_coverage(
+    project: &Project,
+    track_id: &str,
+    target_duration_sec: f64,
+) -> (usize, f64) {
+    let Some(track) = project.tracks.iter().find(|t| t.id == track_id && !t.muted) else {
+        return (0, 0.0);
+    };
+    let count = track.clips.len();
+    if count == 0 || !target_duration_sec.is_finite() || target_duration_sec <= 0.0 {
+        return (count, 0.0);
+    }
+    let mut intervals: Vec<(f64, f64)> = track
+        .clips
+        .iter()
+        .filter(|c| c.start_sec.is_finite() && c.duration_sec.is_finite() && c.duration_sec > 0.0)
+        .map(|c| {
+            (
+                c.start_sec.clamp(0.0, target_duration_sec),
+                (c.start_sec + c.duration_sec).clamp(0.0, target_duration_sec),
+            )
+        })
+        .filter(|(s, e)| *e > *s)
+        .collect();
+    intervals.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut total = 0.0;
+    let mut cur_s = 0.0;
+    let mut cur_e = 0.0;
+    for (s, e) in intervals {
+        if s > cur_e {
+            total += cur_e - cur_s;
+            cur_s = s;
+            cur_e = e;
+        } else {
+            cur_e = cur_e.max(e);
+        }
+    }
+    total += cur_e - cur_s;
+    (count, total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use solaris_core_ir::AspectPreset;
 
     #[test]
     fn strip_json_fence_extracts_json_from_prose_and_code_blocks() {
@@ -636,7 +1682,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_scope_blocks_cross_track_mutations() {
+    fn worker_scope_blocks_cross_track_mutations_and_out_of_role_tools() {
         assert!(
             validate_worker_tool_scope(
                 AgentRole::BRoll,
@@ -664,5 +1710,54 @@ mod tests {
             )
             .is_err()
         );
+        for forbidden in [
+            "project_undo",
+            "project_create",
+            "render_export",
+            "project_run_qa",
+        ] {
+            assert!(
+                validate_worker_tool_scope(
+                    AgentRole::Gfx,
+                    forbidden,
+                    &json!({"project_id": "p1"}),
+                    &["g1"]
+                )
+                .is_err(),
+                "expected Gfx to be blocked from {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn message_hygiene_strips_reasoning_and_prevents_consecutive_user_turns() {
+        let mut msgs = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user_text("u1"),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: Some(MessageContent::Text("a1".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_details: Some(json!([{"type": "reasoning.text", "text": "thought"}])),
+            },
+            ChatMessage::user_text("u2"),
+        ];
+        strip_reasoning_details(&mut msgs);
+        assert!(msgs[2].reasoning_details.is_none());
+
+        push_coaching_user_message(&mut msgs, "retry smaller");
+        assert_eq!(msgs.len(), 6);
+        assert_eq!(msgs[3].role, "user");
+        assert_eq!(msgs[4].role, "assistant");
+        assert_eq!(msgs[5].role, "user");
+    }
+
+    #[test]
+    fn measure_track_coverage_handles_nan_without_panic() {
+        let proj = Project::new_default("nan_cov", AspectPreset::Vertical9x16);
+        let (count, covered) = measure_track_coverage(&proj, "g1", f64::NAN);
+        assert_eq!(count, 0);
+        assert_eq!(covered, 0.0);
     }
 }

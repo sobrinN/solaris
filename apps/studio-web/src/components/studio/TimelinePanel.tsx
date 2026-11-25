@@ -133,7 +133,7 @@ export function TimelinePanel({
   const [dropHoverTrackId, setDropHoverTrackId] = useState<string | null>(null);
 
   const safeFps = Math.max(1, Math.round(fps));
-  const timelineSpan = Math.max(20, Math.ceil(totalDurationSec + 4));
+  const timelineSpan = totalDurationSec > 0 ? Math.max(12, Math.ceil(totalDurationSec + 2)) : 20;
   const playheadPct = Math.min(100, Math.max(0, (playheadSec / timelineSpan) * 100));
   const rulerStepSec = timelineSpan <= 25 ? 2 : timelineSpan <= 60 ? 5 : 10;
   const rulerTicks: number[] = [];

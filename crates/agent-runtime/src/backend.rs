@@ -3,7 +3,7 @@ use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 use solaris_core_ir::{
-    AgentRole, AspectPreset, BrandPlaybook, CommandMeta, ExportJobStatus, ExportRequest,
+    AgentRole, AspectPreset, BrandPlaybook, CommandMeta, ExportJobStatus, ExportRequest, LogEntry,
     MediaAsset, OpResult, Project, SavedCodeAsset, TimelineCommand, TranscriptWord,
 };
 
@@ -167,4 +167,7 @@ pub trait SolarisBackend: Send + Sync {
 
     /// Best-effort non-blocking track lock release used by RAII drop guards holding `&dyn SolarisBackend`.
     fn spawn_release_track_lock(&self, _project_id: &str, _track_id: &str, _agent_id: &str) {}
+
+    /// Emit a structured diagnostic log entry to the workspace log bus / UI Logs panel.
+    fn emit_log(&self, _entry: LogEntry) {}
 }

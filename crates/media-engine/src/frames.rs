@@ -240,6 +240,113 @@ pub fn capture_composited_frame_png(
     Ok((output_png.to_path_buf(), png_w, png_h))
 }
 
+fn sanitize_ffmpeg_color(bg_hex: &str) -> String {
+    let trimmed = bg_hex.trim();
+    if let Some(hex) = trimmed.strip_prefix('#')
+        && (hex.len() == 6 || hex.len() == 8)
+        && hex.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return format!("0x{}", &hex[..6]);
+    }
+    "0x080404".to_string()
+}
+
+fn build_overlay_only_filter_complex(
+    out_w: u32,
+    out_h: u32,
+    bg_hex: &str,
+    overlay_count: usize,
+) -> String {
+    let bg = sanitize_ffmpeg_color(bg_hex);
+    let mut filters: Vec<String> = vec![format!(
+        "color=c={bg}:s={out_w}x{out_h}:d=1,format=rgb24[base]"
+    )];
+    let mut cur = "[base]".to_string();
+    for idx in 0..overlay_count {
+        let scaled_tag = format!("[ov_s{idx}]");
+        let next_tag = format!("[vov{idx}]");
+        filters.push(format!(
+            "[{idx}:v]scale={out_w}:{out_h}:flags=lanczos,format=rgba{scaled_tag};{cur}{scaled_tag}overlay=0:0:eof_action=repeat:format=rgb{next_tag}"
+        ));
+        cur = next_tag;
+    }
+    filters.push(format!("{cur}null[vfinal]"));
+    filters.join(";")
+}
+
+/// Composites one or more Chromium-rendered overlay PNGs onto a solid brand canvas
+/// when a programmatic project has no underlying V1/V2 video/image clip at `time_sec`.
+pub fn capture_overlay_only_frame_png(
+    toolchain: &MediaToolchain,
+    output_png: &Path,
+    canvas_width: u32,
+    canvas_height: u32,
+    max_width: Option<u32>,
+    bg_hex: &str,
+    overlay_pngs: &[PathBuf],
+) -> Result<(PathBuf, u32, u32), MediaError> {
+    let active_overlays: Vec<&PathBuf> = overlay_pngs.iter().filter(|p| p.is_file()).collect();
+    if active_overlays.is_empty() {
+        return Err(MediaError::ProcessFailed(
+            "no rendered overlay PNGs available to composite".to_string(),
+        ));
+    }
+    if let Some(parent) = output_png.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let Some(ffmpeg) = toolchain.ffmpeg_path.as_ref() else {
+        // Graceful fallback if FFmpeg is unavailable: copy top-most overlay PNG directly (e.g. T1 over G1)
+        let top_overlay = active_overlays.last().copied().ok_or_else(|| {
+            MediaError::ProcessFailed("no rendered overlay PNGs available to composite".to_string())
+        })?;
+        std::fs::copy(top_overlay, output_png)?;
+        let (png_w, png_h) = read_png_dimensions(output_png)?;
+        return Ok((output_png.to_path_buf(), png_w, png_h));
+    };
+
+    let cw = ensure_even(if canvas_width >= 2 {
+        canvas_width
+    } else {
+        1080
+    });
+    let ch = ensure_even(if canvas_height >= 2 {
+        canvas_height
+    } else {
+        1920
+    });
+    let (out_w, out_h) = if let Some(mw) = max_width.filter(|&w| w >= 2 && w < cw) {
+        let target_w = ensure_even(mw);
+        let scaled_h = ((ch as f64) * (target_w as f64 / cw as f64)).round() as u32;
+        (target_w, ensure_even(scaled_h.max(2)))
+    } else {
+        (cw, ch)
+    };
+
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-y", "-hide_banner", "-v", "error"]);
+    for ov in &active_overlays {
+        cmd.arg("-i").arg(ov);
+    }
+
+    let fc = build_overlay_only_filter_complex(out_w, out_h, bg_hex, active_overlays.len());
+
+    cmd.args(["-filter_complex", &fc, "-map", "[vfinal]", "-frames:v", "1"])
+        .arg(output_png);
+
+    let out = cmd.output()?;
+    if !out.status.success() {
+        return Err(MediaError::ProcessFailed(
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        ));
+    }
+
+    let (png_w, png_h) = read_png_dimensions(output_png)?;
+    Ok((output_png.to_path_buf(), png_w, png_h))
+}
+
 fn build_composite_frame_filter_complex(
     out_w: u32,
     out_h: u32,
@@ -523,6 +630,71 @@ mod tests {
         bytes.extend_from_slice(&960u32.to_be_bytes());
         std::fs::write(&p, &bytes).unwrap();
         assert_eq!(read_png_dimensions(&p).unwrap(), (540, 960));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sanitizes_ffmpeg_color_and_blocks_filter_injection() {
+        assert_eq!(sanitize_ffmpeg_color("#1A0E0E"), "0x1A0E0E");
+        assert_eq!(sanitize_ffmpeg_color("  #F05A00CC "), "0xF05A00");
+        assert_eq!(
+            sanitize_ffmpeg_color("#080404:s=1x1,format=rgba[x];"),
+            "0x080404"
+        );
+        assert_eq!(sanitize_ffmpeg_color("#fff"), "0x080404");
+        assert_eq!(sanitize_ffmpeg_color("red"), "0x080404");
+        assert_eq!(sanitize_ffmpeg_color("#GGGGGG"), "0x080404");
+    }
+
+    #[test]
+    fn overlay_only_filtergraph_uses_rgb24_base_and_rgb_overlay_format() {
+        let fc = build_overlay_only_filter_complex(540, 960, "#1A0E0E", 2);
+        assert!(fc.contains("color=c=0x1A0E0E:s=540x960:d=1,format=rgb24[base]"));
+        assert!(fc.contains("overlay=0:0:eof_action=repeat:format=rgb[vov0]"));
+        assert!(fc.contains("overlay=0:0:eof_action=repeat:format=rgb[vov1]"));
+        assert!(fc.ends_with("[vov1]null[vfinal]"));
+    }
+
+    #[test]
+    fn overlay_only_capture_errors_on_empty_and_picks_top_layer_without_ffmpeg() {
+        let no_ffmpeg = MediaToolchain::with_paths(None, None);
+        let dir =
+            std::env::temp_dir().join(format!("solaris_overlay_only_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out_png = dir.join("out.png");
+
+        // Empty overlays -> error
+        assert!(matches!(
+            capture_overlay_only_frame_png(&no_ffmpeg, &out_png, 1080, 1920, None, "#080404", &[]),
+            Err(MediaError::ProcessFailed(_))
+        ));
+
+        // Write two minimal PNG headers with distinct dimensions (bottom = G1, top = T1)
+        let write_hdr = |path: &Path, w: u32, h: u32| {
+            let mut bytes = vec![137, 80, 78, 71, 13, 10, 26, 10];
+            bytes.extend_from_slice(&13u32.to_be_bytes());
+            bytes.extend_from_slice(b"IHDR");
+            bytes.extend_from_slice(&w.to_be_bytes());
+            bytes.extend_from_slice(&h.to_be_bytes());
+            std::fs::write(path, &bytes).unwrap();
+        };
+        let bottom = dir.join("g1.png");
+        let top = dir.join("t1.png");
+        write_hdr(&bottom, 320, 240);
+        write_hdr(&top, 540, 960);
+
+        let (_, w, h) = capture_overlay_only_frame_png(
+            &no_ffmpeg,
+            &out_png,
+            1080,
+            1920,
+            None,
+            "#080404",
+            &[bottom, top],
+        )
+        .unwrap();
+        assert_eq!((w, h), (540, 960));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

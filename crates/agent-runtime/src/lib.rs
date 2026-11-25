@@ -13,9 +13,10 @@ pub use backend::{BoxFuture, CapturedFrame, KeyframeResult, SolarisBackend};
 pub use error::AgentError;
 pub use lint::{GfxLintReport, lint_gfx_html};
 pub use openrouter::{
-    CacheControl, ChatCompletionResponse, ChatMessage, ChatRequest, ContentPart, InputAudioPayload,
-    MediaUrlRef, MessageContent, OpenRouterClient, OpenRouterConfig, OpenRouterModel,
-    ProviderPreferences, ToolCall, ToolDefinition,
+    CacheControl, ChatCompletionResponse, ChatMessage, ChatRequest, ChatUsage,
+    CompletionTokensDetails, ContentPart, InputAudioPayload, MediaUrlRef, MessageContent,
+    OpenRouterClient, OpenRouterConfig, OpenRouterModel, ProviderPreferences, ReasoningConfig,
+    ToolCall, ToolDefinition,
 };
 pub use skills::{
     SkillDoc, SkillResourceDoc, get_skill, get_skill_resource, install_skills_to_dir,

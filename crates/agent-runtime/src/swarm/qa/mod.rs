@@ -17,6 +17,12 @@ use checks::{
 };
 use vision::inspect_playback_frames;
 
+#[derive(Debug, Clone, Default)]
+pub struct QaPassOptions<'a> {
+    pub specialist_errors: &'a [String],
+    pub director_supports_reasoning: bool,
+}
+
 pub async fn run_qa_pass(
     backend: &dyn SolarisBackend,
     openrouter: Option<&OpenRouterClient>,
@@ -25,6 +31,30 @@ pub async fn run_qa_pass(
     auto_fix: bool,
     cancel: &CancellationToken,
     ops_counter: Option<&AtomicU32>,
+) -> QaReport {
+    run_qa_pass_with_options(
+        backend,
+        openrouter,
+        vision_model,
+        project_id,
+        auto_fix,
+        cancel,
+        ops_counter,
+        QaPassOptions::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_qa_pass_with_options(
+    backend: &dyn SolarisBackend,
+    openrouter: Option<&OpenRouterClient>,
+    vision_model: Option<(&str, &[String])>,
+    project_id: &str,
+    auto_fix: bool,
+    cancel: &CancellationToken,
+    ops_counter: Option<&AtomicU32>,
+    options: QaPassOptions<'_>,
 ) -> QaReport {
     let _ = backend
         .emit_cursor_pulse(
@@ -38,6 +68,19 @@ pub async fn run_qa_pass(
 
     let mut checks = Vec::new();
     let mut auto_fixes_applied: u32 = 0;
+
+    for (idx, err) in options.specialist_errors.iter().enumerate() {
+        if !err.trim().is_empty() {
+            checks.push(QaCheckItem {
+                id: format!("specialist-error-{idx}"),
+                category: "swarm".to_string(),
+                severity: QaSeverity::Issue,
+                message: format!("Specialist reported an error: {err}"),
+                time_sec: None,
+                auto_fixed: false,
+            });
+        }
+    }
 
     let mut project = match backend.get_project(project_id).await {
         Ok(p) => p,
@@ -110,6 +153,7 @@ pub async fn run_qa_pass(
         && check_and_fix_safe_zones(
             backend,
             &mut project,
+            &assets,
             auto_fix,
             cancel,
             ops_counter,
@@ -132,11 +176,23 @@ pub async fn run_qa_pass(
         backend,
         openrouter,
         vision_model,
+        options.director_supports_reasoning,
         &project,
         cancel,
         &mut checks,
     )
     .await;
+
+    if cancel.is_cancelled() {
+        checks.push(QaCheckItem {
+            id: "qa-cancelled".to_string(),
+            category: "qa".to_string(),
+            severity: QaSeverity::Warning,
+            message: "QA pass was cancelled before completion.".to_string(),
+            time_sec: None,
+            auto_fixed: false,
+        });
+    }
 
     finalize_report(
         checks,
@@ -192,11 +248,16 @@ fn finalize_report(
 ) -> QaReport {
     let mut score: i32 = 100;
     let mut issue_count = 0usize;
+    let cancelled = checks.iter().any(|c| c.id == "qa-cancelled");
     for item in &checks {
         match item.severity {
             QaSeverity::Issue => {
                 issue_count += 1;
-                score -= 15;
+                score -= if item.id == "visuals-empty" || item.id == "timeline-empty" {
+                    40
+                } else {
+                    15
+                };
             }
             QaSeverity::Warning => {
                 score -= 5;
@@ -204,9 +265,12 @@ fn finalize_report(
             QaSeverity::Pass | QaSeverity::Fixed => {}
         }
     }
+    if issue_count > 0 {
+        score = score.min(65);
+    }
     let clamped = score.clamp(0, 100) as u8;
     QaReport {
-        passed: issue_count == 0 && clamped >= 70,
+        passed: !cancelled && issue_count == 0 && clamped >= 70,
         score: clamped,
         frames_inspected,
         auto_fixes_applied,
@@ -736,5 +800,423 @@ mod tests {
                 .iter()
                 .any(|c| c.id == "log-recovery" && c.severity == QaSeverity::Pass)
         );
+    }
+
+    #[tokio::test]
+    async fn qa_fails_empty_visuals_preserves_full_canvas_gfx_and_parses_vision_issues() {
+        // 1. Captions-only timeline with 0 visuals on V1/V2/G1 must fail QA with low score
+        let project = Project::new_default("blank_canvas", AspectPreset::Vertical9x16);
+        let pid = project.id.clone();
+        let mut engine = ProjectEngine::new(project);
+        let meta = CommandMeta {
+            agent_id: "seed".into(),
+            role: AgentRole::User,
+            reason: Some("seed".into()),
+        };
+        engine
+            .apply(
+                TimelineCommand::PlaceClip {
+                    track_id: "t1".into(),
+                    clip: Clip {
+                        id: "c_cap_1".into(),
+                        label: "Skills make agents".into(),
+                        start_sec: 0.0,
+                        duration_sec: 4.0,
+                        source_in_sec: 0.0,
+                        transform: Transform2D {
+                            y: 0.24,
+                            ..Transform2D::default()
+                        },
+                        audio: AudioSettings::default(),
+                        payload: ClipKind::Caption {
+                            caption: CaptionBlock {
+                                words: vec![],
+                                preset: CaptionPreset::NeonGlow,
+                                font_family: "Sora".into(),
+                                highlight_color: "#F7B733".into(),
+                            },
+                        },
+                    },
+                },
+                meta.clone(),
+            )
+            .unwrap();
+
+        let backend = QaMockBackend {
+            engine: RwLock::new(engine),
+        };
+        let errs = vec!["gfx-01: truncated JSON".to_string()];
+        let report = run_qa_pass_with_options(
+            &backend,
+            None,
+            None,
+            &pid,
+            true,
+            &CancellationToken::new(),
+            None,
+            QaPassOptions {
+                specialist_errors: &errs,
+                director_supports_reasoning: false,
+            },
+        )
+        .await;
+        assert!(
+            !report.passed,
+            "blank canvas + specialist error must fail QA"
+        );
+        assert!(
+            report.score <= 45,
+            "expected low QA score on blank canvas, got {}",
+            report.score
+        );
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|c| c.id == "visuals-empty" && c.severity == QaSeverity::Issue)
+        );
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|c| c.id == "specialist-error-0" && c.severity == QaSeverity::Issue)
+        );
+
+        // 2. Full-canvas G1 scene (100vw/100vh) overlapping caption at y=0.0 must NOT be shifted
+        backend
+            .apply_op(
+                &pid,
+                TimelineCommand::PlaceGfx {
+                    track_id: "g1".into(),
+                    clip_id: "g_full".into(),
+                    label: "Full Canvas".into(),
+                    start_sec: 0.0,
+                    duration_sec: 4.0,
+                    gfx: GfxInstance {
+                        asset_id: None,
+                        props: json!({}),
+                        inline_html: Some(
+                            "<div class=\"clip\" data-start=\"0\" data-duration=\"4\" style=\"position:fixed;inset:0;width:100vw;height:100vh;\">Scene</div>"
+                                .into(),
+                        ),
+                    },
+                },
+                meta.clone(),
+            )
+            .await
+            .unwrap();
+        backend
+            .apply_op(
+                &pid,
+                TimelineCommand::UpdateClipTransform {
+                    track_id: "t1".into(),
+                    clip_id: "c_cap_1".into(),
+                    transform: Transform2D {
+                        y: 0.0,
+                        ..Transform2D::default()
+                    },
+                },
+                meta,
+            )
+            .await
+            .unwrap();
+        let report_full = run_qa_pass(
+            &backend,
+            None,
+            None,
+            &pid,
+            true,
+            &CancellationToken::new(),
+            None,
+        )
+        .await;
+        assert!(report_full.passed);
+        let updated = backend.get_project(&pid).await.unwrap();
+        let g_clip = updated
+            .tracks
+            .iter()
+            .find(|t| t.id == "g1")
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id == "g_full")
+            .unwrap();
+        assert!(
+            (g_clip.transform.y - 0.0).abs() < 1e-6,
+            "full-canvas G1 scene must stay at y=0.0, got {}",
+            g_clip.transform.y
+        );
+
+        // 3. Vision QA parser maps critical issues to QaSeverity::Issue and warnings to Warning
+        let (summary, vchecks) = vision::parse_vision_qa_output(
+            r#"{"summary":"Black screen","issues":["Pitch-black background with no scene graphics"],"warnings":["Caption slightly small"]}"#,
+        );
+        assert_eq!(summary.as_deref(), Some("Black screen"));
+        assert_eq!(vchecks.len(), 2);
+        assert_eq!(vchecks[0].severity, QaSeverity::Issue);
+        assert_eq!(vchecks[1].severity, QaSeverity::Warning);
+    }
+
+    #[test]
+    fn pacing_early_gap_does_not_corrupt_g1_coverage_accumulation() {
+        let mut proj = Project::new_default("gap_coverage", AspectPreset::Vertical9x16);
+        let g1 = proj.tracks.iter_mut().find(|t| t.id == "g1").unwrap();
+        // Clip 1: 0.0..2.0, 0.5s gap (2.0..2.5), Clip 2: 2.5..20.0 -> 19.5s / 20.0s = 97.5% coverage
+        for (id, start, dur) in [("g1-a", 0.0, 2.0), ("g1-b", 2.5, 17.5)] {
+            g1.clips.push(Clip {
+                id: id.into(),
+                label: id.into(),
+                start_sec: start,
+                duration_sec: dur,
+                source_in_sec: 0.0,
+                transform: Transform2D::default(),
+                audio: AudioSettings::default(),
+                payload: ClipKind::Gfx {
+                    gfx: GfxInstance {
+                        asset_id: None,
+                        props: json!({}),
+                        inline_html: Some(
+                            r#"<div class="clip" data-start="0" data-duration="2">Scene</div>"#
+                                .into(),
+                        ),
+                    },
+                },
+            });
+        }
+        let mut checks = Vec::new();
+        checks::check_timeline_pacing(&proj, &mut checks);
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.id.starts_with("g1-gap-") && c.severity == QaSeverity::Warning),
+            "expected g1 gap warning"
+        );
+        assert!(
+            !checks.iter().any(|c| c.id == "g1-coverage-low"),
+            "97.5% coverage must NOT emit g1-coverage-low, got: {checks:?}"
+        );
+    }
+
+    #[test]
+    fn full_canvas_gfx_distinguishes_fixed_viewport_from_floating_card_pseudoelement() {
+        let fixed_clip = Clip {
+            id: "full".into(),
+            label: "Full".into(),
+            start_sec: 0.0,
+            duration_sec: 4.0,
+            source_in_sec: 0.0,
+            transform: Transform2D::default(),
+            audio: AudioSettings::default(),
+            payload: ClipKind::Gfx {
+                gfx: GfxInstance {
+                    asset_id: None,
+                    props: json!({}),
+                    inline_html: Some(
+                        r#"<div class="clip" data-start="0" data-duration="4" style="position:fixed; top:0; left:0; right:0; bottom:0;">BG</div>"#
+                            .into(),
+                    ),
+                },
+            },
+        };
+        assert!(checks::is_full_canvas_gfx(&fixed_clip, &[]));
+
+        let floating_card = Clip {
+            id: "card".into(),
+            label: "Card".into(),
+            start_sec: 0.0,
+            duration_sec: 4.0,
+            source_in_sec: 0.0,
+            transform: Transform2D::default(),
+            audio: AudioSettings::default(),
+            payload: ClipKind::Gfx {
+                gfx: GfxInstance {
+                    asset_id: None,
+                    props: json!({}),
+                    inline_html: Some(
+                        r#"<style>.card { position: relative; width: 320px; } .card::before { content: ""; position: absolute; inset: 0; }</style><div class="clip card" data-start="0" data-duration="4">Card</div>"#
+                            .into(),
+                    ),
+                },
+            },
+        };
+        assert!(!checks::is_full_canvas_gfx(&floating_card, &[]));
+
+        let saved_asset = SavedCodeAsset {
+            id: "full-bg".into(),
+            name: "Full BG".into(),
+            category: "scenes".into(),
+            tags: vec![],
+            props_schema: json!({}),
+            default_props: json!({}),
+            html_source:
+                r#"<div class="clip" data-start="0" data-duration="4" style="width:100vw;height:100dvh;">Asset BG</div>"#
+                    .into(),
+            default_duration_sec: 4.0,
+            created_at: Utc::now(),
+        };
+        let asset_clip = Clip {
+            id: "asset-full".into(),
+            label: "Asset Full".into(),
+            start_sec: 0.0,
+            duration_sec: 4.0,
+            source_in_sec: 0.0,
+            transform: Transform2D::default(),
+            audio: AudioSettings::default(),
+            payload: ClipKind::Gfx {
+                gfx: GfxInstance {
+                    asset_id: Some("full-bg".into()),
+                    props: json!({}),
+                    inline_html: None,
+                },
+            },
+        };
+        assert!(checks::is_full_canvas_gfx(&asset_clip, &[saved_asset]));
+    }
+
+    #[test]
+    fn vision_qa_parser_handles_empty_malformed_blank_entries_and_secret_scrubbing() {
+        let (_, empty_checks) = vision::parse_vision_qa_output("   ");
+        assert!(
+            empty_checks
+                .iter()
+                .any(|c| c.id == "vision-qa-empty" && c.severity == QaSeverity::Warning)
+        );
+
+        let (_, malformed_checks) = vision::parse_vision_qa_output("{truncated");
+        assert!(
+            malformed_checks
+                .iter()
+                .any(|c| c.id == "vision-qa-parse-error" && c.severity == QaSeverity::Warning)
+        );
+
+        // Blank entries before real entries must be filtered BEFORE `.take(4)`
+        let (_, filtered_checks) = vision::parse_vision_qa_output(
+            r#"{"summary":"ok","issues":["", "  ", "i1", "i2", "i3", "i4", "i5"],"warnings":[]}"#,
+        );
+        assert_eq!(filtered_checks.len(), 4);
+        assert_eq!(filtered_checks[0].message, "i1");
+        assert_eq!(filtered_checks[3].message, "i4");
+
+        let scrubbed =
+            vision::scrub_secrets("HTTP 401 Authorization: Bearer sk-or-v1-abc123 key=sk-or-xyz_9");
+        assert!(!scrubbed.contains("sk-or-"));
+        assert!(scrubbed.contains("Bearer <redacted>"));
+
+        let short_ts = vision::compute_sample_timestamps(0.0, 0.15);
+        assert!(!short_ts.is_empty());
+        for pair in short_ts.windows(2) {
+            assert!(pair[1] > pair[0]);
+        }
+        assert!(*short_ts.last().unwrap() < 0.15);
+    }
+
+    #[tokio::test]
+    async fn qa_caps_score_on_hard_issue_marks_cancelled_failed_and_avoids_noop_overlap_fix() {
+        // 1. Single hard issue caps score <= 65
+        let report_hard = finalize_report(
+            vec![QaCheckItem {
+                id: "gfx-lint-1".into(),
+                category: "gfx".into(),
+                severity: QaSeverity::Issue,
+                message: "Lint failed".into(),
+                time_sec: Some(0.0),
+                auto_fixed: false,
+            }],
+            3,
+            0,
+            None,
+        );
+        assert!(!report_hard.passed);
+        assert!(report_hard.score <= 65);
+
+        // 2. Cancelled QA returns passed=false with qa-cancelled warning
+        let proj = Project::new_default("qa_cancel", AspectPreset::Vertical9x16);
+        let pid = proj.id.clone();
+        let backend = QaMockBackend {
+            engine: RwLock::new(ProjectEngine::new(proj)),
+        };
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let report_cancelled = run_qa_pass(&backend, None, None, &pid, true, &cancel, None).await;
+        assert!(!report_cancelled.passed);
+        assert!(
+            report_cancelled
+                .checks
+                .iter()
+                .any(|c| c.id == "qa-cancelled" && c.severity == QaSeverity::Warning)
+        );
+
+        // 3. No collision-free band emits Warning (not no-op Fixed) and does not mutate
+        let proj2 = Project::new_default("qa_blocked_bands", AspectPreset::Vertical9x16);
+        let pid2 = proj2.id.clone();
+        let mut engine2 = ProjectEngine::new(proj2);
+        let meta = CommandMeta::default();
+        for (idx, y) in [-0.30, -0.22, 0.0, 0.22, 0.30].into_iter().enumerate() {
+            engine2
+                .apply(
+                    TimelineCommand::PlaceClip {
+                        track_id: "t1".into(),
+                        clip: Clip {
+                            id: format!("cap-{idx}"),
+                            label: format!("Cap {idx}"),
+                            start_sec: 0.0,
+                            duration_sec: 3.0,
+                            source_in_sec: 0.0,
+                            transform: Transform2D {
+                                y,
+                                ..Transform2D::default()
+                            },
+                            audio: AudioSettings::default(),
+                            payload: ClipKind::Caption {
+                                caption: CaptionBlock {
+                                    words: vec![],
+                                    preset: CaptionPreset::Minimal,
+                                    font_family: "Sora".into(),
+                                    highlight_color: "#F7B733".into(),
+                                },
+                            },
+                        },
+                    },
+                    meta.clone(),
+                )
+                .unwrap();
+        }
+        engine2
+            .apply(
+                TimelineCommand::PlaceGfx {
+                    track_id: "g1".into(),
+                    clip_id: "gfx-blocked".into(),
+                    label: "Badge".into(),
+                    start_sec: 0.0,
+                    duration_sec: 3.0,
+                    gfx: GfxInstance {
+                        asset_id: None,
+                        props: json!({}),
+                        inline_html: Some(
+                            r#"<div class="clip" data-start="0" data-duration="3">Badge</div>"#
+                                .into(),
+                        ),
+                    },
+                },
+                meta,
+            )
+            .unwrap();
+        let backend2 = QaMockBackend {
+            engine: RwLock::new(engine2),
+        };
+        let report_blocked = run_qa_pass(
+            &backend2,
+            None,
+            None,
+            &pid2,
+            true,
+            &CancellationToken::new(),
+            None,
+        )
+        .await;
+        assert_eq!(report_blocked.auto_fixes_applied, 0);
+        assert!(report_blocked.checks.iter().any(|c| {
+            c.id == "overlap-gfx-blocked" && c.severity == QaSeverity::Warning && !c.auto_fixed
+        }));
     }
 }

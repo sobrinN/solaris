@@ -190,14 +190,15 @@ export function BroadcastScopes({
       className="flex h-full flex-col gap-3 rounded-2xl border border-areia/10 bg-carbono/70 p-3"
     >
       <div className="flex flex-col gap-1.5">
-        <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
-          <span>Waveform · Luma</span>
+        <div className="flex items-center justify-between gap-1 whitespace-nowrap text-[10px] font-semibold uppercase tracking-[0.12em] text-areia/60">
+          <span className="truncate">Waveform · Luma</span>
           <span
-            className={`tabular-nums ${
+            className={`shrink-0 tabular-nums ${
               hasLiveFrame ? "text-amarelo-ideias" : "text-areia/45"
             }`}
+            title={hasLiveFrame ? "Live WebGL2 graded pixel feed" : "0–100 IRE synthetic reference"}
           >
-            {hasLiveFrame ? "LIVE" : "0–100 IRE"}
+            {hasLiveFrame ? "LIVE" : "IRE"}
           </span>
         </div>
         <canvas
@@ -209,9 +210,14 @@ export function BroadcastScopes({
       </div>
 
       <div className="flex flex-col gap-1.5">
-        <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
-          <span>Vectorscope</span>
-          <span className="text-amarelo-ideias/80">Rec.709 · Skin</span>
+        <div className="flex items-center justify-between gap-1 whitespace-nowrap text-[10px] font-semibold uppercase tracking-[0.12em] text-areia/60">
+          <span className="truncate">Vectorscope</span>
+          <span
+            className="shrink-0 text-amarelo-ideias/80"
+            title="Rec.709 Cb/Cr with 123° Skin-Tone I-Line"
+          >
+            Rec.709
+          </span>
         </div>
         <div className="grid place-items-center rounded-xl border border-areia/10 bg-void/90 py-2">
           <canvas ref={vecRef} width={132} height={132} className="h-[124px] w-[124px]" />

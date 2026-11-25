@@ -20,7 +20,7 @@ Read only the files needed for the current task (progressive disclosure):
 
 | Need | Read |
 | --- | --- |
-| Full 33-tool parameter guide, `role_hint` taxonomy, `Transform2D` math, MCP resources | [references/tool-reference.md](references/tool-reference.md) |
+| Full 34-tool parameter guide, `role_hint` taxonomy, `Transform2D` math, MCP resources | [references/tool-reference.md](references/tool-reference.md) |
 | Numbers-only cut spec, storyline hooks, BANNED amateur defaults | [references/direction-and-pacing.md](references/direction-and-pacing.md) |
 | Closed multi-round QA rubric (1–10), exact check thresholds, fix line format | [references/critique-and-qa.md](references/critique-and-qa.md) |
 | Error recovery (locked tracks, missing transcripts, Chromium/FFmpeg, capture errors) | [references/failure-recovery.md](references/failure-recovery.md) |
@@ -42,10 +42,11 @@ Inspect existing state before creating or overwriting anything:
 ### Stage 1: Intake & Media Intelligence (Read-Only First)
 
 1. Call `project.get` and `brand.get_playbook` to capture canvas aspect (`vertical9x16`, `landscape16x9`, `square1x1`), `brand_md`, CSS `tokens`, `pacing_rules`, `default_lut`, and `reference_media` notes.
-2. If local files were given by path, call `media.import` with accurate `role_hint` values (`a_roll`, `voice`, `b_roll`, `music`, `reference`) so auto-routing and transcription behave predictably.
-3. Call `media.get_manifest` for the project. Inspect `duration_sec`, `has_audio`, `is_log_footage`, `silences`, `beats`, `scene_cuts`, `integrated_lufs`, and `transcript`.
-4. **Auto-transcribe before planning**: for any primary `a_roll` or `voice` asset with `has_audio: true` and an empty `transcript`, call `media.transcribe` immediately.
-5. **Scout raw visuals**: call `media.extract_keyframes` on key video clips (e.g., `[0.5, mid, near_end]`) when you have vision input so cut choices rely on actual framing, eye-lines, and lighting—not filenames.
+2. **Zero-Asset Programmatic Mode**: If `media_pool` has zero Video/Image assets (no footage uploaded), do **NOT** fail or stall asking for files. Build the **entire video programmatically** across the requested duration using bespoke, continuous full-canvas (`position:fixed;inset:0;width:100vw;height:100vh`) responsive HTML/CSS/SVG/GSAP scenes on `G1` (`gfx.place`, zero black gaps, 3.5–5.5s per scene, saving reusable templates with `assets.save`) paired with synchronized kinetic captions on `T1` via `captions.place_script` (`y: 0.24`).
+3. If local files were given by path, call `media.import` with accurate `role_hint` values (`a_roll`, `voice`, `b_roll`, `music`, `reference`) so auto-routing and transcription behave predictably.
+4. Call `media.get_manifest` for the project. Inspect `duration_sec`, `has_audio`, `is_log_footage`, `silences`, `beats`, `scene_cuts`, `integrated_lufs`, and `transcript`.
+5. **Auto-transcribe before planning**: for any primary `a_roll` or `voice` asset with `has_audio: true` and an empty `transcript`, call `media.transcribe` immediately.
+6. **Scout raw visuals**: call `media.extract_keyframes` on key video clips (e.g., `[0.5, mid, near_end]`) when you have vision input so cut choices rely on actual framing, eye-lines, and lighting—not filenames.
 
 ### Stage 2: Direction & Shotlist Gate
 
@@ -71,14 +72,14 @@ Execute in dependency order (or parallel tracks after spine settles):
 1. **B-Roll (`v2`)**: Insert cutaways/stills (`ken_burns: true` on images) every `3.0–5.0s`; set `gain_db: -99` on B-roll clips unless natural ambience is desired.
 2. **Color (`fx` / global)**: Call `color.get_scope_stats`, then `color.set_grade` for Log recovery and brand LUT blending (`0.65–0.85`).
 3. **Captions (`t1`)**: Call `captions.generate_from_transcript` (maps against `V1` and `A1`, replaces prior auto-captions cleanly), then tune style with `captions.set_style`.
-4. **Graphics (`g1`)**: Always call `assets.search` first. Place via `gfx.place`, then call `timeline.set_transform` on `g1` so GFX never collides with `T1` captions (`|gfx.y - cap.y| >= 0.08`; captions sit near `y: 0.20`). Lint any custom HTML with `gfx.lint_html` before placing.
+4. **Graphics (`g1`)**: Always call `assets.search` first. Place via `gfx.place` (`gfx.place` enforces `lint_gfx_html` server-side automatically; call `gfx.lint_html` to pre-verify or debug rejections). For floating cards/badges, follow with `timeline.set_transform` on `g1` so GFX never collides with `T1` captions (`|gfx.y - cap.y| >= 0.08`; captions sit near `y: 0.20`). **Exception**: full-canvas programmatic `G1` scenes stay at `(0,0)` and reserve bottom safe space internally—do not shift them with `timeline.set_transform`.
 5. **Audio Mix (`a1`/`a2`)**: Call `audio.normalize_lufs` (`target_lufs: -14.0`), place music on `a2` (`gain_db: -14` to `-18`), call `audio.enable_ducking` (`duck_target_db: -18.0`), and add `0.05–0.20s` fades with `audio.set_mix`.
 
 ### Stage 5: Closed Multimodal QA & Critique Loop (Max 3 Rounds)
 
 Read [references/critique-and-qa.md](references/critique-and-qa.md) before scoring:
 1. Run `project.run_qa` with `auto_fix: true` first to catch structural, loudness, safe-zone, and GFX lint defects.
-2. Sync the Studio playhead (`preview.seek`) and inspect composited frames with `preview.capture_frame` at **at least 3–5 timestamps**: hook (`0.3–0.6s`), first B-roll/GFX reveal, mid-cut, caption+GFX overlap check, and climax/outro. (Remember: `preview.capture_frame` requires an active visual clip on `V1`/`V2` at `time_sec`.)
+2. Sync the Studio playhead (`preview.seek`) and inspect composited frames with `preview.capture_frame` at **at least 3–5 timestamps**: hook (`0.3–0.6s`), first B-roll/GFX reveal, mid-cut, caption+GFX overlap check, and climax/outro. (`preview.capture_frame` works for both `V1`/`V2` footage and programmatic `G1`/`T1` overlay-only timelines over the brand backdrop; headless Chromium is required to render `G1`/`T1` overlays.)
 3. Score the 6 axes (`hook`, `brand`, `motion`, `readability`, `pacing`, `polish`, 1–10). Any measured QA issue caps that axis at `<= 7`.
 4. For every axis `< 8`, write exact fix lines (`t=4.2s · track · problem -> exact tool call`), apply them, and re-verify (max **3 rounds**). If an edit worsens the frame, revert immediately with `project.undo`.
 
@@ -92,6 +93,6 @@ Read [references/critique-and-qa.md](references/critique-and-qa.md) before scori
 
 - Never leave dead air or black frames at `0.0s` (`start_sec <= 0.50s` required).
 - Never invent on-screen statistics or quotes; source every claim from the transcript, script document, or Brand Playbook.
-- Never bypass `gfx.lint_html` or emit non-deterministic JS (`Date.now`, `Math.random`, `setInterval`, `requestAnimationFrame`, external URLs) inside GFX HTML.
+- Never violate `lint_gfx_html` rules (`gfx.place` enforces linting server-side automatically; use `gfx.lint_html` to pre-verify or debug rejections) or emit non-deterministic JS (`Date.now`, `Math.random`, `setInterval`, `requestAnimationFrame`, external URLs) inside GFX HTML.
 - Always pair `project.lock_track` with `project.unlock_track`.
 - Always respect user-locked tracks and existing manual edits.

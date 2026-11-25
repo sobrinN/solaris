@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use solaris_core_ir::{
-    AgentRole, BrandPlaybook, MediaKind, SavedCodeAsset, SwarmRunState, SwarmRunStatus,
+    AgentRole, BrandPlaybook, LogLevel, MediaKind, SavedCodeAsset, SwarmRunState, SwarmRunStatus,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -19,7 +19,10 @@ use crate::backend::SolarisBackend;
 use crate::error::AgentError;
 use crate::openrouter::OpenRouterClient;
 use deterministic::{execute_deterministic_specialist, execute_deterministic_spine};
-use llm::{build_openrouter_director_plan, run_llm_worker_loop};
+use llm::{
+    build_openrouter_director_plan, emit_swarm_log, run_llm_worker_loop,
+    run_programmatic_scene_worker,
+};
 
 enum TrackLockBackend<'a> {
     Owned(Arc<dyn SolarisBackend>),
@@ -194,16 +197,367 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) const MAX_PARALLEL_SCENE_AGENTS: usize = 7;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct SceneSpec {
+    #[serde(default)]
+    pub scene_index: usize,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub start_sec: f64,
+    #[serde(default)]
+    pub duration_sec: f64,
+    #[serde(default)]
+    pub visual_brief: String,
+    #[serde(default)]
+    pub motion_cue: String,
+    #[serde(default)]
+    pub narration: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct DirectorPlan {
+    #[serde(default)]
     pub hook_summary: String,
+    #[serde(default)]
     pub target_duration_sec: f64,
+    #[serde(default)]
+    pub art_direction: String,
+    #[serde(default)]
     pub spine_notes: String,
+    #[serde(default)]
     pub broll_notes: String,
+    #[serde(default)]
     pub grade_notes: String,
+    #[serde(default)]
     pub captions_notes: String,
+    #[serde(default)]
     pub gfx_notes: String,
+    #[serde(default)]
     pub mix_notes: String,
+    #[serde(default)]
+    pub scenes: Vec<SceneSpec>,
+}
+
+/// Normalize a Director's structured `scenes` (or fallback `[start-end]` beats parsed from `gfx_notes`)
+/// into contiguous, gap-free scene specs spanning `0.0..target_duration_sec` for parallel micro-agent fan-out.
+pub(crate) fn resolve_programmatic_scenes(
+    plan: &DirectorPlan,
+    target_duration_sec: f64,
+) -> Vec<SceneSpec> {
+    let total_dur = if target_duration_sec.is_finite() {
+        target_duration_sec.clamp(4.0, 180.0)
+    } else {
+        24.0
+    };
+
+    let mut raw: Vec<SceneSpec> = plan
+        .scenes
+        .iter()
+        .filter(|s| {
+            s.start_sec.is_finite()
+                && s.duration_sec.is_finite()
+                && (!s.visual_brief.trim().is_empty() || !s.title.trim().is_empty())
+        })
+        .cloned()
+        .collect();
+
+    if raw.len() < 2 {
+        let parsed = parse_bracketed_scenes_from_notes(&plan.gfx_notes, &plan.captions_notes);
+        if parsed.len() >= 2 {
+            raw = parsed;
+        }
+    }
+
+    if raw.is_empty() {
+        let count = if total_dur <= 15.0 { 4 } else { 6 };
+        let beat_titles = [
+            "Opening Hook",
+            "Core Concept",
+            "Architecture Breakdown",
+            "How It Works Live",
+            "Key Advantages",
+            "Closing Takeaway",
+        ];
+        let seg = total_dur / (count as f64);
+        for idx in 0..count {
+            let start = (idx as f64) * seg;
+            let end = if idx + 1 == count {
+                total_dur
+            } else {
+                ((idx + 1) as f64) * seg
+            };
+            raw.push(SceneSpec {
+                scene_index: idx + 1,
+                title: beat_titles[idx % beat_titles.len()].to_string(),
+                start_sec: start,
+                duration_sec: (end - start).max(0.5),
+                visual_brief: format!(
+                    "Editorial motion graphic scene for '{}' — focus on {}",
+                    plan.hook_summary,
+                    beat_titles[idx % beat_titles.len()]
+                ),
+                motion_cue: "Crisp GSAP stagger reveal with subtle ambient depth motion"
+                    .to_string(),
+                narration: String::new(),
+            });
+        }
+    }
+
+    raw.sort_by(|a, b| a.start_sec.total_cmp(&b.start_sec));
+    if raw.len() > MAX_PARALLEL_SCENE_AGENTS {
+        // Fold trailing scenes (including the outro) into the 7th scene instead of dropping them.
+        let overflow = raw.split_off(MAX_PARALLEL_SCENE_AGENTS);
+        if let Some(last) = raw.last_mut() {
+            for extra in overflow {
+                if extra.duration_sec.is_finite() && extra.duration_sec > 0.0 {
+                    last.duration_sec =
+                        (last.duration_sec.max(0.0) + extra.duration_sec).min(total_dur);
+                }
+                let extra_brief = extra.visual_brief.trim();
+                let extra_title = extra.title.trim();
+                if !extra_brief.is_empty() {
+                    if !last.visual_brief.trim().is_empty() {
+                        last.visual_brief.push_str(" / ");
+                    }
+                    if !extra_title.is_empty() {
+                        last.visual_brief.push_str(extra_title);
+                        last.visual_brief.push_str(": ");
+                    }
+                    last.visual_brief.push_str(extra_brief);
+                } else if !extra_title.is_empty() {
+                    if !last.visual_brief.trim().is_empty() {
+                        last.visual_brief.push_str(" / ");
+                    }
+                    last.visual_brief.push_str(extra_title);
+                }
+                let extra_nar = extra.narration.trim();
+                if !extra_nar.is_empty() {
+                    if !last.narration.trim().is_empty() {
+                        last.narration.push(' ');
+                    }
+                    last.narration.push_str(extra_nar);
+                }
+            }
+        }
+    }
+
+    // Stitch contiguously so scene 1 starts at 0.0 and final scene reaches `total_dur` with zero gaps.
+    let n = raw.len();
+    let min_dur = (((total_dur / (n as f64)).min(1.2) * 100.0).floor() / 100.0).max(0.5);
+    let mut desired_durs: Vec<f64> = raw
+        .iter()
+        .map(|s| {
+            if s.duration_sec.is_finite() && s.duration_sec >= 0.5 {
+                s.duration_sec
+            } else {
+                total_dur / (n as f64)
+            }
+        })
+        .collect();
+    let desired_sum: f64 = desired_durs.iter().sum();
+    if desired_sum > 0.0 && (desired_sum > total_dur * 1.02 || desired_sum < total_dur * 0.85) {
+        let scale = total_dur / desired_sum;
+        for d in &mut desired_durs {
+            *d *= scale;
+        }
+    }
+
+    let mut normalized = Vec::with_capacity(n);
+    let mut cursor = 0.0_f64;
+    for (idx, mut scene) in raw.into_iter().enumerate() {
+        let remaining_after = (n - idx - 1) as f64;
+        let dur = if idx + 1 == n {
+            (total_dur - cursor).max(min_dur)
+        } else {
+            let max_allowed = (total_dur - cursor - min_dur * remaining_after).max(min_dur);
+            desired_durs[idx].clamp(min_dur, max_allowed)
+        };
+        let start_rounded = (cursor * 100.0).round() / 100.0;
+        let dur_rounded = if idx + 1 == n {
+            ((total_dur - start_rounded).max(min_dur) * 100.0).round() / 100.0
+        } else {
+            ((dur * 100.0).round() / 100.0).max(min_dur)
+        };
+        scene.scene_index = idx + 1;
+        scene.start_sec = start_rounded;
+        scene.duration_sec = dur_rounded;
+        if scene.title.trim().is_empty() {
+            scene.title = format!("Scene {}", idx + 1);
+        }
+        if scene.visual_brief.trim().is_empty() {
+            scene.visual_brief = scene.title.clone();
+        }
+        cursor = start_rounded + dur_rounded;
+        normalized.push(scene);
+    }
+    normalized
+}
+
+fn parse_bracketed_scenes_from_notes(gfx_notes: &str, captions_notes: &str) -> Vec<SceneSpec> {
+    let mut spans: Vec<(f64, f64, String)> = Vec::new();
+    let bytes = gfx_notes.as_bytes();
+    let mut i = 0usize;
+    let mut markers: Vec<(usize, usize, f64, f64)> = Vec::new();
+    while i < bytes.len() {
+        if bytes[i] == b'['
+            && let Some(close_rel) = gfx_notes[i + 1..].find(']')
+        {
+            let inner = &gfx_notes[i + 1..i + 1 + close_rel];
+            if let Some((a, b)) = inner.split_once('-').or_else(|| inner.split_once('–')) {
+                let s = a.trim().trim_end_matches('s').parse::<f64>().ok();
+                let e = b.trim().trim_end_matches('s').parse::<f64>().ok();
+                if let (Some(sv), Some(ev)) = (s, e)
+                    && sv.is_finite()
+                    && ev.is_finite()
+                    && ev > sv
+                {
+                    markers.push((i, i + 1 + close_rel + 1, sv, ev));
+                }
+            }
+            i += close_rel + 2;
+            continue;
+        }
+        i += 1;
+    }
+
+    for (idx, &(_, content_start, sv, ev)) in markers.iter().enumerate() {
+        let content_end = markers.get(idx + 1).map(|m| m.0).unwrap_or(gfx_notes.len());
+        let body = gfx_notes[content_start..content_end].trim().to_string();
+        if !body.is_empty() {
+            spans.push((sv, ev, body));
+        }
+    }
+
+    let caption_lines: Vec<&str> = captions_notes
+        .split('[')
+        .filter_map(|part| part.split_once(']').map(|(_, rest)| rest.trim()))
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    spans
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (sv, ev, body))| {
+            let title = body
+                .split(':')
+                .next()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && s.len() <= 42)
+                .unwrap_or("Scene")
+                .to_string();
+            SceneSpec {
+                scene_index: idx + 1,
+                title,
+                start_sec: sv,
+                duration_sec: ev - sv,
+                visual_brief: body,
+                motion_cue: "Smooth GSAP staggered choreography".to_string(),
+                narration: caption_lines.get(idx).copied().unwrap_or("").to_string(),
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn infer_target_duration_sec(prompt: &str, project: &solaris_core_ir::Project) -> f64 {
+    let lower = prompt.to_ascii_lowercase();
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '.'))
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    for (idx, tok) in tokens.iter().enumerate() {
+        let prev = idx.checked_sub(1).and_then(|p| tokens.get(p).copied());
+        let next = tokens.get(idx + 1).copied();
+
+        // Handle explicit second suffixes like "30sec", "45secs", "30seconds"
+        if let Some(num_str) = tok
+            .strip_suffix("seconds")
+            .or_else(|| tok.strip_suffix("second"))
+            .or_else(|| tok.strip_suffix("secs"))
+            .or_else(|| tok.strip_suffix("sec"))
+            && let Ok(val) = num_str.parse::<f64>()
+            && val.is_finite()
+            && (3.0..1000.0).contains(&val)
+        {
+            return val.clamp(4.0, 180.0);
+        }
+
+        // Handle short "30s" while rejecting 4-digit year decades ("2020s", "1980s") and
+        // decade style descriptors ("the 80s", "in 90s", "80s retro style", "90s cinema").
+        if let Some(num_str) = tok.strip_suffix('s')
+            && let Ok(val) = num_str.parse::<f64>()
+            && val.is_finite()
+            && (3.0..1000.0).contains(&val)
+        {
+            let is_decade_context = matches!(prev, Some("the" | "in"))
+                || matches!(
+                    next,
+                    Some(
+                        "retro"
+                            | "style"
+                            | "aesthetic"
+                            | "vibe"
+                            | "vibes"
+                            | "music"
+                            | "synth"
+                            | "cinema"
+                            | "film"
+                            | "look"
+                            | "era"
+                    )
+                );
+            if !is_decade_context {
+                return val.clamp(4.0, 180.0);
+            }
+        }
+
+        // Handle minute suffixes like "1m", "2m", "2min", "1minute"
+        if let Some(num_str) = tok
+            .strip_suffix("minutes")
+            .or_else(|| tok.strip_suffix("minute"))
+            .or_else(|| tok.strip_suffix("mins"))
+            .or_else(|| tok.strip_suffix("min"))
+            .or_else(|| tok.strip_suffix('m'))
+            && let Ok(val) = num_str.parse::<f64>()
+            && val.is_finite()
+            && val > 0.0
+            && val <= 60.0
+        {
+            return (val * 60.0).clamp(4.0, 180.0);
+        }
+
+        // Handle separated forms like "30 seconds", "30 sec", "1 minute"
+        if let Ok(val) = tok.parse::<f64>()
+            && val.is_finite()
+            && let Some(next_tok) = next
+        {
+            if matches!(next_tok, "s" | "sec" | "secs" | "second" | "seconds")
+                && (3.0..1000.0).contains(&val)
+            {
+                return val.clamp(4.0, 180.0);
+            }
+            if matches!(next_tok, "m" | "min" | "mins" | "minute" | "minutes")
+                && val > 0.0
+                && val <= 60.0
+            {
+                return (val * 60.0).clamp(4.0, 180.0);
+            }
+        }
+    }
+
+    let media_max = project
+        .media_pool
+        .iter()
+        .map(|m| m.intelligence.duration_sec)
+        .fold(0.0_f64, f64::max);
+    if media_max > 1.0 {
+        media_max.clamp(6.0, 60.0)
+    } else {
+        24.0
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -375,6 +729,37 @@ where
         return finish_cancelled(status, &ops_counter, &on_status);
     }
 
+    let has_visual_media = project
+        .media_pool
+        .iter()
+        .any(|m| matches!(m.kind, MediaKind::Video | MediaKind::Image));
+    let has_audio_media = project.media_pool.iter().any(|m| {
+        m.kind == MediaKind::Audio || (m.kind == MediaKind::Video && m.intelligence.has_audio)
+    });
+    let programmatic_visuals = !has_visual_media;
+    let inferred_duration_sec = infer_target_duration_sec(&req.prompt, &project);
+
+    emit_swarm_log(
+        backend.as_ref(),
+        LogLevel::Info,
+        "swarm",
+        &project_id,
+        &run_id,
+        Some("director-01"),
+        format!(
+            "Swarm started ({}, media={}, target={:.1}s, openrouter={})",
+            if programmatic_visuals {
+                "programmatic zero-asset mode"
+            } else {
+                "footage edit mode"
+            },
+            project.media_pool.len(),
+            inferred_duration_sec,
+            use_openrouter
+        ),
+        Some(format!("prompt: {}", req.prompt)),
+    );
+
     let (
         director_model,
         director_fallbacks,
@@ -384,6 +769,9 @@ where
         worker_fallbacks,
         supports_native_video,
         supports_native_audio,
+        supports_json_mode,
+        worker_supports_reasoning,
+        director_supports_reasoning,
     ) = if use_openrouter {
         let dir_rec = advisor
             .recommend_with_cancel(ModelRoleKind::DirectorMultimodal, Some(&cancel))
@@ -401,9 +789,25 @@ where
             .model_override
             .clone()
             .unwrap_or_else(|| dir_rec.primary.clone());
+        let primary_wrk = req
+            .model_override
+            .clone()
+            .unwrap_or_else(|| wrk_rec.primary.clone());
         let dir_inputs = advisor.model_input_modalities(&primary_dir).await;
         let native_audio = dir_inputs.iter().any(|m| m == "audio");
         let native_video = dir_inputs.iter().any(|m| m == "video") && native_audio;
+        let json_mode = advisor
+            .model_supports_parameter(&primary_dir, "response_format")
+            .await
+            || advisor
+                .model_supports_parameter(&primary_dir, "structured_outputs")
+                .await;
+        let wrk_reasoning = advisor
+            .model_supports_parameter(&primary_wrk, "reasoning")
+            .await;
+        let dir_reasoning = advisor
+            .model_supports_parameter(&primary_dir, "reasoning")
+            .await;
         let video_fbs = if native_video {
             advisor
                 .filter_video_capable_models(&dir_rec.fallbacks)
@@ -423,10 +827,13 @@ where
             dir_rec.fallbacks,
             video_fbs,
             audio_fbs,
-            req.model_override.clone().unwrap_or(wrk_rec.primary),
+            primary_wrk,
             wrk_rec.fallbacks,
             native_video,
             native_audio,
+            json_mode,
+            wrk_reasoning,
+            dir_reasoning,
         )
     } else {
         (
@@ -438,6 +845,9 @@ where
             Vec::new(),
             false,
             false,
+            false,
+            false,
+            false,
         )
     };
 
@@ -446,7 +856,11 @@ where
     let mut openrouter_unrecoverable = !use_openrouter;
 
     // Stage 1b: Director Plan
-    status.phase_label = "Director inspecting media intelligence & brand playbook".to_string();
+    status.phase_label = if programmatic_visuals {
+        "Director designing programmatic scene storyboard & script".to_string()
+    } else {
+        "Director inspecting media intelligence & brand playbook".to_string()
+    };
     status.updated_at = Utc::now();
     on_status(status.clone());
 
@@ -460,6 +874,11 @@ where
             &audio_director_fallbacks,
             supports_native_video,
             supports_native_audio,
+            supports_json_mode,
+            director_supports_reasoning,
+            programmatic_visuals,
+            inferred_duration_sec,
+            &run_id,
             &project,
             &brand,
             &assets,
@@ -479,10 +898,30 @@ where
                 tracing::warn!(
                     "OpenRouter director failed ({err}); falling back to deterministic plan"
                 );
+                emit_swarm_log(
+                    backend.as_ref(),
+                    LogLevel::Warn,
+                    "swarm",
+                    &project_id,
+                    &run_id,
+                    Some("director-01"),
+                    format!("Director failed; falling back to local plan: {err}"),
+                    None,
+                );
                 status.used_local_fallback = true;
                 build_deterministic_plan(&project, &brand, &req.prompt)
             }
             Err(err) => {
+                emit_swarm_log(
+                    backend.as_ref(),
+                    LogLevel::Error,
+                    "swarm",
+                    &project_id,
+                    &run_id,
+                    Some("director-01"),
+                    format!("Swarm aborted during Director planning: {err}"),
+                    None,
+                );
                 return finish_failed(status, err.to_string(), &ops_counter, &on_status);
             }
         }
@@ -494,71 +933,313 @@ where
         return finish_cancelled(status, &ops_counter, &on_status);
     }
 
-    // Stage 2: Spine (razor-01 on v1 + a1)
-    status.state = SwarmRunState::ExecutingSpine;
-    status.phase_label = "Razor cutting A-Roll & voice spine (V1/A1)".to_string();
-    status.active_roles = vec![AgentRole::Razor];
-    status.updated_at = Utc::now();
-    on_status(status.clone());
+    let max_turns = req.max_turns_per_worker.unwrap_or(6).clamp(1, 14);
+    let mut specialist_errors: Vec<String> = Vec::new();
+    let mut wave1_grade_done = false;
 
-    let max_turns = req.max_turns_per_worker.unwrap_or(6).clamp(1, 10);
+    // Wave 1 (Footage/Audio Mode): Run razor-01 (V1/A1) IN PARALLEL with grade-01 (FX).
+    // mix-01 (A2) runs in Wave 2 after razor-01 commits the V1/A1 spine and releases its locks
+    // so mix-01 sees the real spine duration and can normalize speech LUFS without lock collisions.
+    if has_visual_media || has_audio_media {
+        let mut wave1_roles = vec![AgentRole::Razor];
+        if has_visual_media {
+            wave1_roles.push(AgentRole::Grade);
+            wave1_grade_done = true;
+        }
+        status.state = SwarmRunState::ExecutingSpine;
+        status.phase_label = if has_visual_media {
+            "Wave 1: Razor (V1/A1) & Grade (FX) editing in parallel".to_string()
+        } else {
+            "Wave 1: Razor (A1) assembling voiceover spine".to_string()
+        };
+        status.active_roles = wave1_roles;
+        status.updated_at = Utc::now();
+        on_status(status.clone());
 
-    let spine_res = run_spine_stage(
-        &backend,
-        &openrouter,
-        use_openrouter && !openrouter_unrecoverable,
-        req.allow_local_fallback,
-        &worker_model,
-        &worker_fallbacks,
-        &project,
-        &brand,
-        &assets,
-        &plan,
-        max_turns,
-        &cancel,
-        &ops_counter,
-    )
-    .await;
-
-    match spine_res {
-        Ok((used_fallback, fatal)) => {
-            if used_fallback {
-                status.used_local_fallback = true;
+        let use_llm_wave1 = use_openrouter && !openrouter_unrecoverable;
+        let grade_cancel = cancel.child_token();
+        let spine_grade_cancel = grade_cancel.clone();
+        let (spine_res, r_grade_w1) = tokio::join!(
+            async {
+                let res = run_spine_stage(
+                    &backend,
+                    &openrouter,
+                    use_llm_wave1,
+                    req.allow_local_fallback,
+                    &worker_model,
+                    &worker_fallbacks,
+                    worker_supports_reasoning,
+                    &run_id,
+                    programmatic_visuals,
+                    &project,
+                    &brand,
+                    &assets,
+                    &plan,
+                    max_turns,
+                    &cancel,
+                    &ops_counter,
+                )
+                .await;
+                if res.is_err() {
+                    spine_grade_cancel.cancel();
+                }
+                res
+            },
+            async {
+                if has_visual_media {
+                    run_specialist_with_lock(
+                        backend.clone(),
+                        openrouter.clone(),
+                        use_llm_wave1,
+                        req.allow_local_fallback,
+                        worker_model.clone(),
+                        worker_fallbacks.clone(),
+                        worker_supports_reasoning,
+                        run_id.clone(),
+                        programmatic_visuals,
+                        req.prompt.clone(),
+                        project.clone(),
+                        brand.clone(),
+                        assets.clone(),
+                        plan.clone(),
+                        "fx",
+                        "grade-01",
+                        AgentRole::Grade,
+                        max_turns,
+                        grade_cancel,
+                        ops_counter.clone(),
+                    )
+                    .await
+                } else {
+                    (false, false, None)
+                }
             }
-            if fatal {
-                openrouter_unrecoverable = true;
+        );
+
+        let (fb, fatal, err) = r_grade_w1;
+        if fb {
+            status.used_local_fallback = true;
+        }
+        if fatal {
+            openrouter_unrecoverable = true;
+        }
+        if let Some(e) = err {
+            specialist_errors.push(e);
+        }
+
+        match spine_res {
+            Ok((used_fallback, fatal)) => {
+                if used_fallback {
+                    status.used_local_fallback = true;
+                }
+                if fatal {
+                    openrouter_unrecoverable = true;
+                }
+            }
+            Err(AgentError::Cancelled) => {
+                return finish_cancelled(status, &ops_counter, &on_status);
+            }
+            Err(err) => {
+                emit_swarm_log(
+                    backend.as_ref(),
+                    LogLevel::Error,
+                    "swarm",
+                    &project_id,
+                    &run_id,
+                    Some("razor-01"),
+                    format!("Spine stage failed: {err}"),
+                    None,
+                );
+                return finish_failed(status, err.to_string(), &ops_counter, &on_status);
             }
         }
-        Err(AgentError::Cancelled) => {
-            return finish_cancelled(status, &ops_counter, &on_status);
-        }
-        Err(err) => {
-            return finish_failed(status, err.to_string(), &ops_counter, &on_status);
-        }
+    } else {
+        emit_swarm_log(
+            backend.as_ref(),
+            LogLevel::Info,
+            "swarm",
+            &project_id,
+            &run_id,
+            Some("director-01"),
+            "Programmatic zero-asset mode: skipping V1/A1 media spine and fanning out parallel G1 scene micro-agents + T1 captions",
+            None,
+        );
     }
 
     if cancel.is_cancelled() {
         return finish_cancelled(status, &ops_counter, &on_status);
     }
 
-    // Stage 3: Parallel 5-Specialist Fan-Out
+    // Stage 3 / Wave 2: Parallel Specialist & Scene Micro-Agent Fan-Out
+    let programmatic_scenes = if programmatic_visuals {
+        resolve_programmatic_scenes(&plan, plan.target_duration_sec)
+    } else {
+        Vec::new()
+    };
+
+    let caps_plan = if programmatic_visuals && !programmatic_scenes.is_empty() {
+        let mut p = plan.clone();
+        let beats = programmatic_scenes
+            .iter()
+            .map(|s| {
+                let text = if !s.narration.trim().is_empty() {
+                    s.narration.trim()
+                } else {
+                    s.title.trim()
+                };
+                format!(
+                    "[{:.2}-{:.2}s] {}: {}",
+                    s.start_sec,
+                    s.start_sec + s.duration_sec,
+                    s.title.trim(),
+                    text
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        p.captions_notes = if p.captions_notes.trim().is_empty() {
+            format!("Align T1 captions 1:1 with normalized G1 scene windows: {beats}")
+        } else {
+            format!(
+                "{} | Synchronized G1 scene windows (match these exact timings): {beats}",
+                p.captions_notes.trim()
+            )
+        };
+        p
+    } else {
+        plan.clone()
+    };
+
+    let mut active_roles = Vec::new();
+    if has_visual_media {
+        active_roles.push(AgentRole::BRoll);
+        if !wave1_grade_done {
+            active_roles.push(AgentRole::Grade);
+        }
+    }
+    active_roles.push(AgentRole::Caps);
+    active_roles.push(AgentRole::Gfx);
+    if has_audio_media {
+        active_roles.push(AgentRole::Mix);
+    }
+
     status.state = SwarmRunState::ExecutingSpecialists;
-    status.phase_label = "Parallel specialists editing V2, FX, T1, G1 & A2".to_string();
-    status.active_roles = vec![
-        AgentRole::BRoll,
-        AgentRole::Grade,
-        AgentRole::Caps,
-        AgentRole::Gfx,
-        AgentRole::Mix,
-    ];
+    status.phase_label = if programmatic_visuals {
+        format!(
+            "Fanning out {} parallel scene micro-agents (G1) & kinetic captions (T1)",
+            programmatic_scenes.len()
+        )
+    } else if has_audio_media {
+        "Wave 2: Parallel specialists editing V2, T1, G1 & A2".to_string()
+    } else {
+        "Wave 2: Parallel specialists editing V2, T1 & G1".to_string()
+    };
+    status.active_roles = active_roles;
     status.ops_committed = ops_counter.load(Ordering::Relaxed);
     status.updated_at = Utc::now();
     on_status(status.clone());
 
     let refreshed = backend.get_project(&project_id).await.unwrap_or(project);
     let use_llm_workers = use_openrouter && !openrouter_unrecoverable;
+    let gfx_turns = if programmatic_visuals {
+        max_turns.max(12)
+    } else {
+        max_turns
+    };
+    let caps_turns = if programmatic_visuals {
+        max_turns.max(6)
+    } else {
+        max_turns
+    };
+
+    let mut active_specialist_count = 0usize;
+    if has_visual_media {
+        active_specialist_count += 2; // BRoll + Grade
+    }
+    active_specialist_count += 2; // Caps + Gfx
+    if has_audio_media {
+        active_specialist_count += 1; // Mix
+    }
+
+    let gfx_worker_fallbacks: Vec<String> = if programmatic_visuals {
+        let mut list = Vec::new();
+        if director_model != worker_model {
+            list.push(director_model.clone());
+        }
+        for fb in &worker_fallbacks {
+            if fb != &worker_model && !list.contains(fb) {
+                list.push(fb.clone());
+            }
+        }
+        for fb in &director_fallbacks {
+            if fb != &worker_model && !list.contains(fb) {
+                list.push(fb.clone());
+            }
+        }
+        list
+    } else {
+        worker_fallbacks.clone()
+    };
 
     let (r_broll, r_grade, r_caps, r_gfx, r_mix) = tokio::join!(
+        async {
+            if has_visual_media {
+                run_specialist_with_lock(
+                    backend.clone(),
+                    openrouter.clone(),
+                    use_llm_workers,
+                    req.allow_local_fallback,
+                    worker_model.clone(),
+                    worker_fallbacks.clone(),
+                    worker_supports_reasoning,
+                    run_id.clone(),
+                    programmatic_visuals,
+                    req.prompt.clone(),
+                    refreshed.clone(),
+                    brand.clone(),
+                    assets.clone(),
+                    plan.clone(),
+                    "v2",
+                    "broll-01",
+                    AgentRole::BRoll,
+                    max_turns,
+                    cancel.clone(),
+                    ops_counter.clone(),
+                )
+                .await
+            } else {
+                (false, false, None)
+            }
+        },
+        async {
+            if has_visual_media && !wave1_grade_done {
+                run_specialist_with_lock(
+                    backend.clone(),
+                    openrouter.clone(),
+                    use_llm_workers,
+                    req.allow_local_fallback,
+                    worker_model.clone(),
+                    worker_fallbacks.clone(),
+                    worker_supports_reasoning,
+                    run_id.clone(),
+                    programmatic_visuals,
+                    req.prompt.clone(),
+                    refreshed.clone(),
+                    brand.clone(),
+                    assets.clone(),
+                    plan.clone(),
+                    "fx",
+                    "grade-01",
+                    AgentRole::Grade,
+                    max_turns,
+                    cancel.clone(),
+                    ops_counter.clone(),
+                )
+                .await
+            } else {
+                (false, false, None)
+            }
+        },
         run_specialist_with_lock(
             backend.clone(),
             openrouter.clone(),
@@ -566,89 +1247,100 @@ where
             req.allow_local_fallback,
             worker_model.clone(),
             worker_fallbacks.clone(),
+            worker_supports_reasoning,
+            run_id.clone(),
+            programmatic_visuals,
+            req.prompt.clone(),
             refreshed.clone(),
             brand.clone(),
             assets.clone(),
-            plan.clone(),
-            "v2",
-            "broll-01",
-            AgentRole::BRoll,
-            max_turns,
-            cancel.clone(),
-            ops_counter.clone(),
-        ),
-        run_specialist_with_lock(
-            backend.clone(),
-            openrouter.clone(),
-            use_llm_workers,
-            req.allow_local_fallback,
-            worker_model.clone(),
-            worker_fallbacks.clone(),
-            refreshed.clone(),
-            brand.clone(),
-            assets.clone(),
-            plan.clone(),
-            "fx",
-            "grade-01",
-            AgentRole::Grade,
-            max_turns,
-            cancel.clone(),
-            ops_counter.clone(),
-        ),
-        run_specialist_with_lock(
-            backend.clone(),
-            openrouter.clone(),
-            use_llm_workers,
-            req.allow_local_fallback,
-            worker_model.clone(),
-            worker_fallbacks.clone(),
-            refreshed.clone(),
-            brand.clone(),
-            assets.clone(),
-            plan.clone(),
+            caps_plan,
             "t1",
             "caps-01",
             AgentRole::Caps,
-            max_turns,
+            caps_turns,
             cancel.clone(),
             ops_counter.clone(),
         ),
-        run_specialist_with_lock(
-            backend.clone(),
-            openrouter.clone(),
-            use_llm_workers,
-            req.allow_local_fallback,
-            worker_model.clone(),
-            worker_fallbacks.clone(),
-            refreshed.clone(),
-            brand.clone(),
-            assets.clone(),
-            plan.clone(),
-            "g1",
-            "gfx-01",
-            AgentRole::Gfx,
-            max_turns,
-            cancel.clone(),
-            ops_counter.clone(),
-        ),
-        run_specialist_with_lock(
-            backend.clone(),
-            openrouter.clone(),
-            use_llm_workers,
-            req.allow_local_fallback,
-            worker_model.clone(),
-            worker_fallbacks.clone(),
-            refreshed,
-            brand,
-            assets,
-            plan.clone(),
-            "a2",
-            "mix-01",
-            AgentRole::Mix,
-            max_turns,
-            cancel.clone(),
-            ops_counter.clone(),
-        ),
+        async {
+            if programmatic_visuals {
+                run_programmatic_gfx_scene_fanout(
+                    backend.clone(),
+                    openrouter.clone(),
+                    use_llm_workers,
+                    req.allow_local_fallback,
+                    worker_model.clone(),
+                    gfx_worker_fallbacks.clone(),
+                    worker_supports_reasoning,
+                    director_model.clone(),
+                    director_fallbacks.clone(),
+                    director_supports_reasoning,
+                    run_id.clone(),
+                    req.prompt.clone(),
+                    refreshed.clone(),
+                    brand.clone(),
+                    assets.clone(),
+                    plan.clone(),
+                    programmatic_scenes.clone(),
+                    cancel.clone(),
+                    ops_counter.clone(),
+                )
+                .await
+            } else {
+                run_specialist_with_lock(
+                    backend.clone(),
+                    openrouter.clone(),
+                    use_llm_workers,
+                    req.allow_local_fallback,
+                    worker_model.clone(),
+                    gfx_worker_fallbacks.clone(),
+                    worker_supports_reasoning,
+                    run_id.clone(),
+                    programmatic_visuals,
+                    req.prompt.clone(),
+                    refreshed.clone(),
+                    brand.clone(),
+                    assets.clone(),
+                    plan.clone(),
+                    "g1",
+                    "gfx-01",
+                    AgentRole::Gfx,
+                    gfx_turns,
+                    cancel.clone(),
+                    ops_counter.clone(),
+                )
+                .await
+            }
+        },
+        async {
+            if has_audio_media {
+                run_specialist_with_lock(
+                    backend.clone(),
+                    openrouter.clone(),
+                    use_llm_workers,
+                    req.allow_local_fallback,
+                    worker_model.clone(),
+                    worker_fallbacks.clone(),
+                    worker_supports_reasoning,
+                    run_id.clone(),
+                    programmatic_visuals,
+                    req.prompt.clone(),
+                    refreshed.clone(),
+                    brand.clone(),
+                    assets.clone(),
+                    plan.clone(),
+                    "a2",
+                    "mix-01",
+                    AgentRole::Mix,
+                    max_turns,
+                    cancel.clone(),
+                    ops_counter.clone(),
+                )
+                .await
+            } else {
+                (false, false, None)
+            }
+        },
     );
 
     if cancel.is_cancelled() {
@@ -662,21 +1354,100 @@ where
     if specialist_results.iter().any(|(_, fatal, _)| *fatal) {
         openrouter_unrecoverable = true;
     }
-    let specialist_errors: Vec<String> = specialist_results
-        .into_iter()
-        .filter_map(|(_, _, err)| err)
-        .collect();
+    specialist_errors.extend(specialist_results.into_iter().filter_map(|(_, _, err)| err));
 
-    if !req.allow_local_fallback && specialist_errors.len() == 5 {
-        return finish_failed(
-            status,
-            format!(
-                "All specialists failed without fallback: {}",
-                specialist_errors.join("; ")
-            ),
-            &ops_counter,
-            &on_status,
+    // Programmatic zero-asset safety net: if G1 still has 0 clips after the parallel fan-out,
+    // run a targeted Director-model recovery pass on G1 before entering QA.
+    if programmatic_visuals
+        && use_llm_workers
+        && !openrouter_unrecoverable
+        && !cancel.is_cancelled()
+        && let Ok(post_pass) = backend.get_project(&project_id).await
+    {
+        let g1_empty = post_pass
+            .tracks
+            .iter()
+            .find(|t| t.id == "g1")
+            .is_none_or(|t| t.clips.is_empty());
+        if g1_empty {
+            emit_swarm_log(
+                backend.as_ref(),
+                LogLevel::Warn,
+                "swarm",
+                &project_id,
+                &run_id,
+                Some("director-01"),
+                format!(
+                    "G1 is empty after scene fan-out; retrying programmatic GFX on {director_model}"
+                ),
+                None,
+            );
+            status.phase_label =
+                "Recovering programmatic G1 scenes with Director model".to_string();
+            status.active_roles = vec![AgentRole::Gfx];
+            status.updated_at = Utc::now();
+            on_status(status.clone());
+
+            let (rec_fb, rec_fatal, rec_err) = run_specialist_with_lock(
+                backend.clone(),
+                openrouter.clone(),
+                true,
+                req.allow_local_fallback,
+                director_model.clone(),
+                director_fallbacks.clone(),
+                director_supports_reasoning,
+                run_id.clone(),
+                true,
+                req.prompt.clone(),
+                post_pass,
+                brand.clone(),
+                assets.clone(),
+                plan.clone(),
+                "g1",
+                "gfx-01",
+                AgentRole::Gfx,
+                gfx_turns,
+                cancel.clone(),
+                ops_counter.clone(),
+            )
+            .await;
+            if rec_fb {
+                status.used_local_fallback = true;
+            }
+            if rec_fatal {
+                openrouter_unrecoverable = true;
+            }
+            let g1_now_populated = backend
+                .get_project(&project_id)
+                .await
+                .ok()
+                .and_then(|p| p.tracks.into_iter().find(|t| t.id == "g1"))
+                .is_some_and(|t| !t.clips.is_empty());
+            if g1_now_populated {
+                specialist_errors.retain(|e| !e.starts_with("gfx-"));
+            } else if let Some(err) = rec_err {
+                specialist_errors.retain(|e| !e.starts_with("gfx-"));
+                specialist_errors.push(err);
+            }
+        }
+    }
+
+    if !req.allow_local_fallback && specialist_errors.len() >= active_specialist_count {
+        let msg = format!(
+            "All specialists failed without fallback: {}",
+            specialist_errors.join("; ")
         );
+        emit_swarm_log(
+            backend.as_ref(),
+            LogLevel::Error,
+            "swarm",
+            &project_id,
+            &run_id,
+            Some("director-01"),
+            msg.clone(),
+            None,
+        );
+        return finish_failed(status, msg, &ops_counter, &on_status);
     }
 
     if !req.skip_qa && !cancel.is_cancelled() {
@@ -694,7 +1465,7 @@ where
             None
         };
         let vision = Some((director_model.as_str(), director_fallbacks.as_slice()));
-        let qa = run_qa_pass(
+        let qa = qa::run_qa_pass_with_options(
             backend.as_ref(),
             qa_client,
             vision,
@@ -702,6 +1473,10 @@ where
             true,
             &cancel,
             Some(&ops_counter),
+            qa::QaPassOptions {
+                specialist_errors: &specialist_errors,
+                director_supports_reasoning,
+            },
         )
         .await;
         status.qa_report = Some(qa);
@@ -711,13 +1486,27 @@ where
         return finish_cancelled(status, &ops_counter, &on_status);
     }
 
+    let has_issues =
+        !specialist_errors.is_empty() || status.qa_report.as_ref().is_some_and(|q| !q.passed);
     status.state = SwarmRunState::Completed;
     status.active_roles = Vec::new();
     status.ops_committed = ops_counter.load(Ordering::Relaxed);
     status.phase_label = if let Some(ref qa) = status.qa_report {
+        if has_issues {
+            format!(
+                "Swarm finished with issues ({} ops committed · QA {}/100)",
+                status.ops_committed, qa.score
+            )
+        } else {
+            format!(
+                "Swarm complete ({} ops committed · QA {}/100)",
+                status.ops_committed, qa.score
+            )
+        }
+    } else if !specialist_errors.is_empty() {
         format!(
-            "Swarm complete ({} ops committed · QA {}/100)",
-            status.ops_committed, qa.score
+            "Swarm finished with issues ({} ops committed)",
+            status.ops_committed
         )
     } else {
         format!("Swarm complete ({} ops committed)", status.ops_committed)
@@ -727,6 +1516,20 @@ where
         status.error = Some(specialist_errors.join("; "));
     }
     status.updated_at = Utc::now();
+    emit_swarm_log(
+        backend.as_ref(),
+        if specialist_errors.is_empty() {
+            LogLevel::Info
+        } else {
+            LogLevel::Warn
+        },
+        "swarm",
+        &project_id,
+        &run_id,
+        Some("director-01"),
+        status.phase_label.clone(),
+        status.error.clone(),
+    );
     on_status(status.clone());
     status
 }
@@ -766,27 +1569,46 @@ pub(crate) fn build_deterministic_plan(
     brand: &BrandPlaybook,
     prompt: &str,
 ) -> DirectorPlan {
-    let max_dur = project
+    let target_dur = infer_target_duration_sec(prompt, project);
+    let has_visual = project
         .media_pool
         .iter()
-        .map(|m| m.intelligence.duration_sec)
-        .fold(0.0_f64, f64::max)
-        .clamp(6.0, 30.0);
+        .any(|m| matches!(m.kind, MediaKind::Video | MediaKind::Image));
     DirectorPlan {
         hook_summary: format!(
             "{} ({})",
             prompt.chars().take(72).collect::<String>(),
             brand.name
         ),
-        target_duration_sec: max_dur,
-        spine_notes:
+        target_duration_sec: target_dur,
+        art_direction: format!(
+            "Solar Horizon editorial motion system using {} backdrop, high-contrast {} typography, and crisp {} accent diagrams.",
+            brand.tokens.bg, brand.tokens.ink, brand.tokens.accent
+        ),
+        spine_notes: if has_visual {
             "Assemble A-Roll/Voice on V1/A1, cut >0.25s silences with 0.12s pad, 1.08x hook zoom."
-                .to_string(),
+                .to_string()
+        } else {
+            "Zero-asset programmatic mode: full-canvas HTML/GSAP scenes on G1 and kinetic script captions on T1.".to_string()
+        },
         broll_notes: "Place B-Roll/Image inserts on V2 with ken_burns on stills.".to_string(),
         grade_notes: "Recover Log footage to Rec.709 and blend brand LUT if present.".to_string(),
-        captions_notes: "Generate 2-4 word social safe-zone captions on T1.".to_string(),
-        gfx_notes: "Place Brand-tokenized title/stat cards on G1.".to_string(),
+        captions_notes: if has_visual {
+            "Generate 2-4 word social safe-zone captions on T1.".to_string()
+        } else {
+            format!(
+                "Place synchronized kinetic script captions on T1 covering 0.0s..{target_dur:.1}s via captions.place_script."
+            )
+        },
+        gfx_notes: if has_visual {
+            "Place Brand-tokenized title/stat cards on G1.".to_string()
+        } else {
+            format!(
+                "Program 6 full-canvas responsive HTML/CSS/SVG/GSAP explainer scenes on G1 covering 0.0s..{target_dur:.1}s with zero gaps."
+            )
+        },
         mix_notes: "Normalize speech to -14 LUFS and enable -18 dB ducking on A2.".to_string(),
+        scenes: Vec::new(),
     }
 }
 
@@ -798,6 +1620,9 @@ async fn run_spine_stage(
     allow_local_fallback: bool,
     model: &str,
     fallbacks: &[String],
+    low_reasoning: bool,
+    run_id: &str,
+    programmatic_visuals: bool,
     project: &solaris_core_ir::Project,
     brand: &BrandPlaybook,
     assets: &[SavedCodeAsset],
@@ -845,6 +1670,10 @@ async fn run_spine_stage(
             openrouter,
             model,
             fallbacks,
+            low_reasoning,
+            run_id,
+            programmatic_visuals,
+            plan.target_duration_sec,
             project,
             brand,
             assets,
@@ -892,6 +1721,297 @@ async fn run_spine_stage(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn run_programmatic_gfx_scene_fanout(
+    backend: Arc<dyn SolarisBackend>,
+    openrouter: OpenRouterClient,
+    use_llm: bool,
+    allow_local_fallback: bool,
+    worker_model: String,
+    worker_fallbacks: Vec<String>,
+    worker_supports_reasoning: bool,
+    director_model: String,
+    director_fallbacks: Vec<String>,
+    director_supports_reasoning: bool,
+    run_id: String,
+    prompt: String,
+    project: solaris_core_ir::Project,
+    brand: BrandPlaybook,
+    assets: Vec<SavedCodeAsset>,
+    plan: DirectorPlan,
+    scenes: Vec<SceneSpec>,
+    cancel: CancellationToken,
+    ops_counter: Arc<AtomicU32>,
+) -> (bool, bool, Option<String>) {
+    if cancel.is_cancelled() {
+        return (false, false, None);
+    }
+    let fresh_project = backend
+        .get_project(&project.id)
+        .await
+        .unwrap_or_else(|_| project.clone());
+    if fresh_project
+        .tracks
+        .iter()
+        .find(|t| t.id == "g1")
+        .is_some_and(|t| t.locked)
+    {
+        return (
+            false,
+            false,
+            Some("gfx-fanout: skipped (track g1 is locked)".to_string()),
+        );
+    }
+    if !use_llm {
+        let lock_guard = match TrackLockGuard::acquire(
+            backend.clone(),
+            &project.id,
+            &["g1"],
+            "gfx-01",
+            AgentRole::Gfx,
+        )
+        .await
+        {
+            Ok(g) => g,
+            Err(err) => {
+                return (false, false, Some(format!("gfx-fanout: skipped ({err})")));
+            }
+        };
+        let _ = execute_deterministic_specialist(
+            &backend,
+            &fresh_project,
+            &brand,
+            &assets,
+            &plan,
+            &prompt,
+            AgentRole::Gfx,
+            &cancel,
+            &ops_counter,
+        )
+        .await;
+        lock_guard.release().await;
+        return (true, false, None);
+    }
+
+    const GFX_SWARM_LOCK_OWNER: &str = "gfx-swarm";
+    let lock_guard = match TrackLockGuard::acquire(
+        backend.clone(),
+        &project.id,
+        &["g1"],
+        GFX_SWARM_LOCK_OWNER,
+        AgentRole::Gfx,
+    )
+    .await
+    {
+        Ok(g) => g,
+        Err(err) => {
+            return (false, false, Some(format!("gfx-fanout: skipped ({err})")));
+        }
+    };
+
+    let run_tag: String = uuid::Uuid::new_v4().simple().to_string()[..6].to_string();
+    let total_scenes = scenes.len();
+    let art_direction = if plan.art_direction.trim().is_empty() {
+        format!(
+            "Cohesive Solar Horizon studio motion system on {} dark canvas with {} ink, {} primary accents, {} secondary glow, subtle architectural grid backdrop, and smooth staggered GSAP choreography.",
+            brand.tokens.bg, brand.tokens.ink, brand.tokens.accent, brand.tokens.accent_secondary
+        )
+    } else {
+        plan.art_direction.clone()
+    };
+
+    emit_swarm_log(
+        backend.as_ref(),
+        LogLevel::Info,
+        "swarm",
+        &project.id,
+        &run_id,
+        Some("director-01"),
+        format!(
+            "Orchestrator spawning {total_scenes} parallel scene micro-agents on G1 (gfx-01..gfx-{total_scenes:02})"
+        ),
+        None,
+    );
+
+    let mut join_set = tokio::task::JoinSet::new();
+    for scene in scenes {
+        let b = backend.clone();
+        let or = openrouter.clone();
+        let wm = worker_model.clone();
+        let wfb = worker_fallbacks.clone();
+        let dm = director_model.clone();
+        let dfb = director_fallbacks.clone();
+        let rid = run_id.clone();
+        let rtag = run_tag.clone();
+        let pr = prompt.clone();
+        let proj = fresh_project.clone();
+        let br = brand.clone();
+        let ad = art_direction.clone();
+        let c = cancel.clone();
+        let ops = ops_counter.clone();
+        let agent_id = format!("gfx-{:02}", scene.scene_index);
+        let save_asset = scene.scene_index == 1;
+
+        join_set.spawn(async move {
+            let first = run_programmatic_scene_worker(
+                &b,
+                &or,
+                &wm,
+                &wfb,
+                worker_supports_reasoning,
+                &rid,
+                &rtag,
+                &proj,
+                &br,
+                &ad,
+                &pr,
+                &scene,
+                total_scenes,
+                save_asset,
+                &agent_id,
+                GFX_SWARM_LOCK_OWNER,
+                &c,
+                &ops,
+            )
+            .await;
+
+            match first {
+                Ok(_) | Err(AgentError::Cancelled) => (agent_id, false, None),
+                Err(err) => {
+                    let fatal = is_unrecoverable_openrouter_error(&err);
+                    // Per-scene self-healing: retry ONLY this failed scene once on director_model
+                    if !fatal && dm != wm && !c.is_cancelled() {
+                        emit_swarm_log(
+                            b.as_ref(),
+                            LogLevel::Warn,
+                            "swarm",
+                            &proj.id,
+                            &rid,
+                            Some(&agent_id),
+                            format!(
+                                "{agent_id} failed on {wm}; retrying Scene {} on {dm}",
+                                scene.scene_index
+                            ),
+                            Some(err.to_string()),
+                        );
+                        match run_programmatic_scene_worker(
+                            &b,
+                            &or,
+                            &dm,
+                            &dfb,
+                            director_supports_reasoning,
+                            &rid,
+                            &rtag,
+                            &proj,
+                            &br,
+                            &ad,
+                            &pr,
+                            &scene,
+                            total_scenes,
+                            save_asset,
+                            &agent_id,
+                            GFX_SWARM_LOCK_OWNER,
+                            &c,
+                            &ops,
+                        )
+                        .await
+                        {
+                            Ok(_) | Err(AgentError::Cancelled) => return (agent_id, false, None),
+                            Err(retry_err) => {
+                                return (
+                                    agent_id,
+                                    is_unrecoverable_openrouter_error(&retry_err),
+                                    Some(retry_err.to_string()),
+                                );
+                            }
+                        }
+                    }
+                    (agent_id, fatal, Some(err.to_string()))
+                }
+            }
+        });
+    }
+
+    let mut fatal_any = false;
+    let mut scene_errors: Vec<String> = Vec::new();
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                join_set.abort_all();
+                break;
+            }
+            next = join_set.join_next() => {
+                let Some(res) = next else {
+                    break;
+                };
+                match res {
+                    Ok((aid, fatal, err)) => {
+                        if fatal {
+                            fatal_any = true;
+                        }
+                        if let Some(e) = err {
+                            scene_errors.push(format!("{aid}: {e}"));
+                        }
+                    }
+                    Err(join_err) => {
+                        scene_errors.push(format!("gfx-scene-task: {join_err}"));
+                    }
+                }
+            }
+        }
+    }
+
+    lock_guard.release().await;
+
+    if cancel.is_cancelled() {
+        return (false, fatal_any, None);
+    }
+
+    let mut used_fallback = false;
+    if !scene_errors.is_empty() && allow_local_fallback && !cancel.is_cancelled() {
+        let g1_empty = backend
+            .get_project(&project.id)
+            .await
+            .ok()
+            .and_then(|p| p.tracks.into_iter().find(|t| t.id == "g1"))
+            .is_none_or(|t| t.clips.is_empty());
+        if g1_empty
+            && let Ok(fb_lock) = TrackLockGuard::acquire(
+                backend.clone(),
+                &project.id,
+                &["g1"],
+                "gfx-01",
+                AgentRole::Gfx,
+            )
+            .await
+        {
+            used_fallback = true;
+            let _ = execute_deterministic_specialist(
+                &backend,
+                &fresh_project,
+                &brand,
+                &assets,
+                &plan,
+                &prompt,
+                AgentRole::Gfx,
+                &cancel,
+                &ops_counter,
+            )
+            .await;
+            fb_lock.release().await;
+            return (used_fallback, fatal_any, None);
+        }
+    }
+
+    let error_note = if scene_errors.is_empty() {
+        None
+    } else {
+        scene_errors.sort();
+        Some(format!("gfx-fanout: {}", scene_errors.join("; ")))
+    };
+    (used_fallback, fatal_any, error_note)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_specialist_with_lock(
     backend: Arc<dyn SolarisBackend>,
     openrouter: OpenRouterClient,
@@ -899,6 +2019,10 @@ async fn run_specialist_with_lock(
     allow_local_fallback: bool,
     model: String,
     fallbacks: Vec<String>,
+    low_reasoning: bool,
+    run_id: String,
+    programmatic_visuals: bool,
+    prompt: String,
     project: solaris_core_ir::Project,
     brand: BrandPlaybook,
     assets: Vec<SavedCodeAsset>,
@@ -941,8 +2065,14 @@ async fn run_specialist_with_lock(
     let instruction = match role {
         AgentRole::BRoll => format!("You own v2 (B-ROLL). {}", plan.broll_notes),
         AgentRole::Grade => format!("You own fx (GRADE). {}", plan.grade_notes),
-        AgentRole::Caps => format!("You own t1 (TEXT). {}", plan.captions_notes),
-        AgentRole::Gfx => format!("You own g1 (GFX). {}", plan.gfx_notes),
+        AgentRole::Caps => format!(
+            "You own t1 (TEXT). User request: \"{}\". Plan: {}",
+            prompt, plan.captions_notes
+        ),
+        AgentRole::Gfx => format!(
+            "You own g1 (GFX). User request: \"{}\". Plan: {}",
+            prompt, plan.gfx_notes
+        ),
         AgentRole::Mix => format!("You own a2 (MUSIC). {}", plan.mix_notes),
         _ => String::new(),
     };
@@ -956,6 +2086,10 @@ async fn run_specialist_with_lock(
             &openrouter,
             &model,
             &fallbacks,
+            low_reasoning,
+            &run_id,
+            programmatic_visuals,
+            plan.target_duration_sec,
             &project,
             &brand,
             &assets,
@@ -975,6 +2109,8 @@ async fn run_specialist_with_lock(
                     &project,
                     &brand,
                     &assets,
+                    &plan,
+                    &prompt,
                     role,
                     &cancel,
                     &ops_counter,
@@ -995,12 +2131,24 @@ async fn run_specialist_with_lock(
                 tracing::warn!(
                     "{agent_id} LLM loop failed ({err}); running local specialist fallback"
                 );
+                emit_swarm_log(
+                    backend.as_ref(),
+                    LogLevel::Warn,
+                    "swarm",
+                    &project.id,
+                    &run_id,
+                    Some(agent_id),
+                    format!("{agent_id} failed ({err}); running local specialist fallback"),
+                    None,
+                );
                 used_fallback = true;
                 let _ = execute_deterministic_specialist(
                     &backend,
                     &project,
                     &brand,
                     &assets,
+                    &plan,
+                    &prompt,
                     role,
                     &cancel,
                     &ops_counter,
@@ -1011,6 +2159,16 @@ async fn run_specialist_with_lock(
                 if is_unrecoverable_openrouter_error(&err) {
                     openrouter_fatal = true;
                 }
+                emit_swarm_log(
+                    backend.as_ref(),
+                    LogLevel::Error,
+                    "swarm",
+                    &project.id,
+                    &run_id,
+                    Some(agent_id),
+                    format!("{agent_id} failed: {err}"),
+                    None,
+                );
                 error_note = Some(format!("{agent_id}: {err}"));
             }
         }
@@ -1020,6 +2178,8 @@ async fn run_specialist_with_lock(
             &project,
             &brand,
             &assets,
+            &plan,
+            &prompt,
             role,
             &cancel,
             &ops_counter,
@@ -1340,5 +2500,233 @@ mod tests {
                 .is_empty()
         );
         assert!((p.active_grade.contrast - 1.18).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn zero_asset_programmatic_swarm_builds_full_30s_explainer_on_g1_and_t1() {
+        let proj = Project::new_default("agent_skills_explainer", AspectPreset::Vertical9x16);
+        let pid = proj.id.clone();
+
+        let backend = Arc::new(InMemBackend {
+            engine: RwLock::new(ProjectEngine::new(proj)),
+            assets: vec![],
+            brand: BrandPlaybook::solaris_default(),
+        });
+        let client = OpenRouterClient::new(OpenRouterConfig::default());
+        let advisor = Arc::new(ModelAdvisor::new(client.clone()));
+
+        let status = run_swarm(
+            backend.clone(),
+            client,
+            advisor,
+            pid,
+            "run-prog-1".into(),
+            SwarmRunRequest {
+                prompt: "Create a 30 seconds 9:16 explainer on how agent skills work".into(),
+                model_override: None,
+                allow_local_fallback: true,
+                max_turns_per_worker: Some(4),
+                skip_qa: false,
+            },
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await;
+
+        assert_eq!(status.state, SwarmRunState::Completed);
+        assert!(status.ops_committed >= 7);
+        let qa = status.qa_report.expect("qa report");
+        assert!(
+            qa.checks.iter().any(
+                |c| c.id == "gfx-lint-clean" && c.severity == solaris_core_ir::QaSeverity::Pass
+            )
+        );
+
+        let guard = backend.engine.read().await;
+        assert_eq!(guard.track_locks(), &HashMap::new());
+        let p = guard.project();
+        let g1 = p.tracks.iter().find(|t| t.id == "g1").unwrap();
+        let t1 = p.tracks.iter().find(|t| t.id == "t1").unwrap();
+        assert_eq!(g1.clips.len(), 6);
+        assert!(!t1.clips.is_empty());
+        assert!((p.duration_sec() - 30.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn infers_duration_from_prompt_and_parses_partial_director_plan() {
+        let proj = Project::new_default("dur_test", AspectPreset::Vertical9x16);
+        assert_eq!(
+            infer_target_duration_sec("Make a 30 seconds 9:16 explainer", &proj),
+            30.0
+        );
+        assert_eq!(infer_target_duration_sec("45s launch teaser", &proj), 45.0);
+        assert_eq!(
+            infer_target_duration_sec("30s product highlight", &proj),
+            30.0
+        );
+        assert_eq!(
+            infer_target_duration_sec("1 minute product tour", &proj),
+            60.0
+        );
+        assert_eq!(infer_target_duration_sec("1m product tour", &proj), 60.0);
+        assert_eq!(infer_target_duration_sec("2m deep dive", &proj), 120.0);
+        // Decade style descriptors and 4-digit year decades must NOT be mistaken for durations
+        assert_eq!(
+            infer_target_duration_sec("80s retro style neon montage", &proj),
+            24.0
+        );
+        assert_eq!(
+            infer_target_duration_sec("Inspired by the 90s cinema vibe", &proj),
+            24.0
+        );
+        assert_eq!(
+            infer_target_duration_sec("Design trends of the 2020s", &proj),
+            24.0
+        );
+        assert_eq!(
+            infer_target_duration_sec("1980s synthwave promo", &proj),
+            24.0
+        );
+
+        let partial_json = r#"{"hook_summary":"Fast hook","gfx_notes":"6 scenes"}"#;
+        let plan = llm::parse_director_plan(partial_json, 30.0).unwrap();
+        assert_eq!(plan.hook_summary, "Fast hook");
+        assert_eq!(plan.target_duration_sec, 30.0);
+        assert_eq!(plan.gfx_notes, "6 scenes");
+    }
+
+    #[test]
+    fn resolve_programmatic_scenes_handles_short_nan_oversized_and_outro_folding() {
+        let make_scenes = |durs: &[f64]| -> Vec<SceneSpec> {
+            durs.iter()
+                .enumerate()
+                .map(|(i, &d)| SceneSpec {
+                    scene_index: i + 1,
+                    title: format!("Beat {}", i + 1),
+                    start_sec: i as f64,
+                    duration_sec: d,
+                    visual_brief: format!("Visual {}", i + 1),
+                    motion_cue: "Stagger".into(),
+                    narration: format!("Line {}", i + 1),
+                })
+                .collect()
+        };
+
+        // 1. Short durations (4.0s and 5.0s) with 7 scenes must never panic and must stay contiguous
+        for target in [4.0, 5.0] {
+            let plan = DirectorPlan {
+                scenes: make_scenes(&[2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]),
+                ..DirectorPlan::default()
+            };
+            let res = resolve_programmatic_scenes(&plan, target);
+            assert_eq!(res.len(), MAX_PARALLEL_SCENE_AGENTS);
+            assert_eq!(res[0].start_sec, 0.0);
+            let last = res.last().unwrap();
+            assert!(
+                ((last.start_sec + last.duration_sec) - target).abs() < 0.05,
+                "expected total {target}, got {}",
+                last.start_sec + last.duration_sec
+            );
+            for pair in res.windows(2) {
+                let prev_end = pair[0].start_sec + pair[0].duration_sec;
+                assert!((pair[1].start_sec - prev_end).abs() < 0.02);
+            }
+        }
+
+        // 2. NaN target duration falls back safely to 24.0s
+        let nan_plan = DirectorPlan {
+            hook_summary: "NaN test".into(),
+            ..DirectorPlan::default()
+        };
+        let nan_scenes = resolve_programmatic_scenes(&nan_plan, f64::NAN);
+        assert!(!nan_scenes.is_empty());
+        let nan_last = nan_scenes.last().unwrap();
+        assert!(((nan_last.start_sec + nan_last.duration_sec) - 24.0).abs() < 0.05);
+
+        // 3. Oversized 25s Scene 1 on a 30s timeline with 6 scenes must never panic
+        let oversized_plan = DirectorPlan {
+            scenes: make_scenes(&[25.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+            ..DirectorPlan::default()
+        };
+        let oversized = resolve_programmatic_scenes(&oversized_plan, 30.0);
+        assert_eq!(oversized.len(), 6);
+        let over_last = oversized.last().unwrap();
+        assert!(((over_last.start_sec + over_last.duration_sec) - 30.0).abs() < 0.05);
+        for s in &oversized {
+            assert!(s.duration_sec >= 1.2);
+        }
+
+        // 4. >7 scenes fold trailing outro briefs & narration into Scene 7 instead of dropping
+        let mut nine = make_scenes(&[3.0; 9]);
+        nine[8].title = "Final Outro CTA".into();
+        nine[8].visual_brief = "Closing logo & subscribe button".into();
+        nine[8].narration = "Try Solaris today!".into();
+        let nine_plan = DirectorPlan {
+            scenes: nine,
+            ..DirectorPlan::default()
+        };
+        let folded = resolve_programmatic_scenes(&nine_plan, 30.0);
+        assert_eq!(folded.len(), MAX_PARALLEL_SCENE_AGENTS);
+        let seventh = &folded[MAX_PARALLEL_SCENE_AGENTS - 1];
+        assert!(
+            seventh
+                .visual_brief
+                .contains("Closing logo & subscribe button"),
+            "expected folded outro brief in scene 7: {}",
+            seventh.visual_brief
+        );
+        assert!(
+            seventh.narration.contains("Try Solaris today!"),
+            "expected folded outro narration in scene 7: {}",
+            seventh.narration
+        );
+    }
+
+    #[test]
+    fn resolve_programmatic_scenes_stitches_structured_and_bracketed_plans_contiguously() {
+        // 1. Bracketed `[start-end]` fallback parsing from `gfx_notes`
+        let bracketed_plan = DirectorPlan {
+            hook_summary: "Agent Skills Explainer".into(),
+            target_duration_sec: 24.0,
+            gfx_notes: "[0.0-3.0] Hook: kinetic title [3.0-6.5] Prompt vs Skill: comparison [6.5-10.0] Anatomy: folder explode [10.0-14.0] Loading: scan [14.0-20.0] Workflow: loop [20.0-24.0] Outro: CTA".into(),
+            captions_notes: "[0.0-3.0] Skills make agents capable. [3.0-6.5] Not prompts.".into(),
+            ..DirectorPlan::default()
+        };
+        let scenes = resolve_programmatic_scenes(&bracketed_plan, 24.0);
+        assert_eq!(scenes.len(), 6);
+        assert_eq!(scenes[0].start_sec, 0.0);
+        assert_eq!(scenes[0].title, "Hook");
+        assert_eq!(scenes[0].narration, "Skills make agents capable.");
+        let last = scenes.last().unwrap();
+        assert!(((last.start_sec + last.duration_sec) - 24.0).abs() < 0.05);
+        for pair in scenes.windows(2) {
+            let prev_end = pair[0].start_sec + pair[0].duration_sec;
+            assert!(
+                (pair[1].start_sec - prev_end).abs() < 0.02,
+                "expected contiguous scenes, got gap between {prev_end} and {}",
+                pair[1].start_sec
+            );
+        }
+
+        // 2. Structured `scenes` capped at MAX_PARALLEL_SCENE_AGENTS and stitched with zero gaps
+        let many_scenes: Vec<SceneSpec> = (0..10)
+            .map(|i| SceneSpec {
+                scene_index: i + 1,
+                title: format!("Beat {}", i + 1),
+                start_sec: (i as f64) * 3.0,
+                duration_sec: 2.5,
+                visual_brief: format!("Diagram {}", i + 1),
+                motion_cue: "Stagger".into(),
+                narration: String::new(),
+            })
+            .collect();
+        let structured_plan = DirectorPlan {
+            scenes: many_scenes,
+            ..DirectorPlan::default()
+        };
+        let capped = resolve_programmatic_scenes(&structured_plan, 24.0);
+        assert_eq!(capped.len(), MAX_PARALLEL_SCENE_AGENTS);
+        let cap_last = capped.last().unwrap();
+        assert!(((cap_last.start_sec + cap_last.duration_sec) - 24.0).abs() < 0.05);
     }
 }

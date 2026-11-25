@@ -387,6 +387,20 @@ export interface SavedCodeAsset {
   created_at: string;
 }
 
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
+export interface LogEntry {
+  id: string;
+  timestamp: string;
+  level: LogLevel;
+  source: string;
+  project_id?: string | null;
+  run_id?: string | null;
+  agent_id?: string | null;
+  message: string;
+  details?: string | null;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -583,6 +597,11 @@ export type EngineEvent =
       time_sec: number;
       agent_id: string;
       role: AgentRole;
+    }
+  | {
+      event: "log_emitted";
+      project_id?: string | null;
+      entry: LogEntry;
     };
 
 export interface EngineEventEnvelope {

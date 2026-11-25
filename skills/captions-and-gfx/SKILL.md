@@ -14,29 +14,23 @@ Solaris renders `G1` (GFX) under `T1` (Captions) in both the Studio sandboxed if
 
 ## 1. Word-Synced Captions (`T1`)
 
-1. Ensure the primary speech asset on `V1` or `A1` has a populated transcript (`media.get_manifest` → `media.transcribe` if empty).
-2. Call `captions.generate_from_transcript`:
-   - Maps timestamps automatically across both `V1` and `A1`, splits across `>0.6s` silence gaps, sets safe-zone `y: 0.20`, and **replaces prior auto-captions** cleanly (no stacked duplicates).
-   - Keep `words_per_burst` between **`2` and `4`** (hard QA cap is `6` words).
-3. Choose the right `preset` (or restyle all `T1` clips via `captions.set_style` with `font_family` and `highlight_color` from `brand.get_playbook`):
-   - `neon_glow`: high-energy dark pill with glowing active word (default for creator `9:16` shorts).
-   - `karaoke`: filled highlight pill behind the spoken word (bold retention reels).
-   - `mono_caps`: tight uppercase broadcast strip (tech demos, punchy headlines).
-   - `minimal`: restrained editorial subtitle (16:9 explainers, documentary).
+1. **With speech media**: Ensure the primary speech asset on `V1` or `A1` has a populated transcript (`media.get_manifest` → `media.transcribe` if empty), then call `captions.generate_from_transcript` (maps timestamps across `V1` and `A1`, splits across `>0.6s` silences, sets safe-zone `y: 0.20`, replaces prior auto-captions).
+2. **Programmatic / Zero-Asset Videos (No Audio Transcript)**: Call `captions.place_script` with timestamped narration segments (`[{ text, start_sec, duration_sec }]`, `words_per_burst: 3`, `y: 0.24`) so `T1` carries crisp word-by-word kinetic captions synchronized to every programmatic `G1` scene!
+3. Keep `words_per_burst` between **`2` and `4`** (hard QA cap is `6` words) and choose the right `preset` (`neon_glow`, `karaoke`, `mono_caps`, or `minimal`) via `captions.set_style` or the placement tool.
 
 ## 2. Social Safe Zones & Anti-Collision Positioning
 
 Enforced automatically by `project.run_qa`:
 - **`9:16` Title-Safe Bounds**: Keep `T1` and `G1` inside **`x ∈ [-0.20, 0.20]`** and **`y ∈ [-0.35, 0.35]`** (avoids the bottom `22%` Reels/TikTok captions and right `15%` action rail).
 - **`16:9` / `1:1` Safe Bounds**: `x ∈ [-0.35, 0.35]`, `y ∈ [-0.35, 0.35]`.
-- **Mandatory Post-Place Positioning**: `gfx.place` ALWAYS initializes `Transform2D` to `x: 0.0, y: 0.0, scale: 1.0`. Whenever a `G1` clip overlaps `T1` captions (which default to `y: 0.20`), **immediately follow `gfx.place` with `timeline.set_transform`** on `track_id: "g1"` to place it at `y: -0.22` to `-0.28` (or `y: 0.0` only when no speaker face sits at center).
-- Maintain **`|gfx.y - cap.y| >= 0.08`** whenever `G1` and `T1` overlap in time.
+- **Mandatory Post-Place Positioning (Floating Cards/Overlays Only)**: `gfx.place` ALWAYS initializes `Transform2D` to `x: 0.0, y: 0.0, scale: 1.0`. Whenever a floating `G1` card/badge overlaps `T1` captions (which default to `y: 0.20`), **immediately follow `gfx.place` with `timeline.set_transform`** on `track_id: "g1"` to place it at `y: -0.22` to `-0.28` (or `y: 0.0` only when no speaker face sits at center). **Exception — Full-Canvas Programmatic `G1` Scenes**: full-bleed programmatic scenes (`100vw`×`100vh`/`100dvh` or `position:fixed` full-viewport) MUST stay at `(0, 0)` (exempt from `timeline.set_transform` `y` shifting) and reserve the bottom ~24% internally for `T1` captions.
+- Maintain **`|gfx.y - cap.y| >= 0.08`** whenever a floating `G1` card and `T1` caption overlap in time.
 
 ## 3. Search Library First, Author Second
 
 1. **Always call `assets.search` first**. Solaris ships 5 ready-made, brand-tokenized assets (`chapter-title-solar`, `stat-card-solar`, `comment-bubble-solar`, `lower-third-solar`, `progress-bar-solar`—see [references/starter-assets.md](references/starter-assets.md)).
 2. Place a library asset with `gfx.place(project_id, clip_id, label, start_sec, duration_sec, asset_id, props)`—partial `props` merge cleanly over `default_props`.
-3. Only author custom `inline_html` when no library asset fits the creative beat. Read [references/gfx-contract.md](references/gfx-contract.md) before writing HTML, validate with **`gfx.lint_html`**, place via `gfx.place`, and save reusable designs with **`assets.save`** (`id` matching `[a-zA-Z0-9_-]{1,64}`).
+3. Only author custom `inline_html` when no library asset fits the creative beat (or in programmatic zero-asset mode). Read [references/gfx-contract.md](references/gfx-contract.md) before writing HTML, call **`gfx.place`** directly (1–2 scenes per turn to avoid output truncation; `gfx.place` and `assets.save` enforce `lint_gfx_html` server-side automatically—call `gfx.lint_html` only to pre-verify or debug a rejected snippet), and save reusable designs with **`assets.save`** (`id` matching `[a-zA-Z0-9_-]{1,64}`).
 
 ## 4. Seekable Sandbox Quick Rules (Summary)
 
@@ -48,4 +42,4 @@ Enforced automatically by `project.run_qa`:
 
 ## 5. Visual Verification
 
-After placing captions and GFX, call `preview.capture_frame` at a timestamp where **both `T1` and `G1` are active**, verify zero overlap, crisp legibility at phone width, and brand color fidelity, then run `project.run_qa`.
+After placing captions and GFX, call `preview.capture_frame` at a timestamp where **both `T1` and `G1` are active** (works for both `V1`/`V2` footage timelines and programmatic `G1`/`T1` overlay-only timelines; headless Chromium is required to render overlays), verify zero overlap, crisp legibility at phone width, and brand color fidelity, then run `project.run_qa`.

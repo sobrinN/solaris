@@ -15,14 +15,16 @@
 
 | Check | Exact Pass Threshold | What `auto_fix: true` Repairs |
 | --- | --- | --- |
-| **Hook Lead Gap** | First visual clip on `V1`/`V2` starts at `<= 0.50s` | Flags `issue` if black lead gap `> 0.50s` (shift spine manually). |
-| **V1 Continuity Gaps** | No uncovered gap `> 0.40s` between consecutive `V1` clips (unless covered by `V2`) | Flags `warning` (trim/close gap on `V1` or cover with `V2`). |
+| **Visuals Presence (`visuals-empty`)** | At least 1 active unmuted visual clip on `V1`, `V2`, or `G1` (`duration_sec > 0`) | Flags hard `issue` (`-40` pts, caps report score `<= 65`) if program canvas is completely blank behind captions/audio. |
+| **Programmatic G1 Coverage (`g1-coverage-low`)** | When no `V1`/`V2` clips exist and active timeline `>= 2.0s`, `G1` must cover `>= 70%` of unmuted timeline duration | Flags hard `issue` if large blank gaps remain on `G1`. |
+| **Hook Lead Gap** | First visual clip on `V1`/`V2` (or `G1` when no `V1`/`V2` clips exist) starts at `<= 0.50s` | Flags `warning` if lead gap `> 0.50s` (shift spine or opening `G1` scene manually). |
+| **Primary Track Continuity Gaps** | No uncovered gap `> 0.40s` between consecutive clips on `V1` (unless covered by `V2`), or on `G1` in programmatic mode | Flags `warning` (trim/close gap on `V1`/`G1` or cover `V1` with `V2`). |
 | **Caption Safe Zone (`T1`)** | `y ∈ [-0.35, 0.35]`; `x ∈ [-0.20, 0.20]` (9:16) or `[-0.35, 0.35]` (16:9/1:1); `scale ∈ [0.75, 1.35]`; `opacity >= 0.85`; `words <= 6` | Clamps out-of-bounds `x`, `y`, `scale`, and `opacity`. |
 | **GFX Safe Zone (`G1`)** | `y ∈ [-0.35, 0.35]`; `x ∈ [-0.20, 0.20]` (9:16) or `[-0.35, 0.35]` (16:9/1:1); `scale ∈ [0.50, 1.50]` | Clamps out-of-bounds `x`, `y`, and `scale`. |
-| **T1 / G1 Collision** | Overlapping `G1` & `T1` clips must satisfy `|gfx.y - cap.y| >= 0.08` | Auto-offsets colliding `G1` clip to `y: ±0.22`. |
-| **GFX Sandbox Lint** | Every `G1` clip passes `gfx.lint_html` (`class="clip"`, `data-start`, `data-duration`, no forbidden APIs/URLs) | Flags `issue` (must fix HTML and replace clip). |
+| **T1 / G1 Collision** | Overlapping floating `G1` & `T1` clips must satisfy `|gfx.y - cap.y| >= 0.08` (**full-canvas programmatic `G1` scenes are exempt** and stay at `(0,0)`) | Auto-offsets colliding floating `G1` clip to a collision-free vertical band (`±0.22`, `0.0`, `±0.30`), or warns if no free band exists. |
+| **GFX Sandbox Lint** | Every `G1` clip passes `gfx.lint_html` (`class="clip"`, `data-start`, `data-duration`, no forbidden APIs/URLs) | Flags hard `issue` (must fix HTML and replace clip). |
 | **Voice Loudness (`V1`/`A1`)** | Effective loudness (`integrated_lufs + gain_db`) within `±2.5 LUFS` of `-14.0` (skips muted tracks & clips `<= -90 dB`; gain clamped to `[-12, +12]` dB) | Applies gain delta toward `-14.0 LUFS` within `±12 dB` clamp. |
-| **Music Ducking (`A2`)** | When speech exists: `ducking_enabled: true`, `duck_target_db <= -12.0`, AND `gain_db <= -8.0` | Enables ducking (`-18.0 dB`) and lowers excessive `gain_db` to `-14.0 dB`. |
+| **Music Ducking (`A2`)** | When speech exists: `ducking_enabled: true`, `duck_target_db <= -12.0`, AND `gain_db <= -8.0` | Enables ducking (`-18.0 dB`) and lowers excessive `gain_db` to `-12.0 dB`. |
 
 ---
 
@@ -36,7 +38,7 @@ Never judge a timeline from a single midpoint frame—most visual defects happen
 4. **Climax / Stat Reveal**: Verify numbers/labels are readable at mobile scale (equivalent to 360px phone width) and brand tokens match `brand.get_playbook`.
 5. **Outro / Last Second**: Confirm clean end framing without frozen/orphaned overlays.
 
-> **Prerequisite**: `preview.capture_frame` requires an active `Video` or `Image` clip on `V1` or `V2` at `time_sec`. If you hit `"no active video/image clip"`, pick a timestamp covered by a visual clip or fill the timeline gap first.
+> **Prerequisite**: `preview.capture_frame` works for **both** `V1`/`V2` footage timelines AND programmatic `G1`/`T1` overlay-only timelines (rendered over the brand backdrop). Headless Chromium is required to render `G1`/`T1` overlays; if no active clip exists on `V1`/`V2`/`G1`/`T1` at `time_sec`, pick a covered timestamp or fill the gap first.
 
 ---
 

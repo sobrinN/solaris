@@ -224,6 +224,11 @@ pub enum EngineEvent {
         agent_id: String,
         role: AgentRole,
     },
+    LogEmitted {
+        #[serde(default)]
+        project_id: Option<String>,
+        entry: crate::model::LogEntry,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

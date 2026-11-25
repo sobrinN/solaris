@@ -10,6 +10,7 @@ import {
   Palette,
   Plus,
   Redo2,
+  Terminal,
   Undo2,
   Upload,
   Users,
@@ -27,6 +28,7 @@ import type {
   ColorGrade,
   EngineEventEnvelope,
   ExportJobStatus,
+  LogEntry,
   MediaAsset,
   ParsedCubeLut,
   Project,
@@ -46,7 +48,9 @@ import {
 } from "./BroadcastScopes";
 import { ExportModal } from "./ExportModal";
 import { InspectorPanel } from "./InspectorPanel";
+import { LogsDrawer } from "./LogsDrawer";
 import { SandboxedGfxFrame } from "./SandboxedGfxFrame";
+import { SourceMonitor } from "./SourceMonitor";
 import { SwarmActivityPanel, type ActivityEntry } from "./SwarmActivityPanel";
 import { SwarmCursorLayer } from "./SwarmCursorLayer";
 import { TimelinePanel } from "./TimelinePanel";
@@ -61,6 +65,8 @@ interface StudioWorkspaceProps {
   activeBrand: BrandPlaybook | null;
   assets: SavedCodeAsset[];
   events: EngineEventEnvelope[];
+  logs: LogEntry[];
+  onClearLogs: () => Promise<void>;
   wsConnected: boolean;
   exportJob: ExportJobStatus | null;
   agentStatus: AgentStatusResponse | null;
@@ -100,6 +106,8 @@ export function StudioWorkspace({
   activeBrand,
   assets,
   events,
+  logs,
+  onClearLogs,
   wsConnected,
   exportJob,
   agentStatus,
@@ -121,9 +129,17 @@ export function StudioWorkspace({
   onOpenBrandDrawer,
   onOpenAiSettings,
 }: StudioWorkspaceProps) {
-  const [playheadSec, setPlayheadSec] = useState(0);
+  const isDemoProject = useMemo(
+    () =>
+      project.id === "solaris-demo-reel" ||
+      project.tracks.some((t) => t.clips.some((c) => c.id.startsWith("demo-"))),
+    [project.id, project.tracks],
+  );
+
+  const [playheadSec, setPlayheadSec] = useState(() => (isDemoProject ? 1.2 : 0));
   const [isPlaying, setIsPlaying] = useState(false);
-  const [swarmCursorsEnabled, setSwarmCursorsEnabled] = useState(true);
+  const [swarmCursorsEnabled, setSwarmCursorsEnabled] = useState(false);
+  const wasSwarmActiveRef = useRef(false);
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(
     project.media_pool[0]?.id ?? null,
   );
@@ -132,6 +148,7 @@ export function StudioWorkspace({
     clipId: string;
   } | null>(null);
   const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [logsDrawerOpen, setLogsDrawerOpen] = useState(false);
   const [brandLut, setBrandLut] = useState<ParsedCubeLut | null>(null);
   const [brandFontCss, setBrandFontCss] = useState<string>("");
   const [transcribingMediaId, setTranscribingMediaId] = useState<string | null>(null);
@@ -140,8 +157,7 @@ export function StudioWorkspace({
   const [qaRunning, setQaRunning] = useState(false);
   const [qaError, setQaError] = useState<string | null>(null);
   const [assetPackError, setAssetPackError] = useState<string | null>(null);
-  const [sourceInSec, setSourceInSec] = useState(0);
-  const [sourceOutSec, setSourceOutSec] = useState<number | null>(null);
+  const [viewerMode, setViewerMode] = useState<"program" | "source">("program");
   const [liveAudioMeters, setLiveAudioMeters] = useState<{
     voicePct: number;
     musicPct: number;
@@ -151,8 +167,6 @@ export function StudioWorkspace({
   const scopesRef = useRef<BroadcastScopesHandle | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const assetPackInputRef = useRef<HTMLInputElement | null>(null);
-  const sourceVideoRef = useRef<HTMLVideoElement | null>(null);
-  const sourceAudioRef = useRef<HTMLAudioElement | null>(null);
   const audioEngineRef = useRef<SolarisAudioEngine | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeVisualLayersCacheRef = useRef<{
@@ -184,11 +198,12 @@ export function StudioWorkspace({
     }
   }, [externalPlayheadSeek]);
 
-  // Reset source monitor IN/OUT markers when switching selected media
+  // Pause timeline playback & Web Audio whenever previewing raw clips in Source Monitor
   useEffect(() => {
-    setSourceInSec(0);
-    setSourceOutSec(null);
-  }, [selectedMediaId]);
+    if (viewerMode === "source") {
+      setIsPlaying(false);
+    }
+  }, [viewerMode]);
 
   // Load Brand Playbook uploaded custom fonts (.woff2/.ttf/.otf) as data URI @font-face CSS for sandboxed GFX iframes
   useEffect(() => {
@@ -254,7 +269,7 @@ export function StudioWorkspace({
         max = Math.max(max, clip.start_sec + clip.duration_sec);
       }
     }
-    return Math.max(max, 20);
+    return max > 0 ? max : 16;
   }, [project.tracks]);
 
   // Smooth rAF playback loop
@@ -329,29 +344,6 @@ export function StudioWorkspace({
 
     return [...fromProject, ...fromEvents].reverse().slice(0, 40);
   }, [project.activity_log, events]);
-
-  const latestRealOp = useMemo(() => {
-    for (let i = events.length - 1; i >= 0; i--) {
-      const p = events[i].payload;
-      if (p.event === "op_committed") {
-        return {
-          agentId: p.agent_id,
-          role: p.role,
-          anchor: p.ui_anchor,
-          summary: p.summary,
-        };
-      }
-      if (p.event === "cursor_pulse") {
-        return {
-          agentId: p.agent_id,
-          role: p.role,
-          anchor: p.ui_anchor,
-          summary: p.label,
-        };
-      }
-    }
-    return null;
-  }, [events]);
 
   const swarmRoleCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -617,6 +609,7 @@ export function StudioWorkspace({
 
   const handleTogglePlay = useCallback(() => {
     audioEngineRef.current?.unlock();
+    setViewerMode("program");
     setIsPlaying((prev) => {
       if (!prev && playheadSec >= totalDurationSec) {
         setPlayheadSec(0);
@@ -627,6 +620,7 @@ export function StudioWorkspace({
 
   const handleSeekPlayhead = useCallback((sec: number) => {
     audioEngineRef.current?.unlock();
+    setViewerMode("program");
     setPlayheadSec(Math.max(0, sec));
   }, []);
 
@@ -913,7 +907,7 @@ export function StudioWorkspace({
   // Global keyboard shortcuts (disabled when modals/drawers are open or interactive elements are focused)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (exportModalOpen || modalsOpen) return;
+      if (exportModalOpen || logsDrawerOpen || modalsOpen) return;
       const target = e.target as HTMLElement | null;
       if (
         target &&
@@ -957,6 +951,7 @@ export function StudioWorkspace({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
     exportModalOpen,
+    logsDrawerOpen,
     modalsOpen,
     selectedClipRef,
     handleTogglePlay,
@@ -1162,11 +1157,6 @@ export function StudioWorkspace({
   const projectFps =
     project.canvas.fps_num / Math.max(1, project.canvas.fps_den);
 
-  const isDemoProject = useMemo(
-    () => project.tracks.some((t) => t.clips.some((c) => c.id.startsWith("demo-"))),
-    [project.tracks],
-  );
-
   const isSwarmActive =
     activeSwarmRun !== null &&
     (activeSwarmRun.state === "queued" ||
@@ -1174,6 +1164,13 @@ export function StudioWorkspace({
       activeSwarmRun.state === "executing_spine" ||
       activeSwarmRun.state === "executing_specialists" ||
       activeSwarmRun.state === "running_qa");
+
+  useEffect(() => {
+    if (isSwarmActive && !wasSwarmActiveRef.current) {
+      setSwarmCursorsEnabled(true);
+    }
+    wasSwarmActiveRef.current = isSwarmActive;
+  }, [isSwarmActive]);
 
   const handleRunQa = async () => {
     if (qaRunning) return;
@@ -1228,21 +1225,9 @@ export function StudioWorkspace({
     }
   };
 
-  const handleInsertSourceRange = () => {
-    if (!selectedMedia) return;
-    const total =
-      selectedMedia.intelligence.duration_sec > 0.2
-        ? selectedMedia.intelligence.duration_sec
-        : 5;
-    const inPt = Math.max(0, Math.min(sourceInSec, total - 0.25));
-    const outPt =
-      sourceOutSec !== null && sourceOutSec > inPt + 0.15
-        ? Math.min(sourceOutSec, total)
-        : total;
-    void handleAddMediaToTimeline(selectedMedia, undefined, playheadSec, {
-      sourceIn: inPt,
-      duration: Math.max(0.25, outPt - inPt),
-    });
+  const handleInsertSourceRange = (media: MediaAsset, sourceIn: number, duration: number) => {
+    setViewerMode("program");
+    void handleAddMediaToTimeline(media, undefined, playheadSec, { sourceIn, duration });
   };
 
   return (
@@ -1252,7 +1237,8 @@ export function StudioWorkspace({
         demoMode={isDemoProject}
         swarmActive={isSwarmActive}
         activeRoles={activeSwarmRun?.active_roles ?? EMPTY_ROLES}
-        latestRealOp={latestRealOp}
+        events={events}
+        totalDurationSec={totalDurationSec}
       />
 
       <ExportModal
@@ -1263,6 +1249,13 @@ export function StudioWorkspace({
         activeJob={exportJob}
         onJobStarted={(job) => onExportJobChange(job)}
         onClose={() => setExportModalOpen(false)}
+      />
+
+      <LogsDrawer
+        open={logsDrawerOpen}
+        logs={logs}
+        onClear={onClearLogs}
+        onClose={() => setLogsDrawerOpen(false)}
       />
 
       {opErrorToast && (
@@ -1350,6 +1343,22 @@ export function StudioWorkspace({
 
           <button
             type="button"
+            onClick={() => setLogsDrawerOpen(true)}
+            className="flex h-8 items-center gap-1.5 rounded-full border border-areia/12 px-2.5 text-xs text-areia/85 hover:bg-accent lg:px-3"
+            title="Open Diagnostic Logs (OpenRouter, Swarm, QA & Export)"
+            aria-label="Diagnostic Logs"
+          >
+            <Terminal className="h-3.5 w-3.5 text-amarelo-ideias" />
+            <span className="hidden lg:inline">Logs</span>
+            {logs.some((l) => l.level === "error") && (
+              <span className="tabular-nums rounded-full bg-vermelho-foco px-1.5 text-[10px] font-semibold text-areia">
+                {logs.filter((l) => l.level === "error").length}
+              </span>
+            )}
+          </button>
+
+          <button
+            type="button"
             onClick={onOpenAiSettings}
             className="flex h-8 items-center gap-1.5 rounded-full border border-areia/12 px-2.5 text-xs text-areia/85 hover:bg-accent lg:px-3"
             title="OpenRouter API Key, Model Advisor & MCP Mode"
@@ -1385,7 +1394,7 @@ export function StudioWorkspace({
       </header>
 
       {/* Main 6-Panel Grid (Media-First proportions) */}
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-2.5 p-2.5 lg:grid-cols-[minmax(176px,196px)_minmax(204px,1fr)_minmax(268px,1.45fr)_minmax(170px,196px)_minmax(214px,236px)] xl:grid-cols-[224px_minmax(244px,1fr)_minmax(350px,1.6fr)_212px_256px]">
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-2.5 p-2.5 lg:grid-cols-[minmax(240px,280px)_minmax(190px,0.8fr)_minmax(280px,1.5fr)_minmax(170px,196px)_minmax(214px,236px)] xl:grid-cols-[320px_minmax(220px,0.8fr)_minmax(360px,1.6fr)_212px_256px]">
         {/* Left Column: Media Pool + Effects/GFX */}
         <div className="flex min-h-0 flex-col gap-2.5">
           <div
@@ -1417,7 +1426,7 @@ export function StudioWorkspace({
               </button>
             </div>
 
-            <div className="grid grid-cols-1 gap-1.5 overflow-y-auto pr-1">
+            <div className="grid min-h-0 grid-cols-1 content-start gap-1.5 overflow-y-auto pr-1">
               {mediaErrorMsg && (
                 <div className="rounded-lg border border-vermelho-foco/40 bg-vermelho-foco/15 px-2 py-1 text-[10px] text-areia">
                   {mediaErrorMsg}
@@ -1444,9 +1453,12 @@ export function StudioWorkspace({
                   >
                     <button
                       type="button"
-                      onClick={() => setSelectedMediaId(item.id)}
+                      onClick={() => {
+                        setSelectedMediaId(item.id);
+                        setViewerMode("source");
+                      }}
                       onDoubleClick={() => void handleAddMediaToTimeline(item)}
-                      title="Click to inspect · Double-click or drag onto a timeline track"
+                      title="Click to preview in Source · Double-click or drag onto a timeline track"
                       className="flex w-full flex-col items-start gap-1 text-left"
                     >
                       <div className="flex w-full items-center justify-between text-[10px] text-areia/65">
@@ -1513,7 +1525,7 @@ export function StudioWorkspace({
           {/* Saved Code Assets / Effects · GFX Bin with miniature live visual previews */}
           <div
             data-cursor-anchor="effects.library"
-            className="flex flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-3"
+            className="flex min-h-0 flex-1 flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-3"
           >
             <div className="mb-2 flex flex-wrap items-center justify-between gap-1.5">
               <div className="flex items-center gap-1.5">
@@ -1558,7 +1570,7 @@ export function StudioWorkspace({
                 {assetPackError}
               </div>
             )}
-            <div className="grid max-h-40 grid-cols-1 gap-1.5 overflow-y-auto pr-0.5">
+            <div className="grid min-h-0 grid-cols-2 content-start gap-1.5 overflow-y-auto pr-0.5">
               {assets.map((asset) => (
                 <button
                   key={asset.id}
@@ -1566,7 +1578,7 @@ export function StudioWorkspace({
                   onClick={() => void handlePlaceSavedAsset(asset)}
                   className="group flex flex-col gap-1 rounded-xl border border-areia/10 bg-void/70 p-1.5 text-left transition-colors hover:border-track-g1/50 hover:bg-accent motion-reduce:transition-none"
                 >
-                  <div className="relative h-12 w-full overflow-hidden rounded-lg border border-areia/10 bg-carbono/90">
+                  <div className="relative h-16 w-full overflow-hidden rounded-lg border border-areia/10 bg-carbono/90">
                     <SandboxedGfxFrame
                       client={client}
                       ticketVersion={ticketVersion}
@@ -1574,7 +1586,7 @@ export function StudioWorkspace({
                       doc={assetThumbDocs[asset.id]}
                       lazy
                       tabIndex={-1}
-                      className="pointer-events-none absolute top-1/2 left-1/2 h-[192px] w-[340px] -translate-x-1/2 -translate-y-1/2 scale-[0.25] border-0 bg-transparent"
+                      className="pointer-events-none absolute top-1/2 left-1/2 h-[192px] w-[340px] -translate-x-1/2 -translate-y-1/2 scale-[0.33] border-0 bg-transparent"
                     />
                   </div>
                   <div className="flex items-center justify-between px-1 text-[10px] text-areia/85">
@@ -1587,115 +1599,8 @@ export function StudioWorkspace({
           </div>
         </div>
 
-        {/* Center-Left: Source Monitor + Swarm Activity Log */}
-        <div className="flex min-h-0 flex-col gap-2.5">
-          <div
-            data-cursor-anchor="source.monitor"
-            className="flex flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-3"
-          >
-            <div className="mb-2 flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
-              <span>Source</span>
-              <span className="truncate text-areia/45">
-                {selectedMedia ? selectedMedia.name : "No clip"}
-              </span>
-            </div>
-            <div className="relative grid aspect-video place-items-center overflow-hidden rounded-xl border border-areia/10 bg-void">
-              {selectedMedia && selectedMedia.kind === "video" && selectedMedia.path ? (
-                <video
-                  ref={sourceVideoRef}
-                  src={client.getMediaStreamUrl(project.id, selectedMedia.id)}
-                  className="h-full w-full object-cover opacity-85"
-                  controls
-                  muted
-                />
-              ) : selectedMedia && selectedMedia.kind === "image" && selectedMedia.path ? (
-                <img
-                  src={client.getMediaStreamUrl(project.id, selectedMedia.id)}
-                  alt={selectedMedia.name}
-                  className="h-full w-full object-cover opacity-85"
-                />
-              ) : selectedMedia && selectedMedia.kind === "audio" ? (
-                <div className="flex w-full flex-col items-center gap-2 px-3 text-track-a1">
-                  <Music className="h-5 w-5" />
-                  <span className="max-w-full truncate text-[10px] text-areia/80">
-                    {selectedMedia.name}
-                  </span>
-                  {selectedMedia.path && (
-                    <audio
-                      ref={sourceAudioRef}
-                      src={client.getMediaStreamUrl(project.id, selectedMedia.id)}
-                      controls
-                      className="h-8 w-full max-w-[260px]"
-                    />
-                  )}
-                </div>
-              ) : (
-                <span className="text-[11px] text-areia/35">Source Monitor</span>
-              )}
-              {selectedMedia?.kind !== "audio" && (
-                <div
-                  className="pointer-events-none absolute inset-y-2 rounded border border-dashed border-amarelo-ideias/75"
-                  style={{ width: `${reframeBoxWidthPct}%` }}
-                >
-                  <span className="bg-amarelo-ideias px-1 text-[10px] font-semibold text-void">
-                    REFRAME {aspectBadge}
-                  </span>
-                </div>
-              )}
-            </div>
-
-            {/* Source IN/OUT Trim Markers + Insert Range */}
-            {selectedMedia && selectedMedia.kind !== "document" && (
-              <div className="mt-2 flex flex-wrap items-center justify-between gap-1.5 text-[10px]">
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const activeSourceEl =
-                        selectedMedia.kind === "audio"
-                          ? sourceAudioRef.current
-                          : sourceVideoRef.current;
-                      const t = activeSourceEl?.currentTime ?? 0;
-                      setSourceInSec(Number(t.toFixed(2)));
-                    }}
-                    className="rounded border border-areia/14 bg-void/70 px-1.5 py-0.5 text-areia/80 hover:border-amarelo-ideias/50"
-                    title="Mark Source IN at current source time"
-                  >
-                    IN <span className="tabular-nums text-amarelo-ideias">{sourceInSec.toFixed(1)}s</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const activeSourceEl =
-                        selectedMedia.kind === "audio"
-                          ? sourceAudioRef.current
-                          : sourceVideoRef.current;
-                      const t =
-                        activeSourceEl?.currentTime ??
-                        selectedMedia.intelligence.duration_sec;
-                      setSourceOutSec(Number(Math.max(sourceInSec + 0.25, t).toFixed(2)));
-                    }}
-                    className="rounded border border-areia/14 bg-void/70 px-1.5 py-0.5 text-areia/80 hover:border-amarelo-ideias/50"
-                    title="Mark Source OUT at current source time"
-                  >
-                    OUT{" "}
-                    <span className="tabular-nums text-amarelo-ideias">
-                      {(sourceOutSec ?? selectedMedia.intelligence.duration_sec ?? 5).toFixed(1)}s
-                    </span>
-                  </button>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleInsertSourceRange}
-                  className="flex items-center gap-1 rounded-full border border-laranja-criacao/50 bg-laranja-criacao/15 px-2.5 py-0.5 font-medium text-areia hover:bg-laranja-criacao/25"
-                >
-                  <Plus className="h-2.5 w-2.5 text-amarelo-ideias" />
-                  <span>Insert Range</span>
-                </button>
-              </div>
-            )}
-          </div>
-
+        {/* Center-Left: Director & Swarm */}
+        <div className="flex min-h-0 flex-col">
           <SwarmActivityPanel
             agentStatus={agentStatus}
             mcpEndpoint={`${client.getBaseUrl()}${agentStatus?.mcp_http_path ?? "/mcp"}`}
@@ -1706,6 +1611,9 @@ export function StudioWorkspace({
             qaError={qaError}
             swarmError={swarmError}
             activityLog={activityLog}
+            logs={logs}
+            onClearLogs={onClearLogs}
+            onOpenLogsDrawer={() => setLogsDrawerOpen(true)}
             onStartSwarm={handleStartSwarm}
             onCancelSwarm={handleCancelSwarm}
             onRunQa={handleRunQa}
@@ -1713,19 +1621,57 @@ export function StudioWorkspace({
           />
         </div>
 
-        {/* Center: WebGL2 Program Monitor + Sandboxed GFX */}
+        {/* Center: Viewer — Program (timeline output) / Source (raw clip trim) tabs */}
         <div
           data-cursor-anchor="program.stage"
           className="flex min-h-[260px] flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-3 lg:min-h-0"
         >
-          <div className="mb-2 flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
-            <span>Program</span>
-            <span className="tabular-nums text-amarelo-ideias">
-              {project.canvas.width}×{project.canvas.height}
+          <div className="mb-2 flex items-center justify-between gap-2 text-[10px] font-semibold uppercase tracking-[0.14em]">
+            <div
+              role="tablist"
+              aria-label="Viewer"
+              className="flex items-center gap-0.5 rounded-full border border-areia/10 bg-void/65 p-0.5"
+            >
+              <button
+                type="button"
+                role="tab"
+                aria-selected={viewerMode === "program"}
+                onClick={() => setViewerMode("program")}
+                className={`rounded-full px-2.5 py-0.5 transition-colors motion-reduce:transition-none ${
+                  viewerMode === "program"
+                    ? "bg-laranja-criacao/20 text-areia"
+                    : "text-areia/55 hover:text-areia"
+                }`}
+              >
+                Program
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={viewerMode === "source"}
+                data-cursor-anchor="source.monitor"
+                onClick={() => setViewerMode("source")}
+                className={`rounded-full px-2.5 py-0.5 transition-colors motion-reduce:transition-none ${
+                  viewerMode === "source"
+                    ? "bg-laranja-criacao/20 text-areia"
+                    : "text-areia/55 hover:text-areia"
+                }`}
+              >
+                Source
+              </button>
+            </div>
+            <span className="truncate tabular-nums text-amarelo-ideias">
+              {viewerMode === "program"
+                ? `${project.canvas.width}×${project.canvas.height}`
+                : (selectedMedia?.name ?? "No clip")}
             </span>
           </div>
 
-          <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-areia/12 bg-void p-2">
+          <div
+            className={`relative min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-areia/12 bg-void p-2 ${
+              viewerMode === "program" ? "flex" : "hidden"
+            }`}
+          >
             <WebGLProgramStage
               client={client}
               ticketVersion={ticketVersion}
@@ -1743,6 +1689,19 @@ export function StudioWorkspace({
               onPixelFrame={handlePixelFrame}
             />
           </div>
+          {viewerMode === "source" && (
+            <SourceMonitor
+              key={selectedMedia?.id ?? "none"}
+              media={selectedMedia}
+              streamUrl={
+                selectedMedia?.path ? client.getMediaStreamUrl(project.id, selectedMedia.id) : null
+              }
+              aspectBadge={aspectBadge}
+              canvasAspect={project.canvas.width / Math.max(1, project.canvas.height)}
+              reframeBoxWidthPct={reframeBoxWidthPct}
+              onInsertRange={handleInsertSourceRange}
+            />
+          )}
         </div>
 
         {/* Center-Right: Broadcast Scopes */}

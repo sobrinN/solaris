@@ -126,7 +126,7 @@ export function SandboxedGfxFrame({
         src={resolvedUrl ?? undefined}
         srcDoc={resolvedUrl ? undefined : doc}
         onLoad={onLoad}
-        style={style}
+        style={{ colorScheme: "dark", ...style }}
         className={className}
         tabIndex={tabIndex}
       />

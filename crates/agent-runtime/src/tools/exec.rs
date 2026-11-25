@@ -179,24 +179,244 @@ fn compact_project_json(proj: &Project) -> Value {
     val
 }
 
+fn is_cjk_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x3040..=0x309F
+            | 0x30A0..=0x30FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0xAC00..=0xD7AF
+    )
+}
+
+fn is_closing_quote_or_bracket(c: char) -> bool {
+    matches!(
+        c,
+        '"' | '\'' | '”' | '’' | ')' | ']' | '」' | '』' | '》' | '）' | '»'
+    )
+}
+
+fn is_clause_punctuation(c: char) -> bool {
+    matches!(
+        c,
+        '.' | '!'
+            | '?'
+            | ':'
+            | ';'
+            | ','
+            | '…'
+            | '—'
+            | '–'
+            | '。'
+            | '！'
+            | '？'
+            | '，'
+            | '、'
+            | '；'
+            | '：'
+            | '،'
+            | '؛'
+            | '؟'
+    )
+}
+
+fn ends_with_clause_punctuation(word: &str) -> bool {
+    let trimmed = word.trim_end_matches(is_closing_quote_or_bracket);
+    let Some(last) = trimmed.chars().next_back() else {
+        return false;
+    };
+    if !is_clause_punctuation(last) {
+        return false;
+    }
+    if last == '.' {
+        let lower = trimmed
+            .trim_start_matches(['"', '\'', '“', '‘', '(', '['])
+            .to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "dr." | "mr." | "ms." | "mrs." | "vs." | "e.g." | "i.e." | "etc."
+        ) {
+            return false;
+        }
+        let bytes = lower.as_bytes();
+        if bytes.len() == 2 && bytes[0].is_ascii_digit() && bytes[1] == b'.' {
+            return false;
+        }
+    }
+    true
+}
+
+fn split_long_cjk_token(token: &str) -> Vec<String> {
+    let chars: Vec<char> = token.chars().collect();
+    if chars.len() <= 6 || !chars.iter().any(|&c| is_cjk_char(c)) {
+        return vec![token.to_string()];
+    }
+
+    // First break at embedded clause punctuation (keeping trailing closing quotes/brackets attached).
+    let mut clauses: Vec<Vec<char>> = Vec::new();
+    let mut cur: Vec<char> = Vec::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let ch = chars[i];
+        cur.push(ch);
+        i += 1;
+        if is_clause_punctuation(ch) {
+            while i < chars.len() && is_closing_quote_or_bracket(chars[i]) {
+                cur.push(chars[i]);
+                i += 1;
+            }
+            clauses.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        clauses.push(cur);
+    }
+
+    // Balance any remaining >6-char clause into <=4-char chunks so captions fit safe zones cleanly.
+    let mut out: Vec<String> = Vec::new();
+    for clause in clauses {
+        if clause.len() <= 6 {
+            out.push(clause.into_iter().collect());
+            continue;
+        }
+        let num_chunks = clause.len().div_ceil(4);
+        let base = clause.len() / num_chunks;
+        let rem = clause.len() % num_chunks;
+        let mut pos = 0usize;
+        for chunk_idx in 0..num_chunks {
+            let size = base + usize::from(chunk_idx < rem);
+            out.push(clause[pos..pos + size].iter().collect());
+            pos += size;
+        }
+    }
+    out
+}
+
+fn tokenize_caption_text(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for raw in text.split_whitespace() {
+        tokens.extend(split_long_cjk_token(raw));
+    }
+    tokens
+}
+
+fn build_caption_clips_from_bursts(
+    mut bursts: Vec<Vec<&TranscriptWord>>,
+    id_prefix: &str,
+    cap_y: f64,
+    preset: CaptionPreset,
+    font_family: &str,
+    highlight_color: &str,
+) -> Vec<Clip> {
+    bursts.retain(|b| !b.is_empty());
+    bursts.sort_by(|a, b| a[0].start_sec.total_cmp(&b[0].start_sec));
+
+    let mut clips = Vec::with_capacity(bursts.len());
+    for (idx, chunk) in bursts.iter().enumerate() {
+        let Some(first) = chunk.first() else { continue };
+        let Some(last) = chunk.last() else { continue };
+        let start_sec = first.start_sec.max(0.0);
+        let mut duration_sec = (last.end_sec - start_sec).max(0.25);
+        if let Some(next_start) = bursts
+            .get(idx + 1)
+            .and_then(|next| next.first())
+            .map(|w| w.start_sec)
+        {
+            let avail = (next_start - start_sec).max(0.01);
+            let max_no_overlap = if avail > 0.07 {
+                avail - 0.02
+            } else if avail > 0.02 {
+                (avail - 0.01).max(0.01)
+            } else {
+                avail
+            };
+            duration_sec = duration_sec.min(max_no_overlap);
+        }
+        let clip_end = start_sec + duration_sec;
+        let label = chunk
+            .iter()
+            .map(|w| w.word.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let words = chunk
+            .iter()
+            .map(|w| {
+                let ws = w.start_sec.clamp(start_sec, clip_end);
+                let we = w.end_sec.clamp(ws, clip_end);
+                CaptionWord {
+                    text: w.word.clone(),
+                    start_sec: ws,
+                    end_sec: we,
+                }
+            })
+            .collect();
+        clips.push(Clip {
+            id: format!("{id_prefix}-{idx}-{}", uuid::Uuid::new_v4().simple()),
+            label,
+            start_sec,
+            duration_sec,
+            source_in_sec: 0.0,
+            transform: Transform2D {
+                y: cap_y,
+                ..Transform2D::default()
+            },
+            audio: AudioSettings::default(),
+            payload: ClipKind::Caption {
+                caption: CaptionBlock {
+                    words,
+                    preset,
+                    font_family: font_family.to_string(),
+                    highlight_color: highlight_color.to_string(),
+                },
+            },
+        });
+    }
+    clips
+}
+
 fn split_caption_bursts(
     words: &[TranscriptWord],
     words_per_burst: usize,
     silence_gap_sec: f64,
 ) -> Vec<Vec<&TranscriptWord>> {
-    let mut bursts: Vec<Vec<&TranscriptWord>> = Vec::new();
+    let max_w = words_per_burst.max(1);
+    // First group into natural phrases separated by silence gaps or clause/sentence punctuation.
+    let mut phrases: Vec<Vec<&TranscriptWord>> = Vec::new();
     let mut current: Vec<&TranscriptWord> = Vec::new();
     for w in words {
         let gap_exceeded = current
             .last()
             .is_some_and(|prev| w.start_sec - prev.end_sec > silence_gap_sec);
-        if !current.is_empty() && (current.len() >= words_per_burst || gap_exceeded) {
-            bursts.push(std::mem::take(&mut current));
+        if !current.is_empty() && gap_exceeded {
+            phrases.push(std::mem::take(&mut current));
         }
         current.push(w);
+        if ends_with_clause_punctuation(&w.word) {
+            phrases.push(std::mem::take(&mut current));
+        }
     }
     if !current.is_empty() {
-        bursts.push(current);
+        phrases.push(current);
+    }
+
+    // Balance any phrase longer than `max_w` evenly (e.g., 4 words -> 2+2 instead of 3+1).
+    let mut bursts: Vec<Vec<&TranscriptWord>> = Vec::new();
+    for phrase in phrases {
+        if phrase.len() <= max_w {
+            bursts.push(phrase);
+            continue;
+        }
+        let num_chunks = phrase.len().div_ceil(max_w);
+        let base = phrase.len() / num_chunks;
+        let rem = phrase.len() % num_chunks;
+        let mut cursor = 0usize;
+        for chunk_idx in 0..num_chunks {
+            let size = base + usize::from(chunk_idx < rem);
+            bursts.push(phrase[cursor..cursor + size].to_vec());
+            cursor += size;
+        }
     }
     bursts
 }
@@ -802,6 +1022,30 @@ pub async fn execute_tool(
                 ));
             }
 
+            let font_family = brand
+                .as_ref()
+                .map(|b| b.tokens.font_display.clone())
+                .unwrap_or_else(|| "Sora".to_string());
+            let highlight_color = brand
+                .as_ref()
+                .map(|b| b.tokens.accent_secondary.clone())
+                .unwrap_or_else(|| "#F7B733".to_string());
+
+            let bursts = split_caption_bursts(&timeline_words, words_per_burst, 0.6);
+            let clips = build_caption_clips_from_bursts(
+                bursts,
+                "cap",
+                0.20,
+                preset,
+                &font_family,
+                &highlight_color,
+            );
+            if clips.is_empty() {
+                return Err(AgentError::ToolError(
+                    "captions.generate_from_transcript produced 0 caption clips; existing T1 captions were preserved".to_string(),
+                ));
+            }
+
             // Replace existing caption clips on T1 so regenerating never stacks duplicates
             if let Some(t1) = proj.tracks.iter().find(|t| t.id == "t1") {
                 let existing_cap_ids: Vec<String> = t1
@@ -824,63 +1068,8 @@ pub async fn execute_tool(
                 }
             }
 
-            let font_family = brand
-                .as_ref()
-                .map(|b| b.tokens.font_display.clone())
-                .unwrap_or_else(|| "Sora".to_string());
-            let highlight_color = brand
-                .as_ref()
-                .map(|b| b.tokens.accent_secondary.clone())
-                .unwrap_or_else(|| "#F7B733".to_string());
-
-            let bursts = split_caption_bursts(&timeline_words, words_per_burst, 0.6);
             let mut placed = 0usize;
-            for (idx, chunk) in bursts.iter().enumerate() {
-                let Some(first) = chunk.first() else { continue };
-                let Some(last) = chunk.last() else { continue };
-                let start_sec = first.start_sec;
-                let mut duration_sec = (last.end_sec - first.start_sec).max(0.25);
-                if let Some(next_start) = bursts
-                    .get(idx + 1)
-                    .and_then(|next| next.first())
-                    .map(|w| w.start_sec)
-                {
-                    let max_no_overlap = (next_start - start_sec - 0.02).max(0.05);
-                    duration_sec = duration_sec.min(max_no_overlap);
-                }
-                let label = chunk
-                    .iter()
-                    .map(|w| w.word.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let words = chunk
-                    .iter()
-                    .map(|w| CaptionWord {
-                        text: w.word.clone(),
-                        start_sec: w.start_sec,
-                        end_sec: w.end_sec,
-                    })
-                    .collect();
-                let clip = Clip {
-                    id: format!("cap-{idx}-{}", uuid::Uuid::new_v4().simple()),
-                    label,
-                    start_sec,
-                    duration_sec,
-                    source_in_sec: 0.0,
-                    transform: Transform2D {
-                        y: 0.20,
-                        ..Transform2D::default()
-                    },
-                    audio: AudioSettings::default(),
-                    payload: ClipKind::Caption {
-                        caption: CaptionBlock {
-                            words,
-                            preset,
-                            font_family: font_family.clone(),
-                            highlight_color: highlight_color.clone(),
-                        },
-                    },
-                };
+            for clip in clips {
                 backend
                     .apply_op(
                         pid,
@@ -939,6 +1128,215 @@ pub async fn execute_tool(
             Ok(ToolOutput {
                 text: format!("Updated style on {updated} caption clip(s)"),
                 structured: json!({ "updated_count": updated }),
+                image_png_base64: None,
+                images_png_base64: Vec::new(),
+            })
+        }
+        "captions.place_script" => {
+            let pid = req_str(&args, "project_id")?;
+            let proj = backend.get_project(pid).await?;
+            let brand = backend.get_brand(&proj.brand_playbook_id).await.ok();
+            let preset: CaptionPreset =
+                parse_optional_enum(&args, "preset")?.unwrap_or(CaptionPreset::NeonGlow);
+            let words_per_burst = args
+                .get("words_per_burst")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(3)
+                .clamp(1, 6) as usize;
+            let cap_y = args
+                .get("y")
+                .and_then(|v| v.as_f64())
+                .filter(|v| v.is_finite())
+                .unwrap_or(0.24)
+                .clamp(-0.32, 0.32);
+            let replace_existing = match args.get("replace_existing") {
+                None | Some(Value::Null) => true,
+                Some(Value::Bool(b)) => *b,
+                Some(_) => {
+                    return Err(AgentError::ToolError(
+                        "invalid argument 'replace_existing': expected boolean".to_string(),
+                    ));
+                }
+            };
+
+            let segments = args
+                .get("segments")
+                .and_then(|v| v.as_array())
+                .filter(|a| !a.is_empty())
+                .ok_or_else(|| {
+                    AgentError::ToolError(
+                        "captions.place_script requires a non-empty 'segments' array".to_string(),
+                    )
+                })?;
+
+            // Pre-validate ALL segments BEFORE modifying T1 so invalid input never deletes existing captions.
+            let truncated_segments = segments.len().saturating_sub(64);
+            struct ParsedSegment {
+                start_sec: f64,
+                dur_sec: f64,
+                tokens: Vec<String>,
+            }
+            let mut parsed_segments: Vec<ParsedSegment> = Vec::new();
+            for (seg_idx, seg) in segments.iter().enumerate() {
+                let start_sec = seg
+                    .get("start_sec")
+                    .and_then(|v| v.as_f64())
+                    .filter(|v| v.is_finite() && *v >= 0.0)
+                    .ok_or_else(|| {
+                        AgentError::ToolError(format!(
+                            "segment {seg_idx} missing valid start_sec >= 0"
+                        ))
+                    })?;
+                let dur_sec = seg
+                    .get("duration_sec")
+                    .and_then(|v| v.as_f64())
+                    .filter(|v| v.is_finite() && *v > 0.05)
+                    .ok_or_else(|| {
+                        AgentError::ToolError(format!(
+                            "segment {seg_idx} missing valid duration_sec > 0.05"
+                        ))
+                    })?;
+                if !(start_sec + dur_sec).is_finite() {
+                    return Err(AgentError::ToolError(format!(
+                        "segment {seg_idx} has non-finite end time (start_sec + duration_sec)"
+                    )));
+                }
+                if seg_idx >= 64 {
+                    continue;
+                }
+                let text = seg
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .unwrap_or("");
+                let tokens = tokenize_caption_text(text);
+                if tokens.is_empty() {
+                    continue;
+                }
+                parsed_segments.push(ParsedSegment {
+                    start_sec,
+                    dur_sec,
+                    tokens,
+                });
+            }
+
+            if parsed_segments.is_empty() {
+                return Err(AgentError::ToolError(
+                    "captions.place_script produced 0 words from segments".to_string(),
+                ));
+            }
+            parsed_segments.sort_by(|a, b| a.start_sec.total_cmp(&b.start_sec));
+
+            // Prevent overlapping segments: trim earlier segment when there is room, else advance later start.
+            for i in 1..parsed_segments.len() {
+                let prev_start = parsed_segments[i - 1].start_sec;
+                let prev_end = prev_start + parsed_segments[i - 1].dur_sec;
+                if parsed_segments[i].start_sec < prev_end {
+                    if parsed_segments[i].start_sec >= prev_start + 0.10 {
+                        parsed_segments[i - 1].dur_sec =
+                            (parsed_segments[i].start_sec - prev_start).max(0.06);
+                    } else {
+                        parsed_segments[i].start_sec = prev_end;
+                    }
+                }
+            }
+
+            // Build word timings strictly clamped within each segment's [start_sec, seg_end].
+            let mut segment_word_groups: Vec<Vec<TranscriptWord>> =
+                Vec::with_capacity(parsed_segments.len());
+            for seg in &parsed_segments {
+                let seg_end = seg.start_sec + seg.dur_sec;
+                let seg_end_r = (seg_end * 1000.0).round() / 1000.0;
+                let step = seg.dur_sec / (seg.tokens.len() as f64);
+                let mut seg_words = Vec::with_capacity(seg.tokens.len());
+                for (wi, tok) in seg.tokens.iter().enumerate() {
+                    let ws = seg.start_sec + (wi as f64) * step;
+                    let we = if wi + 1 == seg.tokens.len() {
+                        seg_end
+                    } else {
+                        (ws + step).min(seg_end)
+                    };
+                    let ws_r = ((ws * 1000.0).round() / 1000.0).min(seg_end_r);
+                    let we_r = ((we * 1000.0).round() / 1000.0).clamp(ws_r, seg_end_r);
+                    seg_words.push(TranscriptWord {
+                        word: tok.clone(),
+                        start_sec: ws_r,
+                        end_sec: we_r,
+                    });
+                }
+                segment_word_groups.push(seg_words);
+            }
+
+            let font_family = brand
+                .as_ref()
+                .map(|b| b.tokens.font_display.clone())
+                .unwrap_or_else(|| "Sora".to_string());
+            let highlight_color = brand
+                .as_ref()
+                .map(|b| b.tokens.accent_secondary.clone())
+                .unwrap_or_else(|| "#F7B733".to_string());
+
+            // Pre-build and validate all bursts & clips BEFORE touching existing T1 clips.
+            let bursts: Vec<Vec<&TranscriptWord>> = segment_word_groups
+                .iter()
+                .flat_map(|seg_words| split_caption_bursts(seg_words, words_per_burst, 0.35))
+                .collect();
+            let clips = build_caption_clips_from_bursts(
+                bursts,
+                "cap-script",
+                cap_y,
+                preset,
+                &font_family,
+                &highlight_color,
+            );
+            if clips.is_empty() {
+                return Err(AgentError::ToolError(
+                    "captions.place_script produced 0 caption clips".to_string(),
+                ));
+            }
+
+            if replace_existing && let Some(t1) = proj.tracks.iter().find(|t| t.id == "t1") {
+                let existing_cap_ids: Vec<String> = t1
+                    .clips
+                    .iter()
+                    .filter(|c| matches!(c.payload, ClipKind::Caption { .. }))
+                    .map(|c| c.id.clone())
+                    .collect();
+                for old_id in existing_cap_ids {
+                    backend
+                        .apply_op(
+                            pid,
+                            TimelineCommand::DeleteClip {
+                                track_id: "t1".to_string(),
+                                clip_id: old_id,
+                            },
+                            meta.clone(),
+                        )
+                        .await?;
+                }
+            }
+
+            let mut placed = 0usize;
+            for clip in clips {
+                backend
+                    .apply_op(
+                        pid,
+                        TimelineCommand::PlaceClip {
+                            track_id: "t1".to_string(),
+                            clip,
+                        },
+                        meta.clone(),
+                    )
+                    .await?;
+                placed += 1;
+            }
+
+            Ok(ToolOutput {
+                text: format!("Placed {placed} scripted caption burst(s) on T1"),
+                structured: json!({
+                    "placed_count": placed,
+                    "truncated_segments": truncated_segments,
+                }),
                 image_png_base64: None,
                 images_png_base64: Vec::new(),
             })
@@ -1047,7 +1445,15 @@ pub async fn execute_tool(
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string);
-            let mut props = args.get("props").cloned().unwrap_or_else(|| json!({}));
+            let mut props = match args.get("props") {
+                None | Some(Value::Null) => json!({}),
+                Some(v @ Value::Object(_)) => v.clone(),
+                Some(_) => {
+                    return Err(AgentError::ToolError(
+                        "invalid argument 'props': expected JSON object".to_string(),
+                    ));
+                }
+            };
             let mut inline_html = args
                 .get("inline_html")
                 .and_then(|v| v.as_str())
@@ -1351,6 +1757,7 @@ mod tests {
     struct ExecMockBackend {
         engine: RwLock<ProjectEngine>,
         keyframes: Vec<KeyframeResult>,
+        assets: Vec<SavedCodeAsset>,
     }
 
     impl SolarisBackend for ExecMockBackend {
@@ -1445,7 +1852,8 @@ mod tests {
             Box::pin(async { Ok(BrandPlaybook::solaris_default()) })
         }
         fn list_assets(&self) -> BoxFuture<'_, Result<Vec<SavedCodeAsset>, AgentError>> {
-            Box::pin(async { Ok(vec![]) })
+            let assets = self.assets.clone();
+            Box::pin(async move { Ok(assets) })
         }
         fn save_asset(
             &self,
@@ -1511,6 +1919,7 @@ mod tests {
                     png_base64: "BBB".to_string(),
                 },
             ],
+            assets: Vec::new(),
         };
 
         let p_out = execute_tool(
@@ -1617,6 +2026,7 @@ mod tests {
         let backend = ExecMockBackend {
             engine: RwLock::new(engine),
             keyframes: Vec::new(),
+            assets: Vec::new(),
         };
 
         let out = execute_tool(
@@ -1677,5 +2087,312 @@ mod tests {
         let g = backend.engine.read().await;
         let t1 = g.project().tracks.iter().find(|t| t.id == "t1").unwrap();
         assert_eq!(t1.clips.len(), 2, "existing T1 captions must be preserved");
+    }
+
+    #[tokio::test]
+    async fn captions_place_script_preserves_segment_and_clause_boundaries_without_orphans() {
+        let project = Project::new_default("script_caps", AspectPreset::Vertical9x16);
+        let pid = project.id.clone();
+        let backend = ExecMockBackend {
+            engine: RwLock::new(ProjectEngine::new(project)),
+            keyframes: Vec::new(),
+            assets: Vec::new(),
+        };
+        let meta = CommandMeta {
+            agent_id: "caps-test".into(),
+            role: AgentRole::Caps,
+            reason: Some("caps-test".into()),
+        };
+
+        let out = execute_tool(
+            &backend,
+            "captions.place_script",
+            json!({
+                "project_id": pid,
+                "words_per_burst": 3,
+                "y": 0.24,
+                "segments": [
+                    { "text": "Skills make agents capable.", "start_sec": 0.0, "duration_sec": 3.0 },
+                    { "text": "Not prompts. Reusable abilities.", "start_sec": 3.0, "duration_sec": 3.5 },
+                    { "text": "Instructions, tools, examples.", "start_sec": 6.5, "duration_sec": 3.5 }
+                ]
+            }),
+            meta,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.structured["placed_count"], 7);
+        assert_eq!(out.structured["truncated_segments"], 0);
+
+        let g = backend.engine.read().await;
+        let t1 = g.project().tracks.iter().find(|t| t.id == "t1").unwrap();
+        let labels: Vec<&str> = t1.clips.iter().map(|c| c.label.as_str()).collect();
+        // 4-word sentence balances 2+2 (no 3+1 orphan), and periods/commas/segments never bleed together
+        assert_eq!(
+            labels,
+            vec![
+                "Skills make",
+                "agents capable.",
+                "Not prompts.",
+                "Reusable abilities.",
+                "Instructions,",
+                "tools,",
+                "examples."
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn captions_place_script_handles_overlaps_dense_words_validation_and_truncation() {
+        let project = Project::new_default("script_overlap_test", AspectPreset::Vertical9x16);
+        let pid = project.id.clone();
+        let backend = ExecMockBackend {
+            engine: RwLock::new(ProjectEngine::new(project)),
+            keyframes: Vec::new(),
+            assets: Vec::new(),
+        };
+        let meta = CommandMeta {
+            agent_id: "caps-test".into(),
+            role: AgentRole::Caps,
+            reason: Some("caps-test".into()),
+        };
+
+        // Overlapping segments + dense 10-word segment in 0.4s must produce non-overlapping clips
+        // with every word strictly clamped inside [clip.start_sec, clip.start_sec + clip.duration_sec].
+        let out = execute_tool(
+            &backend,
+            "captions.place_script",
+            json!({
+                "project_id": pid,
+                "words_per_burst": 3,
+                "segments": [
+                    { "text": "Second overlapping segment here", "start_sec": 1.0, "duration_sec": 2.0 },
+                    { "text": "First long segment overlaps second", "start_sec": 0.0, "duration_sec": 3.0 },
+                    { "text": "one two three four five six seven eight nine ten", "start_sec": 3.0, "duration_sec": 0.4 }
+                ]
+            }),
+            meta.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(out.structured["placed_count"].as_u64().unwrap() >= 5);
+
+        let initial_clip_count = {
+            let g = backend.engine.read().await;
+            let t1 = g.project().tracks.iter().find(|t| t.id == "t1").unwrap();
+            for pair in t1.clips.windows(2) {
+                let prev_end = pair[0].start_sec + pair[0].duration_sec;
+                assert!(
+                    prev_end <= pair[1].start_sec + 1e-6,
+                    "T1 clips must not overlap: prev_end={prev_end}, next_start={}",
+                    pair[1].start_sec
+                );
+            }
+            for clip in &t1.clips {
+                let clip_end = clip.start_sec + clip.duration_sec;
+                if let ClipKind::Caption { caption } = &clip.payload {
+                    for w in &caption.words {
+                        assert!(
+                            w.start_sec >= clip.start_sec - 1e-9 && w.end_sec <= clip_end + 1e-9,
+                            "word {:?} [{}, {}] escaped clip [{}, {}]",
+                            w.text,
+                            w.start_sec,
+                            w.end_sec,
+                            clip.start_sec,
+                            clip_end
+                        );
+                        assert!(w.start_sec <= w.end_sec + 1e-9);
+                    }
+                }
+            }
+            t1.clips.len()
+        };
+
+        // String "false" for replace_existing must be rejected (and existing T1 clips preserved)
+        let bad_replace = execute_tool(
+            &backend,
+            "captions.place_script",
+            json!({
+                "project_id": pid,
+                "replace_existing": "false",
+                "segments": [
+                    { "text": "Should fail", "start_sec": 0.0, "duration_sec": 1.0 }
+                ]
+            }),
+            meta.clone(),
+        )
+        .await;
+        assert!(matches!(bad_replace, Err(AgentError::ToolError(_))));
+        {
+            let g = backend.engine.read().await;
+            let t1 = g.project().tracks.iter().find(|t| t.id == "t1").unwrap();
+            assert_eq!(t1.clips.len(), initial_clip_count);
+        }
+
+        // Invalid segment later in array must fail BEFORE deleting existing T1 clips
+        let bad_seg = execute_tool(
+            &backend,
+            "captions.place_script",
+            json!({
+                "project_id": pid,
+                "replace_existing": true,
+                "segments": [
+                    { "text": "Valid first", "start_sec": 0.0, "duration_sec": 1.0 },
+                    { "text": "Bad second", "start_sec": 1.0, "duration_sec": 0.01 }
+                ]
+            }),
+            meta.clone(),
+        )
+        .await;
+        assert!(matches!(bad_seg, Err(AgentError::ToolError(_))));
+        {
+            let g = backend.engine.read().await;
+            let t1 = g.project().tracks.iter().find(|t| t.id == "t1").unwrap();
+            assert_eq!(t1.clips.len(), initial_clip_count);
+        }
+
+        // More than 64 segments must report truncated_segments instead of silently dropping
+        let many_segments: Vec<Value> = (0..67)
+            .map(|i| {
+                json!({
+                    "text": format!("Beat {i}"),
+                    "start_sec": (i as f64) * 0.5,
+                    "duration_sec": 0.45,
+                })
+            })
+            .collect();
+        let trunc_out = execute_tool(
+            &backend,
+            "captions.place_script",
+            json!({
+                "project_id": pid,
+                "segments": many_segments,
+            }),
+            meta,
+        )
+        .await
+        .unwrap();
+        assert_eq!(trunc_out.structured["truncated_segments"], 3);
+    }
+
+    #[tokio::test]
+    async fn gfx_place_treats_null_props_as_empty_object_and_rejects_non_object() {
+        let project = Project::new_default("gfx_props_test", AspectPreset::Vertical9x16);
+        let pid = project.id.clone();
+        let asset = SavedCodeAsset {
+            id: "card-1".to_string(),
+            name: "Card".to_string(),
+            category: "cards".to_string(),
+            tags: vec![],
+            props_schema: json!({ "type": "object", "properties": {} }),
+            default_props: json!({ "headline": "Default Title", "accent": "#F05A00" }),
+            html_source:
+                r#"<div data-start="0" data-duration="2" style="color:var(--brand-ink)">Card</div>"#
+                    .to_string(),
+            default_duration_sec: 2.0,
+            created_at: project.created_at,
+        };
+        let backend = ExecMockBackend {
+            engine: RwLock::new(ProjectEngine::new(project)),
+            keyframes: Vec::new(),
+            assets: vec![asset],
+        };
+        let meta = CommandMeta::default();
+
+        // Explicit `"props": null` must preserve `default_props` rather than replacing with null
+        execute_tool(
+            &backend,
+            "gfx.place",
+            json!({
+                "project_id": pid,
+                "clip_id": "g1-null-props",
+                "label": "Null Props Card",
+                "start_sec": 0.0,
+                "duration_sec": 2.0,
+                "asset_id": "card-1",
+                "props": null
+            }),
+            meta.clone(),
+        )
+        .await
+        .unwrap();
+
+        {
+            let g = backend.engine.read().await;
+            let g1 = g.project().tracks.iter().find(|t| t.id == "g1").unwrap();
+            let clip = g1.clips.iter().find(|c| c.id == "g1-null-props").unwrap();
+            match &clip.payload {
+                ClipKind::Gfx { gfx } => {
+                    assert_eq!(gfx.props["headline"], "Default Title");
+                    assert_eq!(gfx.props["accent"], "#F05A00");
+                }
+                other => panic!("expected Gfx clip, got {other:?}"),
+            }
+        }
+
+        // Non-object props (string/array) must fail with ToolError
+        let err = execute_tool(
+            &backend,
+            "gfx.place",
+            json!({
+                "project_id": pid,
+                "clip_id": "g1-bad-props",
+                "label": "Bad Props Card",
+                "start_sec": 2.0,
+                "duration_sec": 2.0,
+                "asset_id": "card-1",
+                "props": "not-an-object"
+            }),
+            meta,
+        )
+        .await;
+        assert!(matches!(err, Err(AgentError::ToolError(_))));
+    }
+
+    #[test]
+    fn caption_punctuation_and_tokenization_support_abbreviations_cjk_and_rtl() {
+        // Common abbreviations & single-digit ordinals should NOT trigger a clause break
+        assert!(!ends_with_clause_punctuation("Dr."));
+        assert!(!ends_with_clause_punctuation("Mr."));
+        assert!(!ends_with_clause_punctuation("e.g."));
+        assert!(!ends_with_clause_punctuation("vs."));
+        assert!(!ends_with_clause_punctuation("1."));
+
+        // CJK, RTL, and closing quotes/brackets SHOULD trigger a clause break
+        assert!(ends_with_clause_punctuation("完成。"));
+        assert!(ends_with_clause_punctuation("「太棒了！」"));
+        assert!(ends_with_clause_punctuation("（第一步，）"));
+        assert!(ends_with_clause_punctuation("مرحبا،"));
+        assert!(ends_with_clause_punctuation("كيف؟"));
+        assert!(ends_with_clause_punctuation("done!»"));
+
+        // Whitespace-free CJK strings > 6 chars split into safe-zone-friendly chunks
+        let cjk_tokens = tokenize_caption_text("这是一个没有空格的长中文句子，用来测试自动分段。");
+        assert!(cjk_tokens.len() >= 5, "got {:?}", cjk_tokens);
+        assert!(cjk_tokens.iter().all(|t| t.chars().count() <= 6));
+        assert!(cjk_tokens.iter().any(|t| t.ends_with('，')));
+        assert!(cjk_tokens.last().unwrap().ends_with('。'));
+
+        // Abbreviation stays attached to the following word in the same burst
+        let words: Vec<TranscriptWord> = ["Dr.", "Smith", "explained", "e.g.", "fast", "cuts."]
+            .iter()
+            .enumerate()
+            .map(|(i, w)| TranscriptWord {
+                word: (*w).to_string(),
+                start_sec: i as f64 * 0.4,
+                end_sec: (i as f64 + 0.9) * 0.4,
+            })
+            .collect();
+        let bursts = split_caption_bursts(&words, 3, 0.6);
+        let texts: Vec<String> = bursts
+            .iter()
+            .map(|b| {
+                b.iter()
+                    .map(|w| w.word.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect();
+        assert_eq!(texts, vec!["Dr. Smith explained", "e.g. fast cuts."]);
     }
 }

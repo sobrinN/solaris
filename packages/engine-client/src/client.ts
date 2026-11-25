@@ -12,6 +12,8 @@ import type {
   ExportRequest,
   GfxSandboxResponse,
   HealthResponse,
+  LogEntry,
+  LogLevel,
   MediaAsset,
   ModelAdvisorResponse,
   OpResult,
@@ -205,6 +207,14 @@ export class SolarisEngineClient {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+    });
+  }
+
+  openDemoProject(brandPlaybookId?: string): Promise<Project> {
+    return this.request<Project>("/api/v1/projects/demo", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ brand_playbook_id: brandPlaybookId }),
     });
   }
 
@@ -521,6 +531,24 @@ export class SolarisEngineClient {
 
   listSkills(): Promise<SkillSummary[]> {
     return this.request<SkillSummary[]>("/api/v1/agent/skills");
+  }
+
+  getLogs(params?: {
+    projectId?: string;
+    level?: LogLevel;
+    limit?: number;
+  }): Promise<LogEntry[]> {
+    const qs = new URLSearchParams();
+    if (params?.projectId) qs.set("project_id", params.projectId);
+    if (params?.level) qs.set("level", params.level);
+    if (params?.limit) qs.set("limit", String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return this.request<LogEntry[]>(`/api/v1/logs${suffix}`);
+  }
+
+  clearLogs(projectId?: string): Promise<void> {
+    const suffix = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    return this.request<void>(`/api/v1/logs${suffix}`, { method: "DELETE" });
   }
 
   startSwarmRun(projectId: string, req: SwarmRunRequest): Promise<SwarmRunStatus> {

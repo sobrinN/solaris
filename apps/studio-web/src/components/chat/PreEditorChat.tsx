@@ -211,7 +211,7 @@ export function PreEditorChat({
       });
     } catch (err) {
       setErrorMsg(
-        err instanceof Error ? err.message : "Failed to launch Demo NLE",
+        err instanceof Error ? err.message : "Failed to open Demo Studio",
       );
     } finally {
       setSubmitting(false);
@@ -336,10 +336,11 @@ export function PreEditorChat({
             type="button"
             onClick={() => void handleDemoLaunch()}
             disabled={submitting}
+            title="Open a playable 7-track demo project in the Solaris timeline editor (NLE)"
             className="btn-solar-outline flex h-8 items-center gap-1.5 whitespace-nowrap px-3.5 text-xs font-medium text-areia disabled:opacity-50"
           >
             <Sparkles className="h-3.5 w-3.5 text-amarelo-ideias" />
-            <span>Open Demo NLE</span>
+            <span>Open Demo Studio</span>
           </button>
         </div>
       </header>

@@ -2,7 +2,7 @@
 
 ## Table of Contents
 
-1. [Complete 33-Tool Surface](#1-complete-33-tool-surface)
+1. [Complete 34-Tool Surface](#1-complete-34-tool-surface)
 2. [Track Architecture & Role Hints](#2-track-architecture--role-hints)
 3. [Transform2D Normalized Coordinate System](#3-transform2d-normalized-coordinate-system)
 4. [MCP Resources & Export Status Polling](#4-mcp-resources--export-status-polling)
@@ -10,7 +10,7 @@
 
 ---
 
-## 1. Complete 33-Tool Surface
+## 1. Complete 34-Tool Surface
 
 External MCP uses dotted names (`project.get`); internal OpenRouter swarm uses underscored names (`project_get`). Both normalize identically in the Rust backend.
 
@@ -32,7 +32,7 @@ External MCP uses dotted names (`project.get`); internal OpenRouter swarm uses u
 | Tool | Required Params | Optional Params & Notes |
 | --- | --- | --- |
 | `media.import` | `project_id`, `paths` (`[{path, role_hint?}]`) | Imports local paths into `media_pool` and triggers probing/analysis. Respects `allow_external_media_reads`. |
-| `media.get_manifest` | `project_id` | `media_id` (omit for all assets). Returns `duration_sec`, `has_audio`, `is_log_footage`, `silences`, `beats`, `scene_cuts`, `integrated_lufs`, `transcript`, `waveform_peaks`. |
+| `media.get_manifest` | `project_id` | `media_id` (omit for all assets). Returns `duration_sec`, `has_audio`, `is_log_footage`, `silences`, `beats`, `scene_cuts`, `integrated_lufs`, `transcript`, `waveform_peaks_count`. |
 | `media.transcribe` | `project_id`, `media_id` | `language`. Runs local FFmpeg whisper or OpenRouter STT and persists word-level timestamps into `manifest.transcript`. |
 | `media.extract_keyframes` | `project_id`, `media_id` | `timestamps_sec` (`number[]`). Returns base64 PNG images of raw source media for pre-edit visual scouting. |
 
@@ -53,16 +53,17 @@ External MCP uses dotted names (`project.get`); internal OpenRouter swarm uses u
 | `color.set_grade` | `project_id` | `track_id` & `clip_id` (both or neither; omit to set global `project.active_grade`), `lift`/`gamma`/`gain` (`{r,g,b}`), `contrast`, `saturation`, `exposure`, `temp`, `tint`, `lut_path` (`string \| null`), `lut_intensity` (`0.0–1.0`). |
 | `color.get_scope_stats` | `project_id` | Returns `{ active_grade, brand_default_lut, log_footage_assets }`. Does **not** return pixel luma/vectorscope histograms—use `preview.capture_frame` to visually inspect exposure and skin tones. |
 
-### Captions, Assets & GFX (6 tools)
+### Captions, Assets & GFX (7 tools)
 
 | Tool | Required Params | Optional Params & Notes |
 | --- | --- | --- |
 | `captions.generate_from_transcript` | `project_id` | `media_id`, `preset` (`neon_glow` \| `mono_caps` \| `karaoke` \| `minimal`), `words_per_burst` (`1–6`). Maps against `V1` and `A1`, splits across `>0.6s` silences, sets `y: 0.20`, and replaces prior auto-captions. |
+| `captions.place_script` | `project_id`, `segments` (`[{text, start_sec, duration_sec}]`) | `preset`, `words_per_burst` (`1–6`), `y` (default `0.24`), `replace_existing` (default `true`). Places word-synced kinetic captions on `T1` without requiring an audio transcript (ideal for zero-asset programmatic videos). |
 | `captions.set_style` | `project_id`, `preset` | `font_family`, `highlight_color` (hex). Restyles all `T1` clips. |
 | `assets.search` | — | `query`, `category`. Matches asset `id`, `name`, and `tags`. |
 | `assets.save` | `id`, `name`, `html_source` | `category`, `tags`, `props_schema`, `default_props`, `default_duration_sec`. Lints HTML and validates ID regex `[a-zA-Z0-9_-]{1,64}`. |
-| `gfx.place` | `project_id`, `clip_id`, `label`, `start_sec`, `duration_sec` | `asset_id` + `props` (deep-merged over `default_props`), OR `inline_html`. Always places at default `x:0, y:0, scale:1`—call `timeline.set_transform` afterward to position. |
-| `gfx.lint_html` | `html` | Validates seekable & sandbox rules (`class="clip"`, `data-start`, `data-duration`, no banned APIs/URLs, `<= 128 KB`). |
+| `gfx.place` | `project_id`, `clip_id`, `label`, `start_sec`, `duration_sec` | `asset_id` + `props` (deep-merged over `default_props`), OR `inline_html`. Enforces `lint_gfx_html` server-side automatically. Always places at default `x:0, y:0, scale:1`—call `timeline.set_transform` afterward for floating cards (keep full-canvas programmatic scenes at `(0,0)`). |
+| `gfx.lint_html` | `html` | Validates seekable & sandbox rules (`class="clip"`, `data-start`, `data-duration`, no banned APIs/URLs, `<= 128 KB`). Use to pre-verify or debug rejections (`gfx.place` also runs it automatically). |
 
 ### Audio Mix (3 tools)
 
@@ -79,8 +80,8 @@ External MCP uses dotted names (`project.get`); internal OpenRouter swarm uses u
 | `brand.list_playbooks` | — | Lists all available Brand Playbooks. |
 | `brand.get_playbook` | `brand_id` | Returns `brand_md`, `tokens`, `pacing_rules`, `default_lut`, and `reference_media` with notes. |
 | `preview.seek` | `project_id`, `time_sec` | Moves the live Studio UI Program Monitor playhead. |
-| `preview.capture_frame` | `project_id`, `time_sec` | Returns a composited PNG (V1/V2 + transforms + ColorGrade/LUT + Chromium G1/T1 overlays). Requires an active Video or Image clip at `time_sec`. |
-| `render.export` | `project_id` | `format` (`mp4` \| `mov_pro_res4444` \| `webm_alpha`), `quality` (`draft` \| `standard` \| `high`), `target_lufs` (`-24` to `-8`), `output_name`. Starts an async job and returns `job_id`. |
+| `preview.capture_frame` | `project_id`, `time_sec` | Returns a composited PNG (V1/V2 + transforms + ColorGrade/LUT + Chromium G1/T1 overlays, OR programmatic overlay-only G1/T1 frames over the brand backdrop when no V1/V2 media is present; headless Chromium is required to render `G1`/`T1` overlays). |
+| `render.export` | `project_id` | `format` (`mp4` \| `mov_pro_res4444` \| `webm_alpha`), `quality` (`draft` \| `standard` \| `high`), `target_lufs` (clamped `-70` to `-5`, default `-14.0`), `output_name`. Starts an async job and returns `job_id`. |
 
 ---
 

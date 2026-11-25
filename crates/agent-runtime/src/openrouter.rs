@@ -298,6 +298,14 @@ pub struct ToolCallFunction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ReasoningConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -311,13 +319,37 @@ pub struct ChatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderPreferences>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugins: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CompletionTokensDetails {
+    #[serde(default)]
+    pub reasoning_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChatUsage {
+    #[serde(default)]
+    pub prompt_tokens: Option<u64>,
+    #[serde(default)]
+    pub completion_tokens: Option<u64>,
+    #[serde(default)]
+    pub total_tokens: Option<u64>,
+    #[serde(default)]
+    pub completion_tokens_details: Option<CompletionTokensDetails>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,8 +358,34 @@ pub struct ChatCompletionResponse {
     pub id: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub choices: Vec<ChatChoice>,
+    #[serde(default)]
+    pub usage: Option<ChatUsage>,
+}
+
+impl ChatCompletionResponse {
+    pub fn finish_reason(&self) -> Option<&str> {
+        self.choices
+            .first()
+            .and_then(|c| c.finish_reason.as_deref())
+    }
+
+    pub fn usage_summary(&self) -> String {
+        let Some(ref u) = self.usage else {
+            return "usage=n/a".to_string();
+        };
+        let p = u.prompt_tokens.unwrap_or(0);
+        let c = u.completion_tokens.unwrap_or(0);
+        let r = u
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|d| d.reasoning_tokens);
+        match r {
+            Some(rt) => format!("prompt={p}, completion={c} (reasoning={rt})"),
+            None => format!("prompt={p}, completion={c}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -386,13 +444,15 @@ struct SseChunk {
     model: Option<String>,
     #[serde(default)]
     error: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     choices: Vec<SseChoice>,
+    #[serde(default)]
+    usage: Option<ChatUsage>,
 }
 
 #[derive(Debug, Deserialize)]
 struct SseChoice {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     delta: SseDelta,
     #[serde(default)]
     finish_reason: Option<String>,
@@ -500,9 +560,10 @@ impl OpenRouterClient {
                 .as_deref()
                 .filter(|k| !k.trim().is_empty())
                 .ok_or(AgentError::NotConfigured)?;
-            let val = HeaderValue::from_str(&format!("Bearer {key}"))
+            let mut auth_val = HeaderValue::from_str(&format!("Bearer {key}"))
                 .map_err(|e| AgentError::Serialization(e.to_string()))?;
-            headers.insert(AUTHORIZATION, val);
+            auth_val.set_sensitive(true);
+            headers.insert(AUTHORIZATION, auth_val);
         }
         if let Ok(v) = HeaderValue::from_str(&cfg.http_referer) {
             headers.insert("HTTP-Referer", v);
@@ -604,7 +665,15 @@ impl OpenRouterClient {
                 Ok(r) => {
                     let status = r.status().as_u16();
                     let retry_after = parse_retry_after(r.headers());
-                    let body = r.text().await.unwrap_or_default();
+                    let body_fut = r.text();
+                    let body = if let Some(tok) = cancel {
+                        tokio::select! {
+                            _ = tok.cancelled() => return Err(AgentError::Cancelled),
+                            t = body_fut => t.unwrap_or_default(),
+                        }
+                    } else {
+                        body_fut.await.unwrap_or_default()
+                    };
                     let err = AgentError::HttpStatus {
                         status,
                         message: truncate_msg(&body),
@@ -637,7 +706,16 @@ impl OpenRouterClient {
                 .is_some_and(|ct| ct.to_ascii_lowercase().contains("application/json"));
 
             if is_json_response {
-                let body = match resp.text().await {
+                let body_fut = resp.text();
+                let body_res = if let Some(tok) = cancel {
+                    tokio::select! {
+                        _ = tok.cancelled() => return Err(AgentError::Cancelled),
+                        t = body_fut => t,
+                    }
+                } else {
+                    body_fut.await
+                };
+                let body = match body_res {
                     Ok(b) => b,
                     Err(e) => {
                         let err = AgentError::Transport(e.to_string());
@@ -859,6 +937,7 @@ struct SseAccumulator {
     tool_calls: BTreeMap<usize, ToolCall>,
     tool_id_slots: HashMap<String, usize>,
     reasoning_details: Option<serde_json::Value>,
+    usage: Option<ChatUsage>,
     event_data: String,
     raw_non_sse: String,
     seen_sse_data: bool,
@@ -972,9 +1051,17 @@ impl SseAccumulator {
         if self.model.is_none() {
             self.model = chunk.model;
         }
+        if chunk.usage.is_some() {
+            self.usage = chunk.usage;
+        }
         if let Some(choice) = chunk.choices.into_iter().next() {
-            if choice.finish_reason.is_some() {
-                self.finish_reason = choice.finish_reason;
+            if let Some(reason) = choice.finish_reason.as_deref().filter(|s| !s.is_empty()) {
+                if reason == "error" {
+                    return Err(AgentError::StreamError(
+                        "provider terminated stream with finish_reason=\"error\"".to_string(),
+                    ));
+                }
+                self.finish_reason = Some(reason.to_string());
             }
             if let Some(rd) = choice.delta.reasoning_details {
                 merge_reasoning_details(&mut self.reasoning_details, rd);
@@ -1133,6 +1220,7 @@ impl SseAccumulator {
                 },
                 finish_reason: self.finish_reason.take(),
             }],
+            usage: self.usage.take(),
         })
     }
 }
@@ -1379,5 +1467,92 @@ mod tests {
             extract_json_body_error_code(r#"{"error":{"code":"429","message":"rate limited"}}"#),
             Some(429)
         );
+    }
+
+    #[test]
+    fn sse_accumulator_captures_usage_and_reasoning_tokens() {
+        let mut acc = SseAccumulator::default();
+        acc.feed_line(
+            r#"data: {"id":"gen-9","model":"meta/muse-ember","choices":[{"delta":{"content":"{\"ok\":true}"},"finish_reason":"length"}],"usage":{"prompt_tokens":950,"completion_tokens":1400,"total_tokens":2350,"completion_tokens_details":{"reasoning_tokens":1180}}}"#,
+            &mut |_| {},
+        )
+        .unwrap();
+        let resp = acc.finish(&mut |_| {}).unwrap();
+        assert_eq!(resp.finish_reason(), Some("length"));
+        assert_eq!(
+            resp.usage_summary(),
+            "prompt=950, completion=1400 (reasoning=1180)"
+        );
+
+        let req = ChatRequest {
+            model: Some("test/model".into()),
+            messages: vec![ChatMessage::user_text("hi")],
+            reasoning: Some(ReasoningConfig {
+                effort: Some("low".into()),
+                exclude: None,
+            }),
+            ..ChatRequest::default()
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["reasoning"]["effort"], "low");
+        assert!(v["reasoning"].get("exclude").is_none());
+    }
+
+    #[test]
+    fn sse_handles_null_choices_delta_empty_and_error_finish_reason_and_sensitive_auth() {
+        let mut acc = SseAccumulator::default();
+        let mut streamed = String::new();
+        let mut on_delta = |d: &str| streamed.push_str(d);
+
+        assert!(
+            !acc.feed_line(
+                r#"data: {"id":"gen-null","model":"test/m","choices":[{"delta":{"content":"ok"},"finish_reason":"tool_calls"}]}"#,
+                &mut on_delta
+            )
+            .unwrap()
+        );
+        // Trailing chunk with null delta and empty finish_reason must not abort or overwrite "tool_calls"
+        assert!(
+            !acc.feed_line(
+                r#"data: {"choices":[{"delta":null,"finish_reason":""}]}"#,
+                &mut on_delta
+            )
+            .unwrap()
+        );
+        // Final usage chunk with "choices": null must deserialize cleanly
+        assert!(
+            !acc.feed_line(
+                r#"data: {"choices":null,"usage":{"prompt_tokens":12,"completion_tokens":4,"total_tokens":16}}"#,
+                &mut on_delta
+            )
+            .unwrap()
+        );
+        assert!(acc.feed_line("data: [DONE]", &mut on_delta).unwrap());
+
+        let resp = acc.finish(&mut on_delta).unwrap();
+        assert_eq!(streamed, "ok");
+        assert_eq!(resp.finish_reason(), Some("tool_calls"));
+        assert_eq!(resp.usage_summary(), "prompt=12, completion=4");
+
+        // ChatCompletionResponse also tolerates "choices": null
+        let null_choices_resp: ChatCompletionResponse =
+            serde_json::from_str(r#"{"id":"r1","choices":null}"#).unwrap();
+        assert!(null_choices_resp.choices.is_empty());
+
+        // finish_reason == "error" must surface as StreamError
+        let mut err_acc = SseAccumulator::default();
+        let err = err_acc.feed_line(
+            r#"data: {"choices":[{"delta":{},"finish_reason":"error"}]}"#,
+            &mut |_| {},
+        );
+        assert!(matches!(err, Err(AgentError::StreamError(_))));
+
+        // Authorization header must be marked sensitive
+        let client = OpenRouterClient::new(OpenRouterConfig {
+            api_key: Some("sk-or-test-secret".to_string()),
+            ..OpenRouterConfig::default()
+        });
+        let headers = client.attribution_headers(true).unwrap();
+        assert!(headers.get(AUTHORIZATION).unwrap().is_sensitive());
     }
 }

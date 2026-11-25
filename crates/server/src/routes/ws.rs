@@ -45,6 +45,9 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, project_filter: Optio
                                 | EngineEvent::ExportProgress { project_id, .. }
                                 | EngineEvent::SwarmProgress { project_id, .. }
                                 | EngineEvent::PlayheadSeek { project_id, .. } => project_id == filter,
+                                EngineEvent::LogEmitted { project_id, .. } => {
+                                    project_id.as_deref().is_none_or(|pid| pid == filter)
+                                }
                             };
                             if !matches {
                                 continue;

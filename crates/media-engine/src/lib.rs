@@ -1,4 +1,5 @@
 pub mod analyze;
+pub mod demo_media;
 pub mod error;
 pub mod export;
 pub mod ffmpeg;
@@ -17,6 +18,7 @@ pub use analyze::{
     measure_loudness, parse_ebur128_integrated_lufs, parse_scdet_stderr,
     parse_silencedetect_stderr, probe_and_analyze_fast,
 };
+pub use demo_media::{DemoMediaFile, DemoMediaPack, ensure_demo_media_pack};
 pub use error::MediaError;
 pub use export::{
     ExportFfmpegPlan, ExportPlanOptions, append_color_grade_filters,
@@ -26,7 +28,7 @@ pub use export::{
 pub use ffmpeg::{MediaToolchain, ToolchainCapabilities, detect_chromium_binary};
 pub use frames::{
     CompositeFrameOptions, build_grade_preview_vf, capture_composited_frame_png, capture_frame_png,
-    capture_graded_frame_png, extract_keyframes_png,
+    capture_graded_frame_png, capture_overlay_only_frame_png, extract_keyframes_png,
 };
 pub use gfx_render::{
     BrandFontData, BrandFontFace, OverlayImageSpec, build_caption_overlay_html, build_overlay_html,

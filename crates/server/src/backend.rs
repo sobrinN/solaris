@@ -17,9 +17,9 @@ use solaris_core_ir::{
     validate_single_asset,
 };
 use solaris_media_engine::{
-    CompositeFrameOptions, capture_composited_frame_png, extract_audio_for_stt,
-    extract_keyframes_png, generate_llm_video_proxy, render_single_frame_overlays_via_chromium,
-    transcribe_via_ffmpeg_whisper_checked,
+    CompositeFrameOptions, capture_composited_frame_png, capture_overlay_only_frame_png,
+    extract_audio_for_stt, extract_keyframes_png, generate_llm_video_proxy,
+    render_single_frame_overlays_via_chromium, transcribe_via_ffmpeg_whisper_checked,
 };
 use uuid::Uuid;
 
@@ -527,49 +527,6 @@ impl SolarisBackend for AppState {
                 }
             }
 
-            let Some((raw_path, src_t, label, clip_transform)) = target else {
-                return Err(AgentError::ToolError(format!(
-                    "no active video/image clip at {time_sec:.2}s"
-                )));
-            };
-
-            let safe_path = self
-                .resolve_readable_path_async(raw_path)
-                .await
-                .map_err(|e| AgentError::ToolError(e.to_string()))?;
-
-            let (brand_tokens, brand_default_lut, brand_fonts) = self
-                .load_brand_render_context(&project.brand_playbook_id)
-                .await;
-
-            // Resolve active grade at `time_sec`: FX adjustment clip -> project.active_grade -> brand.default_lut
-            let mut effective_grade = project
-                .tracks
-                .iter()
-                .find(|t| t.kind == TrackKind::Grade && !t.muted)
-                .and_then(|t| {
-                    t.clips.iter().find(|c| {
-                        time_sec >= c.start_sec && time_sec <= c.start_sec + c.duration_sec
-                    })
-                })
-                .and_then(|c| match &c.payload {
-                    ClipKind::Grade { grade } => Some(grade.clone()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| project.active_grade.clone());
-
-            if effective_grade.lut_path.is_none() {
-                effective_grade.lut_path = brand_default_lut;
-            }
-
-            let resolved_lut = match effective_grade.lut_path.as_deref() {
-                Some(raw_lut) if !raw_lut.trim().is_empty() => self
-                    .resolve_readable_path_async(raw_lut.to_string())
-                    .await
-                    .ok(),
-                _ => None,
-            };
-
             let has_active_overlays = project.tracks.iter().any(|t| {
                 !t.muted
                     && matches!(t.kind, TrackKind::Gfx | TrackKind::Text)
@@ -578,6 +535,16 @@ impl SolarisBackend for AppState {
                         .any(|c| time_sec >= c.start_sec && time_sec < c.start_sec + c.duration_sec)
             });
 
+            if target.is_none() && !has_active_overlays {
+                return Err(AgentError::ToolError(format!(
+                    "no active video/image or GFX/caption clip at {time_sec:.2}s"
+                )));
+            }
+
+            let (brand_tokens, brand_default_lut, brand_fonts) = self
+                .load_brand_render_context(&project.brand_playbook_id)
+                .await;
+
             let overlay_tmp_dir = self
                 .inner
                 .workspace_dir
@@ -585,6 +552,7 @@ impl SolarisBackend for AppState {
                 .join(format!("ov_{}", Uuid::new_v4()));
             let _ov_dir_guard = TempDirGuard(overlay_tmp_dir.clone());
 
+            let mut overlay_render_error: Option<String> = None;
             let overlay_pngs =
                 if has_active_overlays && self.inner.toolchain.chromium_path.is_some() {
                     let workspace_assets: Vec<SavedCodeAsset> =
@@ -609,19 +577,23 @@ impl SolarisBackend for AppState {
                     {
                         Ok(Ok(paths)) => paths,
                         Ok(Err(err)) => {
+                            let msg = err.to_string();
                             tracing::warn!(
                                 project_id = %pid,
                                 time_sec,
-                                "single-frame overlay render failed during preview capture: {err}"
+                                "single-frame overlay render failed during preview capture: {msg}"
                             );
+                            overlay_render_error = Some(msg);
                             Vec::new()
                         }
                         Err(err) => {
+                            let msg = format!("single-frame overlay render task failed: {err}");
                             tracing::warn!(
                                 project_id = %pid,
                                 time_sec,
-                                "single-frame overlay render task failed: {err}"
+                                "{msg}"
                             );
+                            overlay_render_error = Some(msg);
                             Vec::new()
                         }
                     }
@@ -635,31 +607,121 @@ impl SolarisBackend for AppState {
                 .join("tmp_frames")
                 .join(format!("preview_{}.png", Uuid::new_v4()));
             let _png_guard = TempFileGuard(out_png.clone());
-            let tc = self.inner.toolchain.clone();
-            let png_clone = out_png.clone();
             let canvas_w = project.canvas.width;
             let canvas_h = project.canvas.height;
             let overlay_count = overlay_pngs.len();
-            let (_, actual_w, actual_h) = tokio::task::spawn_blocking(move || {
-                capture_composited_frame_png(
-                    &tc,
-                    &safe_path,
-                    src_t,
-                    &png_clone,
-                    &CompositeFrameOptions {
-                        canvas_width: canvas_w,
-                        canvas_height: canvas_h,
-                        max_width: Some(720),
-                        transform: Some(&clip_transform),
-                        grade: Some(&effective_grade),
-                        resolved_lut: resolved_lut.as_deref(),
-                        overlay_pngs: &overlay_pngs,
-                    },
+
+            let (actual_w, actual_h, note) = if let Some((raw_path, src_t, label, clip_transform)) =
+                target
+            {
+                let safe_path = self
+                    .resolve_readable_path_async(raw_path)
+                    .await
+                    .map_err(|e| AgentError::ToolError(e.to_string()))?;
+
+                // Resolve active grade at `time_sec`: FX adjustment clip -> project.active_grade -> brand.default_lut
+                let mut effective_grade = project
+                    .tracks
+                    .iter()
+                    .find(|t| t.kind == TrackKind::Grade && !t.muted)
+                    .and_then(|t| {
+                        t.clips.iter().find(|c| {
+                            time_sec >= c.start_sec && time_sec <= c.start_sec + c.duration_sec
+                        })
+                    })
+                    .and_then(|c| match &c.payload {
+                        ClipKind::Grade { grade } => Some(grade.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| project.active_grade.clone());
+
+                if effective_grade.lut_path.is_none() {
+                    effective_grade.lut_path = brand_default_lut;
+                }
+
+                let resolved_lut = match effective_grade.lut_path.as_deref() {
+                    Some(raw_lut) if !raw_lut.trim().is_empty() => self
+                        .resolve_readable_path_async(raw_lut.to_string())
+                        .await
+                        .ok(),
+                    _ => None,
+                };
+
+                let tc = self.inner.toolchain.clone();
+                let png_clone = out_png.clone();
+                let (_, w, h) = tokio::task::spawn_blocking(move || {
+                    capture_composited_frame_png(
+                        &tc,
+                        &safe_path,
+                        src_t,
+                        &png_clone,
+                        &CompositeFrameOptions {
+                            canvas_width: canvas_w,
+                            canvas_height: canvas_h,
+                            max_width: Some(720),
+                            transform: Some(&clip_transform),
+                            grade: Some(&effective_grade),
+                            resolved_lut: resolved_lut.as_deref(),
+                            overlay_pngs: &overlay_pngs,
+                        },
+                    )
+                })
+                .await
+                .map_err(|e| AgentError::Backend(e.to_string()))?
+                .map_err(|e| AgentError::Backend(e.to_string()))?;
+
+                let n = if overlay_count > 0 {
+                    format!(
+                        "Composited frame ({w}x{h}, {overlay_count} overlays) from '{label}' at source {src_t:.2}s"
+                    )
+                } else {
+                    format!(
+                        "Composited graded frame ({w}x{h}) from '{label}' at source {src_t:.2}s"
+                    )
+                };
+                (w, h, n)
+            } else {
+                if overlay_pngs.is_empty() {
+                    let detail = if let Some(err_msg) = overlay_render_error {
+                        format!(
+                            "programmatic overlays active at {time_sec:.2}s, but overlay rendering failed: {err_msg}"
+                        )
+                    } else if self.inner.toolchain.chromium_path.is_none() {
+                        format!(
+                            "programmatic overlays active at {time_sec:.2}s, but headless Chromium is unavailable to render preview frames"
+                        )
+                    } else {
+                        format!(
+                            "programmatic overlays active at {time_sec:.2}s produced no renderable overlay frames"
+                        )
+                    };
+                    return Err(AgentError::ToolError(detail));
+                }
+                let tc = self.inner.toolchain.clone();
+                let png_clone = out_png.clone();
+                let bg_hex = brand_tokens.bg.clone();
+                let (_, w, h) = tokio::task::spawn_blocking(move || {
+                    capture_overlay_only_frame_png(
+                        &tc,
+                        &png_clone,
+                        canvas_w,
+                        canvas_h,
+                        Some(720),
+                        &bg_hex,
+                        &overlay_pngs,
+                    )
+                })
+                .await
+                .map_err(|e| AgentError::Backend(e.to_string()))?
+                .map_err(|e| AgentError::Backend(e.to_string()))?;
+                (
+                    w,
+                    h,
+                    format!(
+                        "Programmatic GFX/caption frame ({w}x{h}, {overlay_count} layer(s)) at {time_sec:.2}s"
+                    ),
                 )
-            })
-            .await
-            .map_err(|e| AgentError::Backend(e.to_string()))?
-            .map_err(|e| AgentError::Backend(e.to_string()))?;
+            };
 
             let bytes = tokio::fs::read(&out_png)
                 .await
@@ -672,15 +734,7 @@ impl SolarisBackend for AppState {
                 width: actual_w,
                 height: actual_h,
                 png_base64: BASE64.encode(bytes),
-                note: if overlay_count > 0 {
-                    format!(
-                        "Composited frame ({actual_w}x{actual_h}, {overlay_count} overlays) from '{label}' at source {src_t:.2}s"
-                    )
-                } else {
-                    format!(
-                        "Composited graded frame ({actual_w}x{actual_h}) from '{label}' at source {src_t:.2}s"
-                    )
-                },
+                note,
             })
         })
     }
@@ -1091,6 +1145,10 @@ impl SolarisBackend for AppState {
         tokio::spawn(async move {
             let _ = state.release_track_lock(&pid, &tid, &aid).await;
         });
+    }
+
+    fn emit_log(&self, entry: solaris_core_ir::LogEntry) {
+        self.push_log(entry);
     }
 }
 

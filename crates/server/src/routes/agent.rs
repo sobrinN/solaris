@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,9 @@ use solaris_agent_runtime::{
     ModelRecommendation, ModelRoleKind, SkillDoc, SolarisBackend, SwarmRunRequest, list_skills,
     run_qa_pass, run_swarm,
 };
-use solaris_core_ir::{EngineEvent, QaReport, SwarmRunState, SwarmRunStatus, TranscriptWord};
+use solaris_core_ir::{
+    EngineEvent, LogEntry, LogLevel, QaReport, SwarmRunState, SwarmRunStatus, TranscriptWord,
+};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -392,4 +394,49 @@ pub async fn run_project_qa(
         .map(|r| (r.primary.as_str(), r.fallbacks.as_slice()));
     let report = run_qa_pass(&state, openrouter, vision_ref, &id, auto_fix, &cancel, None).await;
     Ok(Json(report))
+}
+
+#[derive(Deserialize, Default)]
+pub struct LogsQuery {
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub level: Option<LogLevel>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct ClearLogsQuery {
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+pub async fn get_logs(
+    State(state): State<AppState>,
+    Query(query): Query<LogsQuery>,
+) -> Result<Json<Vec<LogEntry>>, (StatusCode, String)> {
+    if let Some(ref pid) = query.project_id {
+        validate_safe_id(pid)?;
+    }
+    if query.limit == Some(0) {
+        return Ok(Json(Vec::new()));
+    }
+    let limit = query.limit.unwrap_or(200);
+    Ok(Json(state.list_logs(
+        query.project_id.as_deref(),
+        query.level,
+        limit,
+    )))
+}
+
+pub async fn clear_logs(
+    State(state): State<AppState>,
+    Query(query): Query<ClearLogsQuery>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if let Some(ref pid) = query.project_id {
+        validate_safe_id(pid)?;
+    }
+    state.clear_logs(query.project_id.as_deref());
+    Ok(StatusCode::NO_CONTENT)
 }

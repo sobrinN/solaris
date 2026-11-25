@@ -415,6 +415,37 @@ pub fn all_tools() -> Vec<ToolSpec> {
             annotations: MUTATE_IDEMPOTENT,
         },
         ToolSpec {
+            mcp_name: "captions.place_script",
+            llm_name: "captions_place_script",
+            description: "Place scripted, word-synced kinetic caption bursts directly on T1 without requiring an audio transcript (ideal for programmatic/zero-asset videos).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string"},
+                    "preset": {"type": "string", "enum": ["neon_glow", "mono_caps", "karaoke", "minimal"]},
+                    "words_per_burst": {"type": "integer", "minimum": 1, "maximum": 6},
+                    "y": {"type": "number", "minimum": -0.32, "maximum": 0.32},
+                    "replace_existing": {"type": "boolean"},
+                    "segments": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 64,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "text": {"type": "string"},
+                                "start_sec": {"type": "number", "minimum": 0.0},
+                                "duration_sec": {"type": "number", "minimum": 0.06}
+                            },
+                            "required": ["text", "start_sec", "duration_sec"]
+                        }
+                    }
+                },
+                "required": ["project_id", "segments"]
+            }),
+            annotations: MUTATE_NON_IDEMPOTENT,
+        },
+        ToolSpec {
             mcp_name: "assets.search",
             llm_name: "assets_search",
             description: "Search reusable HTML/CSS/GSAP motion-graphic SavedCodeAssets by query or category.",
@@ -561,7 +592,7 @@ pub fn all_tools() -> Vec<ToolSpec> {
         ToolSpec {
             mcp_name: "preview.capture_frame",
             llm_name: "preview_capture_frame",
-            description: "Capture a PNG frame from the active timeline video at time_sec for multimodal visual QA.",
+            description: "Capture a PNG frame from the active timeline at time_sec for multimodal visual QA (supports both video/image tracks and programmatic G1/T1 overlay-only timelines).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -637,6 +668,7 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
             "media.transcribe",
             "brand.get_playbook",
             "captions.generate_from_transcript",
+            "captions.place_script",
             "captions.set_style",
             "timeline.set_transform",
             "preview.capture_frame",
@@ -716,6 +748,7 @@ pub fn normalize_tool_name(raw: &str) -> &str {
             "captions_generate_from_transcript",
             "captions.generate_from_transcript",
         ),
+        ("captions_place_script", "captions.place_script"),
         ("captions_set_style", "captions.set_style"),
         ("assets_search", "assets.search"),
         ("assets_save", "assets.save"),

@@ -222,9 +222,82 @@
 - [x] **Reusable Styled Select (`apps/studio-web/src/components/ui/SolarSelect.tsx`)**: Extract custom-chevron `appearance-none` select primitive to eliminate mismatched native OS dropdown arrows across Pre-Editor, AI Settings, Brand Playbook, and Export modals.
 - [x] **Pre-Editor Landing & Composer (`apps/studio-web/src/components/chat/PreEditorChat.tsx`)**: Unify hero + composer into a single vertically balanced stage (eliminating the empty vertical void), fix bottom toolbar wrapping so the submit button stays anchored cleanly on the right in one row, consolidate fragmented AI/Model Advisor chrome into a sleek single-line selector pill, move starter templates beneath the composer as quick-start chips, align headline to `DESIGN.md` fluid scale, remove em-dashes and noisy engine version jargon from the top bar, and unify header pill heights + divider.
 - [x] **Studio NLE Layout, Program Monitor & Timeline (`StudioWorkspace.tsx`, `WebGLProgramStage.tsx`, `TimelinePanel.tsx`, `InspectorPanel.tsx`, `ColorWheelControl.tsx`, `SwarmActivityPanel.tsx`)**: Give the Program Monitor Media-First column dominance with non-overflowing responsive grid tracks, fix 16:9/9:16/1:1 aspect-ratio distortion via `ResizeObserver` fit math in `WebGLProgramStage`, fix 160px horizontal overflow at 1.0× zoom in `TimelinePanel` + add clickable timecode ruler & playhead cap, prevent Inspector color-wheel overflow at 1080–1280px, center GFX thumbnails, fix GFX/Swarm header cramping, and lift all sub-10px typography (`text-[8px]`/`text-[9px]`) to `text-[10px]`+.
+- [x] **Unified Viewer & Wider Bins (`StudioWorkspace.tsx`, `SourceMonitor.tsx`)**: Merged the separate Source and Program monitors into one viewer with `Program | Source` tabs (clicking a Media clip opens Source; play/seek/Insert Range return to Program), extracted IN/OUT trim into `SourceMonitor`, gave Director & Swarm its own full-height column, widened the Media/GFX column (320px xl) with both bins splitting height and a 2-column GFX thumbnail grid. Removed the two saved `three_ai_tools_reel_(demo)` projects from `.solaris-data`.
 - [x] **Modals & Drawers (`ExportModal.tsx`, `AiSettingsModal.tsx`, `BrandPlaybookDrawer.tsx`)**: Add backdrop click-to-dismiss, align Export `grid-cols-2` labels/inputs cleanly, remove redundant double model selector in `AiSettingsModal`, and apply `SolarSelect`.
 
 ### 7.2 Solaris Built-In & External Agent Skills Overhaul (Benchmarked vs `motion-director` & `skills-for-reference`)
 - [x] **Audit & Upgrade `skills/` (`solaris/skills/*`)**: Benchmark Solaris's built-in skills against `motion-director` (progressive disclosure, decision gates, numbers-only specs, banned-defaults lists, multi-round critique/QA loop, deterministic verification, token economy, exact MCP/REST/tool workflows) and upgrade/restructure Solaris's skills + `references/` so internal OpenRouter agents and external LLM agents (Codex, Antigravity, Claude Code) drive Solaris cleanly end-to-end.
 - [x] **Sync Installer, Embedded Skills, Runtime & Docs**: Ensure `solaris-mcp install-skills` installs all skill files AND `references/` subdirectories cleanly for Antigravity, Codex, and Claude Code, keep `crates/agent-runtime` skill injection and `docs/MCP_AND_SKILLS.md` in sync, and validate every skill with `validate_skill.py`.
 - [x] **Full Verification, Commit & Push**: Run `cargo fmt`, `cargo clippy`, `cargo test`, Tauri check, `npm run typecheck`, `npm test`, `npm run build`, and `audit_taste.py`, update `tasks/lessons.md`, then commit and push to `origin/main`.
+
+---
+
+## Track 8 — OpenRouter Reliability, Diagnostic Logs & Zero-Asset Programmatic Video Production
+
+- [x] **Diagnostic Logs Pipeline (`core-ir`, `agent-runtime`, `server`, `engine-client`, `studio-web`)**: Add `LogLevel` + `LogEntry` + `EngineEvent::LogEmitted`, bounded server ring buffer + `GET/DELETE /api/v1/logs`, emit structured Swarm/OpenRouter/Tool/QA/Export logs (model, `finish_reason`, token/reasoning usage, raw parse failure context, never secrets), and add a dedicated **Logs** section + expandable Logs Drawer in Studio UI with error badges, filtering, and copy-all.
+- [x] **Fix OpenRouter Malformed/Truncated Plan JSON (`openrouter.rs`, `swarm/llm.rs`, `advisor.rs`, `qa/vision.rs`)**: Capture `usage` + `reasoning_tokens` + `finish_reason` from OpenRouter SSE/JSON responses, support `response_format` when model advertises it, raise `max_tokens` (Director `4096`/`8192` retry, Worker `8192`, Vision QA `1024`), make `DirectorPlan` resilient with `#[serde(default)]`, add 1-shot automatic retry on truncated/malformed Director JSON, and reward `structured_outputs`/`response_format`/`tool_choice` in `ModelAdvisor`.
+- [x] **Zero-Asset Programmatic Video Production (`swarm/`, `tools/`, `media-engine`, `server`, `studio-web`, `skills/`)**: Detect empty visual media pools and run full programmatic video production (multi-scene full-canvas responsive HTML/CSS/SVG/GSAP motion graphics on `G1` covering `0.0s..target_duration_sec` + new `captions.place_script` tool for synchronized kinetic captions on `T1` + upgraded deterministic zero-asset fallback + overlay-only `capture_preview_frame` for Vision QA + hide empty stage placeholder when GFX/captions are active + update `skills/`).
+- [x] **Verification & Lessons**: Add targeted unit tests, run full verification (`cargo fmt`, `cargo clippy`, `cargo test`, Tauri check, `npm run typecheck`, `npm test`, `npm run build`), and update `tasks/lessons.md`.
+
+---
+
+## Track 9 — Demo Studio Overhaul, Transparent GFX & Stage Scaling
+
+- [x] **Fix Opaque White Iframe Background & Resolution-Independent GFX/Caption Stage (`packages/gfx-runtime`, `crates/media-engine`, `apps/studio-web`)**: Add `color-scheme: dark` to sandboxed GFX documents to eliminate Chromium/WebKit opaque-white canvas mismatch, render GFX overlays in a canonical virtual stage scaled to the fitted monitor, scale captions proportionally, and add GSAP entrance/exit choreography to starter code assets.
+- [x] **Real Playable Demo Media Generator & Canonical Demo Endpoint (`crates/media-engine/src/demo_media.rs`, `crates/server`, `packages/engine-client`)**: Synthesize and cache real playable 9:16 video clips (FFmpeg animated studio plates with pure-Rust PNG fallback) + real 44.1kHz stereo WAV audio stems (118 BPM musical groove + synced narration cadence), and expose `POST /api/v1/projects/demo` building a complete 16s 7-track showcase under stable ID `solaris-demo-reel` (preventing duplicate `Recent` entries).
+- [x] **Studio UX, Restrained Cursors, Scopes & Timeline Span (`apps/studio-web`)**: Clamp Swarm cursors inside viewport bounds, remove `program.stage` blocking anchor, default to clean Focus mode on open (auto-showing cursors on real Swarm runs), fix `BroadcastScopes` header wrapping, eliminate empty trailing timeline dead space, initialize Demo playhead at `1.2s` hero frame, and clarify `Open Demo Studio` CTA.
+- [x] **Verification & Cleanup**: Remove stale duplicate demo JSONs, add regression tests, run full Rust/TS/Tauri verification suite, and record lessons in `tasks/lessons.md`.
+
+---
+
+## Track 10 — Programmatic GFX Reliability, Honest Vision QA & Broadcast-Grade Captions
+
+- [x] **Fix Model Routing, Specialist Truncation Recovery & GFX Cadence (`crates/agent-runtime/src/advisor.rs`, `swarm/llm.rs`, `swarm/mod.rs`, `skills/captions-and-gfx/SKILL.md`)**:
+  - Exclude `:batch` OpenRouter variants from interactive Director/Specialist recommendations in `ModelAdvisor`.
+  - Raise `WORKER_MAX_TOKENS` to `16384`, recover from mid-stream tool-call truncation (`StreamError`) inside `run_llm_worker_loop` by rotating fallback models and coaching 1-scene-per-turn `gfx_place` calls (skipping redundant `gfx_lint_html`), nudge `gfx-01` if `g1` coverage is incomplete, and retry a failed critical `gfx-01` pass once on the Director/fallback model before giving up.
+  - Instruct `caps-01` that Director runs QA automatically so it stops wasting turns calling `project_get`.
+- [x] **Make Vision QA & Pacing Checks Honest on Missing Visuals (`crates/agent-runtime/src/swarm/qa/checks.rs`, `vision.rs`, `mod.rs`, `swarm/mod.rs`)**:
+  - Emit a hard `QaSeverity::Issue` (`visuals-empty`) when `V1`, `V2`, and `G1` all have 0 active clips, and `g1-coverage-low` when programmatic `G1` leaves large uncovered gaps.
+  - Skip shifting full-canvas (`100vw`/`100vh`/`inset:0`) `G1` scenes during caption anti-collision in `check_and_fix_safe_zones`.
+  - Upgrade `VisionQaResponse` to support structured `issues` (`QaSeverity::Issue`) alongside `warnings` (`QaSeverity::Warning`), pass timeline/programmatic context to the VLM, and feed `specialist_errors` into QA so failed specialists or pitch-black frames never pass at `85/100`.
+- [x] **Fix Caption Font Fallback, Smart Clause Splitting & Preview/Export Parity (`crates/agent-runtime/src/tools/exec.rs`, `crates/media-engine/src/gfx_render.rs`, `apps/studio-web/src/components/studio/WebGLProgramStage.tsx`)**:
+  - Resolve `"Sora"` → `"Sora Variable", "Sora", var(--font-sans)` in `WebGLProgramStage.tsx` so captions never fall back to system serif fonts.
+  - Preserve segment boundaries in `captions.place_script`, break bursts cleanly on sentence/clause punctuation, and balance 4-word/orphan chunks (`2+2` instead of `3+1`).
+  - Align `transform.y` vertical mapping and elevate `NeonGlow`/preset typography & contrast across Studio preview (`WebGLProgramStage.tsx`) and Chromium export (`gfx_render.rs`).
+- [x] **Targeted Tests, Full Verification & Lessons**: Add unit tests for `:batch` filtering, punctuation/segment caption splitting, empty-visuals & Vision `issues` QA scoring, full-canvas anti-collision guard, and run `cargo fmt`, `cargo clippy`, `cargo test`, `npm run typecheck`, `npm test`, `npm run build`.
+
+---
+
+## Track 11 — Dynamic Parallel Micro-Agent Swarm, Low-Latency Reasoning & Live Timecode Cursors
+
+- [x] **OpenRouter Low-Latency Worker Reasoning & Structured Scene Plan (`crates/agent-runtime/src/openrouter.rs`, `swarm/mod.rs`, `swarm/llm.rs`)**:
+  - Add optional `ReasoningConfig` (`effort: "low"`) to `ChatRequest`, gated strictly on `advisor.model_supports_parameter(model, "reasoning")` so fast workers avoid 2,000+ token reasoning stalls without breaking non-reasoning endpoints.
+  - Extend `DirectorPlan` with `art_direction` and structured `scenes: Vec<SceneSpec>` (with backward-compatible `[start-end]` `gfx_notes` parser + contiguous normalization so all scenes span `0.0s..target_duration_sec` with zero gaps).
+- [x] **Parallel Scene Micro-Agent Fan-Out (`JoinSet`) & Wave 1/2 Footage Overlap (`crates/agent-runtime/src/swarm/mod.rs`, `swarm/llm.rs`)**:
+  - Fan out programmatic `G1` scenes concurrently across up to 7 dedicated `gfx-01..0N` micro-agents via `tokio::task::JoinSet`, each authoring 1 cohesive, art-directed scene in 1–2 turns with per-scene `director_model` retry on failure.
+  - Overlap Wave 1 (`razor-01` + `grade-01` + `mix-01`) in footage edits before Wave 2 (`broll-01` + `caps-01` + `gfx-01`) so color, audio, and timeline animate simultaneously from second 1.
+  - Emit throttled live streaming cursor pulses and exact `timeline.track.<id>@<sec>` anchors when tools stream and commit.
+- [x] **High-Velocity Multi-Cursor UI & Exact Timecode Targeting (`apps/studio-web/src/styles/globals.css`, `SwarmCursorLayer.tsx`, `StudioWorkspace.tsx`)**:
+  - Process every newly arrived `op_committed`/`cursor_pulse` event in `SwarmCursorLayer` (fixing batched multi-agent event drops), remove the 3-cursor cap, support exact `timeline.track.<id>@<sec>` X-coordinate mapping on `[data-timeline-lane]`, and tighten cursor transitions (`280ms`).
+- [x] **Tests, Full Verification & Docs**: Add unit tests for `ReasoningConfig` serialization, `resolve_programmatic_scenes` normalization/parsing, and run `cargo fmt`, `cargo clippy`, `cargo test`, `npm run typecheck`, `npm test`, `npm run build`.
+
+---
+
+## Track 12 — Deep Diff Review & Hardening Pass (5-Domain Audit)
+
+- [x] **Swarm Concurrency, Track Locks & LLM Hygiene (`crates/agent-runtime/src/swarm/{mod.rs, llm.rs, deterministic.rs}`)**:
+  - Fixed `f64::clamp(min > max)` panic and `NaN` propagation in `resolve_programmatic_scenes` + folded `> 7` trailing outro scenes cleanly instead of dropping them.
+  - Made programmatic scene `clip_id` unique per run (`gfx-s{:02}-{run_tag}`), acquired a shared `TrackLockGuard` (`"gfx-swarm"`) on `"g1"` during parallel `JoinSet` fan-out, added cancellation `select!` + `abort_all()`, normalized deterministic `"gfx-fanout:"` error prefixes, moved `mix-01` to Wave 2 to eliminate `v1`/`a1` lock collisions & stale empty-spine snaps, and added child-token cancellation on fatal Wave 1 spine failure.
+  - Hardened Director retry (`art_direction` + `scenes` preserved, low-effort reasoning gated, no consecutive `user` turns), stripped cross-provider `reasoning_details` on model rotation, enforced a true role tool allowlist in `validate_worker_tool_scope`, fixed `infer_target_duration_sec` decade/minute parsing, and passed normalized scene beats to `caps-01`.
+  - Fixed `deterministic.rs` contiguous scene/caption grid overlaps, `Caps` fallback respecting non-empty `T1`, topic-agnostic Brand CSS-token fallback HTML, and voiceover-only `spine_dur` preference.
+- [x] **OpenRouter, Advisor, Tools & QA Accuracy (`openrouter.rs`, `advisor.rs`, `tools/exec.rs`, `tools/schemas.rs`, `swarm/qa/*`)**:
+  - Hardened OpenRouter SSE for null `choices`/`delta`, empty/`"error"` `finish_reason`, `set_sensitive(true)` on `AUTHORIZATION`, and cancellable body reads; re-exported `ReasoningConfig` and `CompletionTokensDetails`.
+  - Fixed `ModelAdvisor` 4-tier variant lookup priority, empty-catalog stale-cache preservation, `Arc` cache storage, exact `:batch` segment matching, and STT ranking bonuses.
+  - Hardened `captions.place_script` (pre-validation before deleting `T1`, sorted/de-overlapped bursts, word clamping, strict boolean `replace_existing`, CJK/RTL/abbreviation tokenization) and `gfx.place` (`"props": null` safety).
+  - Fixed `qa/checks.rs` early-gap `break;` corrupting `g1` coverage, muted-track duration exclusion, `asset_id`-aware `is_full_canvas_gfx` without child pseudo-element false positives, no-op overlap auto-fix avoidance, `score <= 65` cap on hard issues, cancelled QA `passed: false`, and Vision QA reasoning/parse-error warnings + `G1`-aware sampling + secret scrubbing.
+- [x] **Media Engine, Server Security & GFX Parity (`media-engine`, `server`)**:
+  - Eliminated concurrent demo `.tmp` races & unbounded FFmpeg spawns (`demo_pack_lock`, unique UUID temp paths with `TempFileGuard`), memoized cached demo WAV peaks/beats, added `:eval=frame` to animated FFmpeg `eq=` filters, fixed `solaris-demo-reel` reset persistence race + `ProjectReset` WS broadcast + swarm cancellation, and hardened `sanitize_log_text` across case-insensitive `Bearer`/`Basic`, session/ticket, and AWS SigV4 tokens.
+  - Stripped `"`/`'` in `gfx_render.rs` `sanitize_css_val` to prevent HTML attribute breakout, aligned Chromium `G1` viewport & `deviceScaleFactor` 1:1 with Studio preview (`gfx_design_viewport`), fixed landscape caption `y` clamp, improved `frames.rs` RGB overlay compositing & top-layer no-FFmpeg fallback, surfaced Chromium render errors in `backend.rs`, bumped WS broadcast buffer to `2048`, and logged Chromium-missing export failures.
+- [x] **Frontend Studio Web & Docs Sync (`apps/studio-web`, `skills/`, `README.md`, `ARCHITECTURE.md`)**:
+  - Fixed `SwarmCursorLayer` permanent freeze past the 121-event cap (`lastProcessedEventRef`), skipped appending `log_emitted` to `events`, separated `lastRealEventAt` for idle expiry, and aligned `timelineSpan` X mapping.
+  - Paused timeline playback on `Source` tab switch, ignored `0×0` hidden `ResizeObserver` measurements, fixed `LogsDrawer` first-click error collapse & chronological clipboard copy + error handling, hardened `SourceMonitor` IN/OUT clamping/cleanup/reframe box, merged HTTP+WS logs cleanly in `App.tsx`, and synced `skills/`, `README.md`, and `ARCHITECTURE.md` (34 tools, overlay-only capture, full-canvas `G1` exemption).

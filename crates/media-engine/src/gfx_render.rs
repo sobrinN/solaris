@@ -321,6 +321,7 @@ struct ChromiumCdpSession {
     _child: ChildGuard,
     _profile_dir: TempDirGuard,
     next_id: u64,
+    viewport: (u32, u32, f64),
 }
 
 impl ChromiumCdpSession {
@@ -409,6 +410,7 @@ impl ChromiumCdpSession {
             _profile_dir: profile_guard,
             ws,
             next_id: 1,
+            viewport: (width, height, 1.0),
         };
 
         // Configure offline network isolation, transparent RGBA background, and exact viewport
@@ -437,6 +439,26 @@ impl ChromiumCdpSession {
         )?;
 
         Ok(session)
+    }
+
+    fn set_viewport(&mut self, css_w: u32, css_h: u32, dpr: f64) -> Result<(), MediaError> {
+        if self.viewport.0 == css_w
+            && self.viewport.1 == css_h
+            && (self.viewport.2 - dpr).abs() < 1e-4
+        {
+            return Ok(());
+        }
+        self.send_command(
+            "Emulation.setDeviceMetricsOverride",
+            json!({
+                "width": css_w,
+                "height": css_h,
+                "deviceScaleFactor": dpr,
+                "mobile": false
+            }),
+        )?;
+        self.viewport = (css_w, css_h, dpr);
+        Ok(())
     }
 
     fn send_command(
@@ -677,7 +699,12 @@ fn escape_html(raw: &str) -> String {
 fn sanitize_css_val(raw: &str) -> String {
     let mut out: String = raw
         .chars()
-        .filter(|c| !matches!(c, ';' | '{' | '}' | '<' | '>' | '\\' | '\n' | '\r'))
+        .filter(|c| {
+            !matches!(
+                c,
+                ';' | '{' | '}' | '<' | '>' | '\\' | '\n' | '\r' | '"' | '\''
+            )
+        })
         .collect();
     loop {
         let next = out.replace("/*", "").replace("*/", "");
@@ -687,6 +714,26 @@ fn sanitize_css_val(raw: &str) -> String {
         out = next;
     }
     out.trim().to_string()
+}
+
+/// Computes the CSS design viewport and device pixel ratio for `ClipKind::Gfx` overlays
+/// so Chromium renders in the exact same logical coordinate space as `WebGLProgramStage.tsx`
+/// while producing crisp full-resolution RGBA PNGs at `canvas_w x canvas_h`.
+pub fn gfx_design_viewport(canvas_w: u32, canvas_h: u32) -> (u32, u32, f64) {
+    let aspect = canvas_w as f64 / canvas_h.max(1) as f64;
+    let design_w = if aspect < 0.85 {
+        540
+    } else if aspect > 1.2 {
+        960
+    } else {
+        720
+    };
+    if canvas_w <= design_w {
+        return (canvas_w, canvas_h, 1.0);
+    }
+    let dpr = canvas_w as f64 / design_w as f64;
+    let design_h = ((canvas_h as f64 / dpr).round() as u32).max(2);
+    (design_w, design_h, dpr)
 }
 
 fn is_valid_font_mime(mime: &str) -> bool {
@@ -790,6 +837,7 @@ fn run_chromium_screenshot(
     png_path: &Path,
     width: u32,
     height: u32,
+    dpr: f64,
     temp_dir: &Path,
 ) -> Result<(), MediaError> {
     let file_url = path_to_file_uri(html_path).map_err(|e| {
@@ -805,6 +853,7 @@ fn run_chromium_screenshot(
     let user_data_arg = format!("--user-data-dir={}", profile_path.to_string_lossy());
     let screenshot_arg = format!("--screenshot={}", png_path.to_string_lossy());
     let size_arg = format!("--window-size={width},{height}");
+    let dpr_arg = ((dpr - 1.0).abs() > 0.001).then(|| format!("--force-device-scale-factor={dpr}"));
 
     let mut cmd = Command::new(chrome);
     cmd.args([
@@ -822,6 +871,9 @@ fn run_chromium_screenshot(
         &size_arg,
         &screenshot_arg,
     ]);
+    if let Some(arg) = dpr_arg.as_deref() {
+        cmd.arg(arg);
+    }
     if should_use_chrome_no_sandbox() {
         cmd.arg("--no-sandbox");
     }
@@ -1030,11 +1082,13 @@ pub fn build_overlay_html(
 <html>
 <head>
 <meta charset="utf-8" />
+<meta name="color-scheme" content="dark" />
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src data:;" />
 <style>
 {sora_css}
 {custom_fonts_css}
 :root {{
+  color-scheme: dark;
   --brand-bg: {bg};
   --brand-surface: {surface};
   --brand-ink: {ink};
@@ -1045,6 +1099,7 @@ pub fn build_overlay_html(
 }}
 * {{ box-sizing: border-box; margin: 0; padding: 0; }}
 html, body {{
+  color-scheme: dark;
   width: 100%;
   height: 100%;
   background: transparent !important;
@@ -1128,7 +1183,7 @@ pub fn build_caption_overlay_html(
     canvas_width: u32,
     canvas_height: u32,
 ) -> String {
-    let font_fam = sanitize_css_val(&caption.font_family).replace('"', "");
+    let font_fam = sanitize_css_val(&caption.font_family).replace(['"', '\''], "");
     let font_fam = if font_fam.is_empty() {
         "Sora".to_string()
     } else {
@@ -1143,13 +1198,14 @@ pub fn build_caption_overlay_html(
 
     let is_portrait = canvas_height > canvas_width;
     let base_font_px = if is_portrait {
-        (canvas_width as f64 * 0.044).round() as u32
+        (canvas_width as f64 * 0.052).round() as u32
     } else {
-        (canvas_height as f64 * 0.048).round() as u32
+        (canvas_height as f64 * 0.054).round() as u32
     }
-    .clamp(24, 68);
+    .clamp(28, 74);
 
-    // Align default y = 0.0 with Studio UI's social safe-zone (~24% from bottom in portrait)
+    // Match Studio UI (`WebGLProgramStage.tsx`) normalized coordinate mapping:
+    // y in [-0.35, max_y] -> 50% + y * 78% (portrait max_y=0.32 keeps bottom 22% clear; landscape max_y=0.42 reaches lower-third up to 84%).
     let raw_y = if clip.transform.y.is_finite() {
         clip.transform.y
     } else {
@@ -1160,9 +1216,11 @@ pub fn build_caption_overlay_html(
     } else {
         0.0
     };
-    let base_top = if is_portrait { 74.0 } else { 80.0 };
-    let top_pct = (base_top + raw_y * 100.0).clamp(6.0, if is_portrait { 82.0 } else { 88.0 });
-    let left_pct = (50.0 + raw_x * 100.0).clamp(14.0, 86.0);
+    let max_y = if is_portrait { 0.32 } else { 0.42 };
+    let clamped_y = raw_y.clamp(-0.35, max_y);
+    let max_top = if is_portrait { 76.0 } else { 84.0 };
+    let top_pct = (50.0 + clamped_y * 78.0).clamp(12.0, max_top);
+    let left_pct = (50.0 + raw_x.clamp(-0.30, 0.30) * 100.0).clamp(14.0, 86.0);
     let scale = if clip.transform.scale.is_finite() {
         clip.transform.scale.clamp(0.4, 2.5)
     } else {
@@ -1176,21 +1234,19 @@ pub fn build_caption_overlay_html(
 
     let (container_style, word_transform) = match caption.preset {
         CaptionPreset::NeonGlow => (
-            format!(
-                "display:inline-flex;flex-wrap:wrap;justify-content:center;gap:0.28em;padding:14px 26px;border-radius:18px;background:rgba(8,4,4,0.84);border:1.5px solid {highlight};box-shadow:0 0 28px {highlight}55,0 10px 30px rgba(0,0,0,0.6);font-weight:700;letter-spacing:0.03em;text-transform:uppercase;"
-            ),
+            "display:inline-flex;flex-wrap:wrap;justify-content:center;gap:0.28em;padding:16px 30px;border-radius:20px;background:rgba(8,4,4,0.82);border:1.5px solid rgba(247,245,239,0.15);box-shadow:0 12px 34px rgba(0,0,0,0.72);font-weight:800;letter-spacing:0.02em;text-transform:uppercase;".to_string(),
             "uppercase",
         ),
         CaptionPreset::MonoCaps => (
-            "display:inline-flex;flex-wrap:wrap;justify-content:center;gap:0.26em;padding:12px 24px;border-radius:8px;background:rgba(8,4,4,0.92);border:1px solid rgba(247,245,239,0.22);font-weight:700;letter-spacing:0.12em;text-transform:uppercase;".to_string(),
+            "display:inline-flex;flex-wrap:wrap;justify-content:center;gap:0.26em;padding:14px 26px;border-radius:10px;background:rgba(8,4,4,0.92);border:1px solid rgba(247,245,239,0.22);box-shadow:0 10px 28px rgba(0,0,0,0.68);font-weight:800;letter-spacing:0.12em;text-transform:uppercase;".to_string(),
             "uppercase",
         ),
         CaptionPreset::Karaoke => (
-            "display:inline-flex;flex-wrap:wrap;justify-content:center;gap:0.3em;padding:14px 26px;border-radius:999px;background:rgba(26,14,14,0.88);border:1px solid rgba(247,245,239,0.16);font-weight:700;letter-spacing:0.02em;".to_string(),
+            "display:inline-flex;flex-wrap:wrap;justify-content:center;gap:0.3em;padding:16px 30px;border-radius:999px;background:rgba(26,14,14,0.88);border:1px solid rgba(247,183,51,0.35);box-shadow:0 10px 30px rgba(0,0,0,0.68);font-weight:800;letter-spacing:0.01em;".to_string(),
             "none",
         ),
         CaptionPreset::Minimal => (
-            "display:inline-flex;flex-wrap:wrap;justify-content:center;gap:0.26em;padding:8px 18px;border-radius:12px;background:rgba(8,4,4,0.52);font-weight:600;letter-spacing:0.01em;text-shadow:0 2px 12px rgba(0,0,0,0.85);".to_string(),
+            "display:inline-flex;flex-wrap:wrap;justify-content:center;gap:0.26em;padding:10px 22px;border-radius:14px;background:rgba(8,4,4,0.62);font-weight:600;letter-spacing:0.01em;text-shadow:0 2px 12px rgba(0,0,0,0.85);".to_string(),
             "none",
         ),
     };
@@ -1230,7 +1286,7 @@ pub fn build_caption_overlay_html(
     let idle_json = serde_json::to_string(&idle_css).unwrap_or_else(|_| "\"\"".to_string());
 
     format!(
-        "<div style=\"position:fixed;top:{top_pct:.2}%;left:{left_pct:.2}%;transform:translate(-50%,-50%) scale({scale:.3});opacity:{opacity:.3};width:80%;text-align:center;font-family:'{font_fam}',var(--brand-font-display),'Sora',sans-serif;font-size:{base_font_px}px;line-height:1.18;text-transform:{word_transform};\"><div style=\"{container_style}\">{words_html}</div></div><script>(function(){{const A={active_json},S={spoken_json},I={idle_json};window.__solarisSetCaptionWord=function(idx){{const spans=document.querySelectorAll('[data-word-idx]');for(const el of spans){{const i=Number(el.getAttribute('data-word-idx'));el.setAttribute('style','display:inline-block;'+(i===idx?A:(idx!==null&&i<idx?S:I)));}}void document.body.offsetHeight;}};}})();</script>"
+        "<div style=\"position:fixed;top:{top_pct:.2}%;left:{left_pct:.2}%;transform:translate(-50%,-50%) scale({scale:.3});opacity:{opacity:.3};width:86%;text-align:center;text-wrap:balance;font-family:'{font_fam}',var(--brand-font-display),'Sora',sans-serif;font-size:{base_font_px}px;line-height:1.15;text-transform:{word_transform};\"><div style=\"{container_style}\">{words_html}</div></div><script>(function(){{const A={active_json},S={spoken_json},I={idle_json};window.__solarisSetCaptionWord=function(idx){{const spans=document.querySelectorAll('[data-word-idx]');for(const el of spans){{const i=Number(el.getAttribute('data-word-idx'));el.setAttribute('style','display:inline-block;'+(i===idx?A:(idx!==null&&i<idx?S:I)));}}void document.body.offsetHeight;}};}})();</script>"
     )
 }
 
@@ -1441,6 +1497,7 @@ pub fn render_project_overlays_via_chromium_with_assets(
 
     let w = project.canvas.width.max(2);
     let h = project.canvas.height.max(2);
+    let (gfx_w, gfx_h, gfx_dpr) = gfx_design_viewport(w, h);
     let project_fps = (project.canvas.fps_num.max(1) as f64 / project.canvas.fps_den.max(1) as f64)
         .clamp(1.0, 60.0);
     let max_anim_frames = std::env::var("SOLARIS_GFX_MAX_FRAMES")
@@ -1490,6 +1547,7 @@ pub fn render_project_overlays_via_chromium_with_assets(
 
                     if let Some(session) = cdp.as_mut() {
                         // Navigate ONCE, then seek + screenshot in-process over CDP
+                        session.set_viewport(gfx_w, gfx_h, gfx_dpr)?;
                         let html_path = seq_dir.join("scene.html");
                         let doc = build_overlay_html(
                             &body_html,
@@ -1529,7 +1587,9 @@ pub fn render_project_overlays_via_chromium_with_assets(
                                 t,
                             );
                             fs::write(&html_path, doc)?;
-                            run_chromium_screenshot(chrome, &html_path, &png_path, w, h, temp_dir)?;
+                            run_chromium_screenshot(
+                                chrome, &html_path, &png_path, gfx_w, gfx_h, gfx_dpr, temp_dir,
+                            )?;
                         }
                     }
 
@@ -1552,10 +1612,13 @@ pub fn render_project_overlays_via_chromium_with_assets(
                     );
                     fs::write(&html_path, doc)?;
                     if let Some(session) = cdp.as_mut() {
+                        session.set_viewport(gfx_w, gfx_h, gfx_dpr)?;
                         session.navigate_and_wait(&html_path)?;
                         session.capture_png(&png_path)?;
                     } else {
-                        run_chromium_screenshot(chrome, &html_path, &png_path, w, h, temp_dir)?;
+                        run_chromium_screenshot(
+                            chrome, &html_path, &png_path, gfx_w, gfx_h, gfx_dpr, temp_dir,
+                        )?;
                     }
                     specs.push(OverlayImageSpec::single(png_path, clip.start_sec, clip_end));
                 }
@@ -1568,6 +1631,7 @@ pub fn render_project_overlays_via_chromium_with_assets(
                     }
                     if let Some(session) = cdp.as_mut() {
                         // Navigate ONCE to caption HTML, then update active word per slice via CDP
+                        session.set_viewport(w, h, 1.0)?;
                         idx += 1;
                         let html_path = temp_dir.join(format!("caption_clip_{idx}.html"));
                         let body_html =
@@ -1604,7 +1668,9 @@ pub fn render_project_overlays_via_chromium_with_assets(
                                 0.0,
                             );
                             fs::write(&html_path, doc)?;
-                            run_chromium_screenshot(chrome, &html_path, &png_path, w, h, temp_dir)?;
+                            run_chromium_screenshot(
+                                chrome, &html_path, &png_path, w, h, 1.0, temp_dir,
+                            )?;
                             specs.push(OverlayImageSpec::single(png_path, w_start, w_end));
                         }
                     }
@@ -1623,10 +1689,13 @@ pub fn render_project_overlays_via_chromium_with_assets(
                     );
                     fs::write(&html_path, doc)?;
                     if let Some(session) = cdp.as_mut() {
+                        session.set_viewport(w, h, 1.0)?;
                         session.navigate_and_wait(&html_path)?;
                         session.capture_png(&png_path)?;
                     } else {
-                        run_chromium_screenshot(chrome, &html_path, &png_path, w, h, temp_dir)?;
+                        run_chromium_screenshot(
+                            chrome, &html_path, &png_path, w, h, 1.0, temp_dir,
+                        )?;
                     }
                     specs.push(OverlayImageSpec::single(png_path, clip.start_sec, clip_end));
                 }
@@ -1683,6 +1752,7 @@ pub fn render_single_frame_overlays_via_chromium(
 
     let w = project.canvas.width.max(2);
     let h = project.canvas.height.max(2);
+    let (gfx_w, gfx_h, gfx_dpr) = gfx_design_viewport(w, h);
     let mut cdp = match ChromiumCdpSession::launch(chrome, w, h, temp_dir) {
         Ok(session) => Some(session),
         Err(err) => {
@@ -1697,16 +1767,21 @@ pub fn render_single_frame_overlays_via_chromium(
     let mut pngs = Vec::with_capacity(active_clips.len());
     for (idx, clip) in active_clips.into_iter().enumerate() {
         let local_t = (time_sec - clip.start_sec).clamp(0.0, clip.duration_sec);
-        let body_html = match &clip.payload {
+        let (body_html, vp_w, vp_h, vp_dpr) = match &clip.payload {
             ClipKind::Gfx { .. } => {
                 let Some(body) = resolve_gfx_body_html(clip, saved_assets) else {
                     continue;
                 };
-                body
+                (body, gfx_w, gfx_h, gfx_dpr)
             }
             ClipKind::Caption { caption } => {
                 let active_idx = find_active_caption_word_at(caption, time_sec);
-                build_caption_overlay_html(clip, caption, active_idx, w, h)
+                (
+                    build_caption_overlay_html(clip, caption, active_idx, w, h),
+                    w,
+                    h,
+                    1.0,
+                )
             }
             _ => continue,
         };
@@ -1723,13 +1798,14 @@ pub fn render_single_frame_overlays_via_chromium(
         fs::write(&html_path, doc)?;
 
         if let Some(session) = cdp.as_mut() {
+            session.set_viewport(vp_w, vp_h, vp_dpr)?;
             session.navigate_and_wait(&html_path)?;
             session.evaluate_js(&format!(
                 "window.__solarisSeek({local_t:.6}); void document.body.offsetHeight;"
             ))?;
             session.capture_png(&png_path)?;
         } else {
-            run_chromium_screenshot(chrome, &html_path, &png_path, w, h, temp_dir)?;
+            run_chromium_screenshot(chrome, &html_path, &png_path, vp_w, vp_h, vp_dpr, temp_dir)?;
         }
         pngs.push(png_path);
     }
@@ -1866,21 +1942,21 @@ mod tests {
             },
         };
         let default_html = build_caption_overlay_html(&default_cap_clip, &cap, Some(1), 1080, 1920);
-        assert!(default_html.contains("top:74.00%"));
+        assert!(default_html.contains("top:50.00%"));
         assert!(default_html.contains("#F7B733"));
         assert!(default_html.contains("FAST"));
         assert!(default_html.contains("window.__solarisSetCaptionWord"));
 
         let shifted_cap_clip = Clip {
             transform: Transform2D {
-                y: 0.2,
+                y: 0.24,
                 scale: f64::NAN,
                 ..Transform2D::default()
             },
             ..default_cap_clip
         };
         let shifted_html = build_caption_overlay_html(&shifted_cap_clip, &cap, Some(1), 1080, 1920);
-        assert!(shifted_html.contains("top:82.00%"));
+        assert!(shifted_html.contains("top:68.72%"));
         assert!(shifted_html.contains("scale(1.000)"));
     }
 
@@ -1955,5 +2031,57 @@ mod tests {
             parse_devtools_port("DevTools listening on ws://127.0.0.1:43210/devtools/browser/abc"),
             Some(43210)
         );
+    }
+
+    #[test]
+    fn gfx_design_viewport_matches_stage_coordinate_space() {
+        assert_eq!(gfx_design_viewport(1080, 1920), (540, 960, 2.0));
+        assert_eq!(gfx_design_viewport(1920, 1080), (960, 540, 2.0));
+        assert_eq!(gfx_design_viewport(1080, 1080), (720, 720, 1.5));
+        assert_eq!(gfx_design_viewport(320, 240), (320, 240, 1.0));
+    }
+
+    #[test]
+    fn caption_css_sanitization_prevents_quote_attribute_breakout_and_allows_landscape_lower_third()
+    {
+        let cap = CaptionBlock {
+            words: vec![CaptionWord {
+                text: "HELLO".into(),
+                start_sec: 0.0,
+                end_sec: 1.0,
+            }],
+            preset: CaptionPreset::NeonGlow,
+            font_family: "Sora'\" onclick=\"alert(1)".into(),
+            highlight_color: "#F7B733\" onmouseover=\"alert(1)'".into(),
+        };
+        let clip = Clip {
+            id: "t_inj".into(),
+            label: "HELLO".into(),
+            start_sec: 0.0,
+            duration_sec: 1.0,
+            source_in_sec: 0.0,
+            transform: Transform2D {
+                y: 0.42,
+                ..Transform2D::default()
+            },
+            audio: AudioSettings::default(),
+            payload: ClipKind::Caption {
+                caption: cap.clone(),
+            },
+        };
+
+        let landscape_html = build_caption_overlay_html(&clip, &cap, Some(0), 1920, 1080);
+        // Quotes stripped so attributes & font-family cannot break out
+        assert!(!landscape_html.contains("\" onmouseover="));
+        assert!(!landscape_html.contains("onclick=\""));
+        assert!(
+            landscape_html
+                .contains("font-family:'Sora onclick=alert(1)',var(--brand-font-display)")
+        );
+        assert!(landscape_html.contains("top:82.76%"));
+
+        // Portrait remains safely clamped at y = 0.32 -> 74.96%
+        let portrait_html = build_caption_overlay_html(&clip, &cap, Some(0), 1080, 1920);
+        assert!(portrait_html.contains("top:74.96%"));
     }
 }

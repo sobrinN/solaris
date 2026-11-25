@@ -17,6 +17,7 @@ import {
   type EngineEventEnvelope,
   type ExportJobStatus,
   type HealthResponse,
+  type LogEntry,
   type ModelAdvisorResponse,
   type Project,
   type ProjectSummary,
@@ -59,6 +60,19 @@ const SWARM_STATE_RANK: Record<SwarmRunStatus["state"], number> = {
   cancelled: 5,
 };
 
+function mergeLogEntries(existing: LogEntry[], incoming: LogEntry[]): LogEntry[] {
+  const byId = new Map<string, LogEntry>();
+  for (const entry of existing) {
+    byId.set(entry.id, entry);
+  }
+  for (const entry of incoming) {
+    byId.set(entry.id, entry);
+  }
+  const merged = Array.from(byId.values());
+  merged.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  return merged.length > 400 ? merged.slice(-400) : merged;
+}
+
 export function App() {
   const [client, setClient] = useState<SolarisEngineClient | null>(null);
   const [authRequired, setAuthRequired] = useState(false);
@@ -76,6 +90,7 @@ export function App() {
   const [draftProject, setDraftProject] = useState<Project | null>(null);
   const [draftUploading, setDraftUploading] = useState(false);
   const [events, setEvents] = useState<EngineEventEnvelope[]>([]);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
   const [brandDrawerOpen, setBrandDrawerOpen] = useState(false);
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
@@ -294,10 +309,20 @@ export function App() {
   useEffect(() => {
     if (!client || !activeProject?.id) return;
     const pid = activeProject.id;
+    let active = true;
+    void client
+      .getLogs({ projectId: pid, limit: 250 })
+      .then((initialLogs) => {
+        if (active) setLogs((prev) => mergeLogEntries(prev, initialLogs));
+      })
+      .catch(() => {});
+
     const unsubscribe = client.subscribeEvents(
       pid,
       (envelope) => {
-        setEvents((prev) => [...prev.slice(-120), envelope]);
+        if (envelope.payload.event !== "log_emitted") {
+          setEvents((prev) => [...prev.slice(-120), envelope]);
+        }
         if (
           envelope.payload.event === "op_committed" ||
           envelope.payload.event === "project_reset"
@@ -328,11 +353,23 @@ export function App() {
             timeSec: seekTime,
             seq: (prev?.seq ?? 0) + 1,
           }));
+        } else if (envelope.payload.event === "log_emitted") {
+          const entry = envelope.payload.entry;
+          setLogs((prev) => {
+            if (prev.some((existing) => existing.id === entry.id)) return prev;
+            return [...prev.slice(-399), entry];
+          });
         }
       },
       setWsConnected,
       () => {
         void client.getProject(pid).then(applyProjectIfNewer).catch(() => {});
+        void client
+          .getLogs({ projectId: pid, limit: 250 })
+          .then((refreshedLogs) => {
+            if (active) setLogs((prev) => mergeLogEntries(prev, refreshedLogs));
+          })
+          .catch(() => {});
         const curExport = exportJobRef.current;
         if (
           curExport &&
@@ -359,7 +396,10 @@ export function App() {
         }
       },
     );
-    return unsubscribe;
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, [client, activeProject?.id, applyProjectIfNewer, applyExportJobIfNewer, applySwarmRunIfNewer]);
 
   if (!client) {
@@ -396,6 +436,7 @@ export function App() {
   const handleOpenExistingProject = async (projectId: string) => {
     const proj = await client.getProject(projectId);
     setEvents([]);
+    setLogs([]);
     setExportJob(null);
     setActiveSwarmRun(null);
     setSwarmStartError(null);
@@ -542,8 +583,9 @@ export function App() {
       }
     }
     const existingDraft = draftProjectRef.current;
-    if (
-      !demoMode &&
+    if (demoMode) {
+      project = await client.openDemoProject(selectedBrandId);
+    } else if (
       !templateId &&
       existingDraft &&
       existingDraft.canvas.aspect_preset === aspect &&
@@ -577,219 +619,8 @@ export function App() {
       }
     }
 
-    if (demoMode) {
-      const nowIso = new Date().toISOString();
-      const demoOps = [
-        {
-          meta: { agent_id: "director-01", role: "director" as const },
-          command: {
-            type: "add_media" as const,
-            asset: {
-              id: "demo-m1",
-              name: "founder_hook_slog3.mp4",
-              kind: "video" as const,
-              role_hint: "a_roll",
-              path: "",
-              added_at: nowIso,
-              intelligence: {
-                analyzed: true,
-                duration_sec: 12.4,
-                width: 1080,
-                height: 1920,
-                fps: 30,
-                is_log_footage: true,
-                has_audio: true,
-                waveform_peaks: [0.3, 0.7, 0.9, 0.5, 0.8, 0.4, 0.85, 0.6, 0.75, 0.45, 0.9, 0.5],
-                silences: [],
-                beats: [],
-                transcript: [],
-                integrated_lufs: -14.2,
-              },
-            },
-          },
-        },
-        {
-          meta: { agent_id: "director-01", role: "director" as const },
-          command: {
-            type: "add_media" as const,
-            asset: {
-              id: "demo-m2",
-              name: "notifications_broll.mp4",
-              kind: "video" as const,
-              role_hint: "b_roll",
-              path: "",
-              added_at: nowIso,
-              intelligence: {
-                analyzed: true,
-                duration_sec: 5.0,
-                width: 1080,
-                height: 1920,
-                fps: 30,
-                is_log_footage: false,
-                has_audio: false,
-                waveform_peaks: [],
-                silences: [],
-                beats: [],
-                transcript: [],
-              },
-            },
-          },
-        },
-        {
-          meta: { agent_id: "director-01", role: "director" as const },
-          command: {
-            type: "add_media" as const,
-            asset: {
-              id: "demo-audio",
-              name: "beat_118bpm.wav",
-              kind: "audio" as const,
-              role_hint: "music",
-              path: "",
-              added_at: nowIso,
-              intelligence: {
-                analyzed: true,
-                duration_sec: 24.0,
-                is_log_footage: false,
-                has_audio: true,
-                waveform_peaks: [0.6, 0.8, 0.7, 0.9, 0.65, 0.85, 0.75, 0.95, 0.6, 0.8, 0.7, 0.9],
-                silences: [],
-                beats: [0.5, 1.0, 1.5, 2.0],
-                transcript: [],
-                integrated_lufs: -13.8,
-              },
-            },
-          },
-        },
-        {
-          meta: { agent_id: "razor-01", role: "razor" as const },
-          command: {
-            type: "place_clip" as const,
-            track_id: "v1",
-            clip: {
-              id: "demo-aroll-1",
-              label: "Hook · A-Roll Cut",
-              start_sec: 0,
-              duration_sec: 4.2,
-              source_in_sec: 0,
-              transform: { x: 0, y: 0, scale: 1.08, rotation_deg: 0, opacity: 1 },
-              audio: {
-                gain_db: 0,
-                ducking_enabled: false,
-                duck_target_db: -18,
-                fade_in_sec: 0,
-                fade_out_sec: 0,
-              },
-              payload: { kind: "media" as const, media_id: "demo-m1" },
-            },
-          },
-        },
-        {
-          meta: { agent_id: "broll-01", role: "b_roll" as const },
-          command: {
-            type: "place_clip" as const,
-            track_id: "v2",
-            clip: {
-              id: "demo-broll-1",
-              label: "Notifications B-Roll",
-              start_sec: 4.2,
-              duration_sec: 3.4,
-              source_in_sec: 0,
-              transform: { x: 0, y: 0, scale: 1.0, rotation_deg: 0, opacity: 1 },
-              audio: {
-                gain_db: -99,
-                ducking_enabled: false,
-                duck_target_db: -18,
-                fade_in_sec: 0,
-                fade_out_sec: 0,
-              },
-              payload: { kind: "media" as const, media_id: "demo-m2", ken_burns: true },
-            },
-          },
-        },
-        {
-          meta: { agent_id: "caps-01", role: "caps" as const },
-          command: {
-            type: "place_clip" as const,
-            track_id: "t1",
-            clip: {
-              id: "demo-cap-1",
-              label: "THREE AI TOOLS",
-              start_sec: 0.4,
-              duration_sec: 3.6,
-              source_in_sec: 0,
-              transform: { x: 0, y: 0.2, scale: 1, rotation_deg: 0, opacity: 1 },
-              audio: {
-                gain_db: 0,
-                ducking_enabled: false,
-                duck_target_db: -18,
-                fade_in_sec: 0,
-                fade_out_sec: 0,
-              },
-              payload: {
-                kind: "caption" as const,
-                caption: {
-                  words: [
-                    { text: "THREE", start_sec: 0.4, end_sec: 1.1 },
-                    { text: "AI", start_sec: 1.1, end_sec: 1.7 },
-                    { text: "TOOLS", start_sec: 1.7, end_sec: 2.8 },
-                  ],
-                  preset: "neon_glow" as const,
-                  font_family: "Sora",
-                  highlight_color: "#F7B733",
-                },
-              },
-            },
-          },
-        },
-        {
-          meta: { agent_id: "gfx-01", role: "gfx" as const },
-          command: {
-            type: "place_gfx" as const,
-            track_id: "g1",
-            clip_id: "demo-gfx-1",
-            label: "Stat Card · 10 HRS",
-            start_sec: 1.2,
-            duration_sec: 3.0,
-            gfx: {
-              asset_id: "stat-card-solar",
-              props: { value: "10 HRS", label: "SAVED EVERY WEEK" },
-              inline_html:
-                assets.find((a) => a.id === "stat-card-solar")?.html_source ?? null,
-            },
-          },
-        },
-        {
-          meta: { agent_id: "mix-01", role: "mix" as const },
-          command: {
-            type: "place_clip" as const,
-            track_id: "a2",
-            clip: {
-              id: "demo-music-1",
-              label: "beat_118bpm.wav · ducked",
-              start_sec: 0,
-              duration_sec: 12.0,
-              source_in_sec: 0,
-              transform: { x: 0, y: 0, scale: 1, rotation_deg: 0, opacity: 1 },
-              audio: {
-                gain_db: -14,
-                ducking_enabled: true,
-                duck_target_db: -18,
-                fade_in_sec: 0.2,
-                fade_out_sec: 0.8,
-              },
-              payload: { kind: "media" as const, media_id: "demo-audio" },
-            },
-          },
-        },
-      ];
-
-      for (const op of demoOps) {
-        const res = await client.applyOp(project.id, op.command, op.meta);
-        project = res.project;
-      }
-    }
-
     setEvents([]);
+    setLogs([]);
     setExportJob(null);
     setActiveSwarmRun(null);
     setSwarmStartError(null);
@@ -802,12 +633,9 @@ export function App() {
     activeProjectIdRef.current = project.id;
     setActiveProject(project);
 
-    // Only auto-start Swarm when the user provided a real directing prompt (never on empty prompt fallback)
+    // Auto-start Swarm whenever the user provided a directing prompt (including zero-asset programmatic videos!)
     const shouldAutoRunSwarm =
-      !demoMode &&
-      agentMode === "openrouter" &&
-      Boolean(userPrompt) &&
-      !(templateId && project.media_pool.length === 0);
+      !demoMode && agentMode === "openrouter" && Boolean(userPrompt);
 
     if (shouldAutoRunSwarm) {
       const targetPid = project.id;
@@ -874,6 +702,12 @@ export function App() {
             activeBrand={activeBrand}
             assets={assets}
             events={events}
+            logs={logs}
+            onClearLogs={async () => {
+              const pid = activeProject.id;
+              await client.clearLogs(pid);
+              setLogs((prev) => prev.filter((entry) => entry.project_id !== pid));
+            }}
             wsConnected={wsConnected}
             exportJob={exportJob}
             agentStatus={agentStatus}

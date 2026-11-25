@@ -49,7 +49,7 @@ solaris/
 ├── crates/
 │   ├── core-ir/               # Timeline IR, undo/redo, track locks, brands, assets
 │   ├── media-engine/          # AssetStorage trait, FFmpeg/FFprobe probing, LUTs, STT & export
-│   ├── agent-runtime/         # OpenRouter SSE client, ModelAdvisor, 33-tool runtime & Swarm
+│   ├── agent-runtime/         # OpenRouter SSE client, ModelAdvisor, 34-tool runtime & Swarm
 │   ├── mcp-server/            # Built-in MCP server (stdio + Streamable HTTP /mcp) & solaris-mcp CLI
 │   └── server/
 │       └── src/routes/        # Modular axum HTTP/WS/MCP routes (shared by Desktop & Web)

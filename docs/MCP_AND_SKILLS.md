@@ -6,7 +6,7 @@ Solaris treats **MCP** and **Skills** as two complementary halves of agentic vid
 
 ---
 
-## 1. Canonical MCP Tool Surface (33 Tools)
+## 1. Canonical MCP Tool Surface (34 Tools)
 
 Transport: `stdio` (CLI coding agents) + `Streamable HTTP` (`/mcp`) with bearer token auth, `Origin`/`Host` validation, `Content-Type: application/json`, and tracked `Mcp-Session-Id` lifecycle (`POST` / `DELETE`).
 
@@ -16,7 +16,7 @@ Transport: `stdio` (CLI coding agents) + `Streamable HTTP` (`/mcp`) with bearer 
 | `media.*` | `media.import`, `media.get_manifest` (silences, beats, scene cuts, peaks, LUFS, transcript), `media.extract_keyframes`, `media.transcribe` |
 | `timeline.*` | `timeline.place_clip`, `timeline.split_clip`, `timeline.trim_clip`, `timeline.delete_clip`, `timeline.set_transform` |
 | `color.*` | `color.set_grade` (Lift/Gamma/Gain, temp, tint, contrast, sat, exp, LUT), `color.get_scope_stats` (grade/LUT/log metadata; pair with `preview.capture_frame` for visual verification) |
-| `captions.*` | `captions.generate_from_transcript`, `captions.set_style` |
+| `captions.*` | `captions.generate_from_transcript`, `captions.place_script`, `captions.set_style` |
 | `gfx.*` & `assets.*` | `assets.search`, `assets.save`, `gfx.place`, `gfx.lint_html` |
 | `audio.*` | `audio.set_mix`, `audio.normalize_lufs`, `audio.enable_ducking` |
 | `brand.*` | `brand.get_playbook`, `brand.list_playbooks` |

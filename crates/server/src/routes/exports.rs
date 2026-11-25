@@ -10,8 +10,8 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use solaris_core_ir::{
-    ClipKind, EngineEvent, ExportFormat, ExportJobStatus, ExportRequest, ExportState,
-    SavedCodeAsset, TrackKind,
+    ClipKind, EngineEvent, ExportFormat, ExportJobStatus, ExportRequest, ExportState, LogEntry,
+    LogLevel, SavedCodeAsset, TrackKind,
 };
 use solaris_media_engine::{
     ExportPlanOptions, execute_export_with_progress,
@@ -210,8 +210,19 @@ pub async fn enqueue_export_job(
                     .await
                     .insert(job_id_bg, failed.clone());
                 state_bg.emit(EngineEvent::ExportProgress {
-                    project_id: id,
-                    job: failed,
+                    project_id: id.clone(),
+                    job: failed.clone(),
+                });
+                state_bg.push_log(LogEntry {
+                    id: Uuid::new_v4().to_string(),
+                    timestamp: Utc::now(),
+                    level: LogLevel::Error,
+                    source: "export".to_string(),
+                    project_id: Some(id),
+                    run_id: Some(failed.id),
+                    agent_id: None,
+                    message: failed.stage_label,
+                    details: failed.error,
                 });
                 return;
             }
@@ -276,8 +287,19 @@ pub async fn enqueue_export_job(
                         .await
                         .insert(job_id_bg, failed.clone());
                     state_bg.emit(EngineEvent::ExportProgress {
-                        project_id: id,
-                        job: failed,
+                        project_id: id.clone(),
+                        job: failed.clone(),
+                    });
+                    state_bg.push_log(LogEntry {
+                        id: Uuid::new_v4().to_string(),
+                        timestamp: Utc::now(),
+                        level: LogLevel::Error,
+                        source: "export".to_string(),
+                        project_id: Some(id),
+                        run_id: Some(failed.id),
+                        agent_id: None,
+                        message: "Export failed during Chromium overlay rendering".to_string(),
+                        details: failed.error,
                     });
                     return;
                 }
@@ -300,8 +322,19 @@ pub async fn enqueue_export_job(
                         .await
                         .insert(job_id_bg, failed.clone());
                     state_bg.emit(EngineEvent::ExportProgress {
-                        project_id: id,
-                        job: failed,
+                        project_id: id.clone(),
+                        job: failed.clone(),
+                    });
+                    state_bg.push_log(LogEntry {
+                        id: Uuid::new_v4().to_string(),
+                        timestamp: Utc::now(),
+                        level: LogLevel::Error,
+                        source: "export".to_string(),
+                        project_id: Some(id),
+                        run_id: Some(failed.id),
+                        agent_id: None,
+                        message: "Export failed during Chromium overlay rendering".to_string(),
+                        details: failed.error,
                     });
                     return;
                 }
@@ -424,9 +457,34 @@ pub async fn enqueue_export_job(
             .await
             .insert(job_id_bg, compositing.clone());
         state_bg.emit(EngineEvent::ExportProgress {
-            project_id: id,
-            job: compositing,
+            project_id: id.clone(),
+            job: compositing.clone(),
         });
+        if compositing.state == ExportState::Failed {
+            state_bg.push_log(LogEntry {
+                id: Uuid::new_v4().to_string(),
+                timestamp: Utc::now(),
+                level: LogLevel::Error,
+                source: "export".to_string(),
+                project_id: Some(id),
+                run_id: Some(compositing.id),
+                agent_id: None,
+                message: compositing.stage_label,
+                details: compositing.error,
+            });
+        } else if compositing.state == ExportState::Completed {
+            state_bg.push_log(LogEntry {
+                id: Uuid::new_v4().to_string(),
+                timestamp: Utc::now(),
+                level: LogLevel::Info,
+                source: "export".to_string(),
+                project_id: Some(id),
+                run_id: Some(compositing.id),
+                agent_id: None,
+                message: "Export completed successfully".to_string(),
+                details: compositing.output_path,
+            });
+        }
     });
 
     Ok(initial)

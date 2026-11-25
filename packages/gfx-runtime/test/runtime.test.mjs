@@ -36,6 +36,7 @@ test("escapes HTML in interpolated props, resolves nested keys, and sanitizes br
   });
   assert.match(doc, /Content-Security-Policy/);
   assert.match(doc, /default-src 'none'/);
+  assert.match(doc, /color-scheme:\s*dark/);
   assert.doesNotMatch(doc, /<\/style><script>alert\(1\)/);
   assert.match(doc, /&lt;b&gt;Bold&lt;\/b&gt; · @solaris/);
   assert.match(doc, /window\.__solarisSeek/);

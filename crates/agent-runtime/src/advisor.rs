@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -46,7 +47,7 @@ pub struct ModelRecommendation {
 #[derive(Default)]
 struct CatalogCache {
     fetched_at: Option<Instant>,
-    models: Vec<OpenRouterModel>,
+    models: Arc<Vec<OpenRouterModel>>,
     last_error_at: Option<Instant>,
 }
 
@@ -72,7 +73,25 @@ impl ModelAdvisor {
 
     pub async fn model_input_modalities(&self, model_id: &str) -> Vec<String> {
         let catalog = self.load_catalog(None).await.ok();
-        modalities_from_catalog_or_heuristic(catalog.as_deref(), model_id)
+        modalities_from_catalog_or_heuristic(catalog.as_deref().map(Vec::as_slice), model_id)
+    }
+
+    pub async fn model_supports_parameter(&self, model_id: &str, param: &str) -> bool {
+        self.model_supports_parameter_with_cancel(model_id, param, None)
+            .await
+    }
+
+    pub async fn model_supports_parameter_with_cancel(
+        &self,
+        model_id: &str,
+        param: &str,
+        cancel: Option<&CancellationToken>,
+    ) -> bool {
+        let Ok(catalog) = self.load_catalog(cancel).await else {
+            return false;
+        };
+        find_catalog_model(&catalog, model_id)
+            .is_some_and(|m| m.supported_parameters.iter().any(|p| p == param))
     }
 
     pub async fn filter_video_capable_models(&self, model_ids: &[String]) -> Vec<String> {
@@ -80,7 +99,7 @@ impl ModelAdvisor {
         model_ids
             .iter()
             .filter(|id| {
-                modalities_from_catalog_or_heuristic(catalog.as_deref(), id)
+                modalities_from_catalog_or_heuristic(catalog.as_deref().map(Vec::as_slice), id)
                     .iter()
                     .any(|m| m == "video")
             })
@@ -93,7 +112,7 @@ impl ModelAdvisor {
         model_ids
             .iter()
             .filter(|id| {
-                modalities_from_catalog_or_heuristic(catalog.as_deref(), id)
+                modalities_from_catalog_or_heuristic(catalog.as_deref().map(Vec::as_slice), id)
                     .iter()
                     .any(|m| m == "audio")
             })
@@ -208,20 +227,20 @@ impl ModelAdvisor {
     async fn load_catalog(
         &self,
         cancel: Option<&CancellationToken>,
-    ) -> Result<Vec<OpenRouterModel>, AgentError> {
+    ) -> Result<Arc<Vec<OpenRouterModel>>, AgentError> {
         {
             let guard = self.cache.read().await;
             if let Some(ts) = guard.fetched_at
                 && ts.elapsed() < CATALOG_CACHE_TTL
                 && !guard.models.is_empty()
             {
-                return Ok(guard.models.clone());
+                return Ok(Arc::clone(&guard.models));
             }
             if let Some(err_ts) = guard.last_error_at
                 && err_ts.elapsed() < CATALOG_ERROR_COOLDOWN
             {
                 if !guard.models.is_empty() {
-                    return Ok(guard.models.clone());
+                    return Ok(Arc::clone(&guard.models));
                 }
                 return Err(AgentError::Transport(
                     "OpenRouter catalog refresh in negative-cache cooldown".to_string(),
@@ -248,13 +267,13 @@ impl ModelAdvisor {
                 && ts.elapsed() < CATALOG_CACHE_TTL
                 && !guard.models.is_empty()
             {
-                return Ok(guard.models.clone());
+                return Ok(Arc::clone(&guard.models));
             }
             if let Some(err_ts) = guard.last_error_at
                 && err_ts.elapsed() < CATALOG_ERROR_COOLDOWN
             {
                 if !guard.models.is_empty() {
-                    return Ok(guard.models.clone());
+                    return Ok(Arc::clone(&guard.models));
                 }
                 return Err(AgentError::Transport(
                     "OpenRouter catalog refresh in negative-cache cooldown".to_string(),
@@ -274,11 +293,25 @@ impl ModelAdvisor {
 
         let mut guard = self.cache.write().await;
         match fetched {
-            Ok(models) => {
+            Ok(models) if !models.is_empty() => {
+                let arc = Arc::new(models);
                 guard.fetched_at = Some(Instant::now());
                 guard.last_error_at = None;
-                guard.models = models.clone();
-                Ok(models)
+                guard.models = Arc::clone(&arc);
+                Ok(arc)
+            }
+            Ok(_) => {
+                guard.last_error_at = Some(Instant::now());
+                if !guard.models.is_empty() {
+                    tracing::warn!(
+                        "OpenRouter catalog refresh returned empty list; serving stale cached catalog"
+                    );
+                    Ok(Arc::clone(&guard.models))
+                } else {
+                    Err(AgentError::Transport(
+                        "OpenRouter catalog returned empty model list".to_string(),
+                    ))
+                }
             }
             Err(err) => {
                 guard.last_error_at = Some(Instant::now());
@@ -286,7 +319,7 @@ impl ModelAdvisor {
                     tracing::warn!(
                         "OpenRouter catalog refresh failed ({err}); serving stale cached catalog"
                     );
-                    Ok(guard.models.clone())
+                    Ok(Arc::clone(&guard.models))
                 } else {
                     Err(err)
                 }
@@ -315,20 +348,44 @@ fn strip_model_variant(model_id: &str) -> &str {
     model_id.split(':').next().unwrap_or(model_id)
 }
 
+fn is_model_free_tier(m: &OpenRouterModel) -> bool {
+    let prompt_m = price_per_million(m.pricing.as_ref().and_then(|p| p.prompt.as_deref()));
+    let completion_m = price_per_million(m.pricing.as_ref().and_then(|p| p.completion.as_deref()));
+    is_free_tier_model(&m.id, prompt_m, completion_m)
+}
+
+fn find_catalog_model<'a>(
+    catalog: &'a [OpenRouterModel],
+    model_id: &str,
+) -> Option<&'a OpenRouterModel> {
+    let base_id = strip_model_variant(model_id);
+    catalog
+        .iter()
+        .find(|m| m.id == model_id)
+        .or_else(|| catalog.iter().find(|m| m.id == base_id))
+        .or_else(|| {
+            catalog.iter().find(|m| {
+                strip_model_variant(&m.id) == base_id
+                    && !is_batch_variant_model(&m.id)
+                    && !is_model_free_tier(m)
+            })
+        })
+        .or_else(|| {
+            catalog
+                .iter()
+                .find(|m| strip_model_variant(&m.id) == base_id)
+        })
+}
+
 fn modalities_from_catalog_or_heuristic(
     catalog: Option<&[OpenRouterModel]>,
     model_id: &str,
 ) -> Vec<String> {
-    if let Some(models) = catalog {
-        let base_id = strip_model_variant(model_id);
-        let found = models.iter().find(|m| m.id == model_id).or_else(|| {
-            models
-                .iter()
-                .find(|m| m.id == base_id || strip_model_variant(&m.id) == base_id)
-        });
-        if let Some(arch) = found.and_then(|m| m.architecture.as_ref()) {
-            return arch.input_modalities.clone();
-        }
+    if let Some(models) = catalog
+        && let Some(arch) =
+            find_catalog_model(models, model_id).and_then(|m| m.architecture.as_ref())
+    {
+        return arch.input_modalities.clone();
     }
     // Heuristic for offline alias fallback (e.g. `~google/gemini-flash-latest`)
     let lower = strip_model_variant(model_id).to_ascii_lowercase();
@@ -359,6 +416,12 @@ fn is_free_tier_model(id: &str, prompt_m: Option<f64>, completion_m: Option<f64>
     matches!((prompt_m, completion_m), (Some(p), Some(c)) if p <= 0.0 && c <= 0.0)
 }
 
+fn is_batch_variant_model(id: &str) -> bool {
+    id.split(':')
+        .skip(1)
+        .any(|s| s.eq_ignore_ascii_case("batch"))
+}
+
 fn is_expired_model(expiration_date: Option<&str>, now: DateTime<Utc>) -> bool {
     let Some(raw) = expiration_date.map(str::trim).filter(|s| !s.is_empty()) else {
         return false;
@@ -376,7 +439,7 @@ pub fn rank_models(models: &[OpenRouterModel], role: ModelRoleKind) -> Vec<Model
     let now = Utc::now();
     let mut out = Vec::new();
     for m in models {
-        if is_expired_model(m.expiration_date.as_deref(), now) {
+        if is_expired_model(m.expiration_date.as_deref(), now) || is_batch_variant_model(&m.id) {
             continue;
         }
         let arch = m.architecture.as_ref();
@@ -430,14 +493,25 @@ pub fn rank_models(models: &[OpenRouterModel], role: ModelRoleKind) -> Vec<Model
                 score += 15.0;
             }
         }
-        if supports_tools {
-            score += 25.0;
+        if role != ModelRoleKind::TranscriptionStt {
+            if supports_tools {
+                score += 25.0;
+            }
+            if m.supported_parameters
+                .iter()
+                .any(|p| p == "structured_outputs" || p == "response_format")
+            {
+                score += 8.0;
+            }
+            if m.supported_parameters.iter().any(|p| p == "tool_choice") {
+                score += 5.0;
+            }
         }
         // Cap context-length contribution at 15 points so weak 1M-context models do not beat frontier tool-callers.
         score += ((ctx as f64).min(1_000_000.0) / 1_000_000.0) * 15.0;
         if !is_free && let Some(p) = prompt_m {
             // Favor practical, fast, cost-effective paid models when capabilities are equal
-            score += (15.0 - p.min(15.0)) * 0.8;
+            score += (15.0 - p.min(15.0)) * 0.4;
         }
         // Heavily penalize free-tier endpoints so reliable paid endpoints win top spot
         if is_free {
@@ -470,7 +544,7 @@ pub fn rank_models(models: &[OpenRouterModel], role: ModelRoleKind) -> Vec<Model
                 return a_free.cmp(&b_free);
             }
         }
-        b.score.total_cmp(&a.score)
+        b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id))
     });
     out
 }
@@ -633,5 +707,219 @@ mod tests {
         assert!(variant_mods.iter().any(|m| m == "video"));
 
         let _advisor = ModelAdvisor::new(OpenRouterClient::new(OpenRouterConfig::default()));
+    }
+
+    #[test]
+    fn rank_models_excludes_batch_variants() {
+        let models = vec![
+            OpenRouterModel {
+                id: "z-ai/glm-5.3-flash:batch".to_string(),
+                name: "GLM Flash Batch".to_string(),
+                context_length: Some(1_000_000),
+                architecture: Some(ModelArchitecture {
+                    input_modalities: vec!["text".to_string(), "image".to_string()],
+                    output_modalities: vec!["text".to_string()],
+                }),
+                pricing: Some(ModelPricing {
+                    prompt: Some("0.0000001".to_string()),
+                    completion: Some("0.0000002".to_string()),
+                }),
+                supported_parameters: vec![
+                    "tools".to_string(),
+                    "response_format".to_string(),
+                    "tool_choice".to_string(),
+                ],
+                expiration_date: None,
+            },
+            OpenRouterModel {
+                id: "qwen/qwen3-coder".to_string(),
+                name: "Qwen Coder".to_string(),
+                context_length: Some(256_000),
+                architecture: Some(ModelArchitecture {
+                    input_modalities: vec!["text".to_string()],
+                    output_modalities: vec!["text".to_string()],
+                }),
+                pricing: Some(ModelPricing {
+                    prompt: Some("0.0000005".to_string()),
+                    completion: Some("0.000001".to_string()),
+                }),
+                supported_parameters: vec!["tools".to_string()],
+                expiration_date: None,
+            },
+        ];
+        let ranked = rank_models(&models, ModelRoleKind::SpecialistToolWorker);
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].id, "qwen/qwen3-coder");
+    }
+
+    #[test]
+    fn variant_lookup_prioritizes_exact_then_base_then_non_batch_non_free() {
+        let catalog = vec![
+            OpenRouterModel {
+                id: "acme/vision:batch".to_string(),
+                name: "Vision Batch".to_string(),
+                context_length: Some(128_000),
+                architecture: Some(ModelArchitecture {
+                    input_modalities: vec!["text".to_string()],
+                    output_modalities: vec!["text".to_string()],
+                }),
+                pricing: Some(ModelPricing {
+                    prompt: Some("0.000001".to_string()),
+                    completion: Some("0.000002".to_string()),
+                }),
+                supported_parameters: vec![],
+                expiration_date: None,
+            },
+            OpenRouterModel {
+                id: "acme/vision:free".to_string(),
+                name: "Vision Free".to_string(),
+                context_length: Some(128_000),
+                architecture: Some(ModelArchitecture {
+                    input_modalities: vec!["text".to_string()],
+                    output_modalities: vec!["text".to_string()],
+                }),
+                pricing: Some(ModelPricing {
+                    prompt: Some("0".to_string()),
+                    completion: Some("0".to_string()),
+                }),
+                supported_parameters: vec![],
+                expiration_date: None,
+            },
+            OpenRouterModel {
+                id: "acme/vision".to_string(),
+                name: "Vision Base".to_string(),
+                context_length: Some(128_000),
+                architecture: Some(ModelArchitecture {
+                    input_modalities: vec![
+                        "text".to_string(),
+                        "image".to_string(),
+                        "video".to_string(),
+                    ],
+                    output_modalities: vec!["text".to_string()],
+                }),
+                pricing: Some(ModelPricing {
+                    prompt: Some("0.000001".to_string()),
+                    completion: Some("0.000002".to_string()),
+                }),
+                supported_parameters: vec!["reasoning".to_string(), "tools".to_string()],
+                expiration_date: None,
+            },
+            OpenRouterModel {
+                id: "beta/only-variants:batch".to_string(),
+                name: "Beta Batch".to_string(),
+                context_length: Some(64_000),
+                architecture: Some(ModelArchitecture {
+                    input_modalities: vec!["text".to_string()],
+                    output_modalities: vec!["text".to_string()],
+                }),
+                pricing: None,
+                supported_parameters: vec![],
+                expiration_date: None,
+            },
+            OpenRouterModel {
+                id: "beta/only-variants:free".to_string(),
+                name: "Beta Free".to_string(),
+                context_length: Some(64_000),
+                architecture: Some(ModelArchitecture {
+                    input_modalities: vec!["text".to_string()],
+                    output_modalities: vec!["text".to_string()],
+                }),
+                pricing: Some(ModelPricing {
+                    prompt: Some("0".to_string()),
+                    completion: Some("0".to_string()),
+                }),
+                supported_parameters: vec![],
+                expiration_date: None,
+            },
+            OpenRouterModel {
+                id: "beta/only-variants:exacto".to_string(),
+                name: "Beta Exacto".to_string(),
+                context_length: Some(64_000),
+                architecture: Some(ModelArchitecture {
+                    input_modalities: vec!["text".to_string(), "audio".to_string()],
+                    output_modalities: vec!["text".to_string()],
+                }),
+                pricing: Some(ModelPricing {
+                    prompt: Some("0.000002".to_string()),
+                    completion: Some("0.000004".to_string()),
+                }),
+                supported_parameters: vec!["reasoning".to_string()],
+                expiration_date: None,
+            },
+        ];
+
+        // Even though `:batch` appears first, querying `:nitro` must resolve to the base model
+        let resolved = find_catalog_model(&catalog, "acme/vision:nitro").unwrap();
+        assert_eq!(resolved.id, "acme/vision");
+        assert!(
+            resolved
+                .supported_parameters
+                .iter()
+                .any(|p| p == "reasoning")
+        );
+        let mods = modalities_from_catalog_or_heuristic(Some(&catalog), "acme/vision:nitro");
+        assert!(mods.iter().any(|m| m == "video"));
+
+        // Exact match still wins when explicitly querying `:batch`
+        assert_eq!(
+            find_catalog_model(&catalog, "acme/vision:batch")
+                .unwrap()
+                .id,
+            "acme/vision:batch"
+        );
+
+        // When base is absent, prefer non-batch & non-free variant over `:batch` and `:free`
+        let beta_resolved = find_catalog_model(&catalog, "beta/only-variants:nitro").unwrap();
+        assert_eq!(beta_resolved.id, "beta/only-variants:exacto");
+    }
+
+    #[test]
+    fn is_batch_variant_model_matches_only_colon_delimited_batch_segment() {
+        assert!(is_batch_variant_model("provider/model:batch"));
+        assert!(is_batch_variant_model("provider/model:BATCH"));
+        assert!(is_batch_variant_model("provider/model:nitro:batch"));
+        assert!(!is_batch_variant_model("provider/model:batcher"));
+        assert!(!is_batch_variant_model("provider/batch-model"));
+        assert!(!is_batch_variant_model("batch/model"));
+    }
+
+    #[test]
+    fn stt_ranking_ignores_chat_tool_bonuses_and_tie_breaks_by_id() {
+        let models = vec![
+            OpenRouterModel {
+                id: "z-vendor/whisper-b".to_string(),
+                name: "Whisper B".to_string(),
+                context_length: Some(0),
+                architecture: Some(ModelArchitecture {
+                    input_modalities: vec!["audio".to_string()],
+                    output_modalities: vec!["transcription".to_string()],
+                }),
+                pricing: None,
+                supported_parameters: vec![
+                    "tools".to_string(),
+                    "response_format".to_string(),
+                    "tool_choice".to_string(),
+                ],
+                expiration_date: None,
+            },
+            OpenRouterModel {
+                id: "a-vendor/whisper-a".to_string(),
+                name: "Whisper A".to_string(),
+                context_length: Some(0),
+                architecture: Some(ModelArchitecture {
+                    input_modalities: vec!["audio".to_string()],
+                    output_modalities: vec!["transcription".to_string()],
+                }),
+                pricing: None,
+                supported_parameters: vec![],
+                expiration_date: None,
+            },
+        ];
+        let ranked = rank_models(&models, ModelRoleKind::TranscriptionStt);
+        assert_eq!(ranked.len(), 2);
+        // Same score because STT does not award chat-tool bonuses, so tie-breaker sorts by id ascending
+        assert!((ranked[0].score - ranked[1].score).abs() < 1e-9);
+        assert_eq!(ranked[0].id, "a-vendor/whisper-a");
+        assert_eq!(ranked[1].id, "z-vendor/whisper-b");
     }
 }

@@ -17,8 +17,8 @@ use uuid::Uuid;
 
 use solaris_core_ir::{
     BrandPlaybook, BrandReferenceKind, BrandTokens, ClipKind, EngineEvent, EngineEventEnvelope,
-    ExportJobStatus, Project, ProjectEngine, SavedCodeAsset, SwarmRunStatus, TimelineCommand,
-    load_project, save_project_atomic,
+    ExportJobStatus, LogEntry, LogLevel, Project, ProjectEngine, SavedCodeAsset, SwarmRunStatus,
+    TimelineCommand, load_project, save_project_atomic,
 };
 use solaris_media_engine::{
     AssetStorage, BrandFontData, LocalFsStorage, MediaError, MediaToolchain, S3Storage,
@@ -27,6 +27,8 @@ use solaris_media_engine::{
 
 const MAX_EPHEMERAL_TOKENS: usize = 256;
 const MAX_GFX_SANDBOXES: usize = 128;
+const MAX_LOG_ENTRIES: usize = 500;
+const MAX_LOG_DETAILS_CHARS: usize = 12_000;
 pub const MAX_GFX_SANDBOX_BYTES: usize = 512 * 1024;
 const DEFAULT_MAX_CONCURRENT_EXPORTS: usize = 2;
 
@@ -109,9 +111,11 @@ pub struct AppStateInner {
     pub media_tickets: RwLock<HashMap<String, MediaTicketEntry>>,
     pub sessions: RwLock<HashMap<String, DateTime<Utc>>>,
     pub gfx_sandboxes: RwLock<VecDeque<(String, String)>>,
+    pub logs: std::sync::RwLock<VecDeque<LogEntry>>,
     pub persist_revisions: Mutex<HashMap<String, u64>>,
     pub brand_persist_lock: Mutex<()>,
     pub asset_persist_lock: Mutex<()>,
+    pub demo_pack_lock: Mutex<()>,
     pub export_semaphore: Arc<Semaphore>,
     pub shutdown: CancellationToken,
     pub storage: Arc<dyn AssetStorage>,
@@ -227,7 +231,7 @@ impl AppState {
 
         let toolchain = MediaToolchain::from_env();
         let capabilities = toolchain.detect_capabilities();
-        let (events_tx, _) = broadcast::channel(512);
+        let (events_tx, _) = broadcast::channel(2048);
         let storage: Arc<dyn AssetStorage> = match config.s3_config.clone() {
             Some(s3_cfg) => Arc::new(S3Storage::new(
                 s3_cfg,
@@ -270,9 +274,11 @@ impl AppState {
                 media_tickets: RwLock::new(HashMap::new()),
                 sessions: RwLock::new(HashMap::new()),
                 gfx_sandboxes: RwLock::new(VecDeque::new()),
+                logs: std::sync::RwLock::new(VecDeque::with_capacity(MAX_LOG_ENTRIES)),
                 persist_revisions: Mutex::new(HashMap::new()),
                 brand_persist_lock: Mutex::new(()),
                 asset_persist_lock: Mutex::new(()),
+                demo_pack_lock: Mutex::new(()),
                 export_semaphore: Arc::new(Semaphore::new(max_concurrent_exports)),
                 shutdown: CancellationToken::new(),
                 storage,
@@ -336,8 +342,131 @@ impl AppState {
         }
     }
 
+    pub async fn force_persist_project(&self, project: &Project) {
+        let mut revs = self.inner.persist_revisions.lock().await;
+        let path = self.project_file_path(&project.id);
+        let project_clone = project.clone();
+        let project_id = project.id.clone();
+        let revision = project.revision;
+        let res =
+            tokio::task::spawn_blocking(move || save_project_atomic(&project_clone, &path)).await;
+        match res {
+            Ok(Ok(())) => {
+                revs.insert(project_id, revision);
+            }
+            Ok(Err(err)) => {
+                revs.remove(&project_id);
+                tracing::error!(project_id = %project_id, "failed to force-persist project: {err}");
+            }
+            Err(err) => {
+                revs.remove(&project_id);
+                tracing::error!(project_id = %project_id, "project force-persist task failed: {err}");
+            }
+        }
+    }
+
     pub fn emit(&self, event: EngineEvent) {
         let _ = self.inner.events_tx.send(EngineEventEnvelope::now(event));
+    }
+
+    pub fn push_log(&self, mut entry: LogEntry) {
+        if entry.id.trim().is_empty() {
+            entry.id = Uuid::new_v4().to_string();
+        }
+        entry.message = sanitize_log_text(&entry.message, 2000);
+        entry.details = entry
+            .details
+            .take()
+            .map(|d| sanitize_log_text(&d, MAX_LOG_DETAILS_CHARS))
+            .filter(|d| !d.trim().is_empty());
+
+        match entry.level {
+            LogLevel::Error => {
+                tracing::error!(
+                    source = %entry.source,
+                    project_id = ?entry.project_id,
+                    agent_id = ?entry.agent_id,
+                    "{}",
+                    entry.message
+                );
+            }
+            LogLevel::Warn => {
+                tracing::warn!(
+                    source = %entry.source,
+                    project_id = ?entry.project_id,
+                    agent_id = ?entry.agent_id,
+                    "{}",
+                    entry.message
+                );
+            }
+            LogLevel::Info => {
+                tracing::info!(
+                    source = %entry.source,
+                    project_id = ?entry.project_id,
+                    agent_id = ?entry.agent_id,
+                    "{}",
+                    entry.message
+                );
+            }
+            LogLevel::Debug => {
+                tracing::debug!(
+                    source = %entry.source,
+                    project_id = ?entry.project_id,
+                    agent_id = ?entry.agent_id,
+                    "{}",
+                    entry.message
+                );
+            }
+        }
+
+        {
+            let mut guard = self.inner.logs.write().unwrap_or_else(|e| e.into_inner());
+            while guard.len() >= MAX_LOG_ENTRIES {
+                guard.pop_front();
+            }
+            guard.push_back(entry.clone());
+        }
+        self.emit(EngineEvent::LogEmitted {
+            project_id: entry.project_id.clone(),
+            entry,
+        });
+    }
+
+    pub fn list_logs(
+        &self,
+        project_id: Option<&str>,
+        min_level: Option<LogLevel>,
+        limit: usize,
+    ) -> Vec<LogEntry> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let cap = limit.min(MAX_LOG_ENTRIES);
+        let guard = self.inner.logs.read().unwrap_or_else(|e| e.into_inner());
+        let min_rank = min_level.map(log_level_rank).unwrap_or(0);
+        let mut items: Vec<LogEntry> = guard
+            .iter()
+            .rev()
+            .filter(|entry| {
+                let proj_ok = match project_id {
+                    Some(pid) => entry.project_id.as_deref().is_none_or(|ep| ep == pid),
+                    None => true,
+                };
+                proj_ok && log_level_rank(entry.level) >= min_rank
+            })
+            .take(cap)
+            .cloned()
+            .collect();
+        items.reverse();
+        items
+    }
+
+    pub fn clear_logs(&self, project_id: Option<&str>) {
+        let mut guard = self.inner.logs.write().unwrap_or_else(|e| e.into_inner());
+        match project_id {
+            Some(pid) => guard.retain(|e| e.project_id.as_deref() != Some(pid)),
+            None => guard.clear(),
+        }
     }
 
     pub async fn validate_timeline_command(
@@ -589,6 +718,221 @@ impl AppState {
     }
 }
 
+fn log_level_rank(level: LogLevel) -> u8 {
+    match level {
+        LogLevel::Debug => 0,
+        LogLevel::Info => 1,
+        LogLevel::Warn => 2,
+        LogLevel::Error => 3,
+    }
+}
+
+fn find_ascii_ci(haystack: &str, needle_lower: &[u8]) -> Option<usize> {
+    let h = haystack.as_bytes();
+    let n = needle_lower.len();
+    if n == 0 || h.len() < n {
+        return None;
+    }
+    for i in 0..=h.len() - n {
+        if h[i..i + n]
+            .iter()
+            .zip(needle_lower.iter())
+            .all(|(a, b)| a.to_ascii_lowercase() == *b)
+        {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn find_auth_scheme_ci(haystack: &str, scheme_lower: &[u8]) -> Option<(usize, usize)> {
+    let h = haystack.as_bytes();
+    let n = scheme_lower.len();
+    if n == 0 || h.len() <= n {
+        return None;
+    }
+    for i in 0..=h.len() - n - 1 {
+        if i > 0 && (h[i - 1].is_ascii_alphanumeric() || h[i - 1] == b'_') {
+            continue;
+        }
+        if h[i..i + n]
+            .iter()
+            .zip(scheme_lower.iter())
+            .all(|(a, b)| a.to_ascii_lowercase() == *b)
+        {
+            let mut j = i + n;
+            while j < h.len() && matches!(h[j], b' ' | b'\t') {
+                j += 1;
+            }
+            if j > i + n {
+                return Some((i, j));
+            }
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy)]
+enum SecretKind {
+    OpenRouterKey,
+    BearerAuth,
+    BasicAuth,
+    SolarisSession,
+    TicketParam,
+    SolarisTicketProto,
+    AmzSignature,
+    AmzSecurityToken,
+}
+
+fn sanitize_log_text(raw: &str, max_chars: usize) -> String {
+    // Cap raw scan length first on a valid UTF-8 char boundary to bound CPU/memory on huge payloads
+    let scan_limit_chars = max_chars.saturating_mul(8).max(256);
+    let mut was_pre_truncated = false;
+    let bounded = match raw.char_indices().nth(scan_limit_chars) {
+        Some((byte_idx, _)) => {
+            was_pre_truncated = true;
+            &raw[..byte_idx]
+        }
+        None => raw,
+    };
+
+    // Redact accidental OpenRouter API keys, auth headers, sessions, tickets, and AWS signatures
+    let mut scrubbed = String::with_capacity(bounded.len().min(max_chars.saturating_add(32)));
+    let mut rest = bounded;
+    while !rest.is_empty() {
+        let mut earliest: Option<(usize, usize, SecretKind)> = None;
+        let mut consider = |start: usize, val_start: usize, kind: SecretKind| {
+            if earliest.is_none_or(|(best_start, _, _)| start < best_start) {
+                earliest = Some((start, val_start, kind));
+            }
+        };
+
+        if let Some(i) = find_ascii_ci(rest, b"sk-or-") {
+            consider(i, i + 6, SecretKind::OpenRouterKey);
+        }
+        if let Some((i, val_start)) = find_auth_scheme_ci(rest, b"bearer") {
+            consider(i, val_start, SecretKind::BearerAuth);
+        }
+        if let Some((i, val_start)) = find_auth_scheme_ci(rest, b"basic") {
+            consider(i, val_start, SecretKind::BasicAuth);
+        }
+        if let Some(i) = find_ascii_ci(rest, b"solaris_session=") {
+            consider(i, i + "solaris_session=".len(), SecretKind::SolarisSession);
+        }
+        if let Some(i) = find_ascii_ci(rest, b"ticket=") {
+            consider(i, i + "ticket=".len(), SecretKind::TicketParam);
+        }
+        if let Some(i) = find_ascii_ci(rest, b"solaris.ticket.") {
+            consider(
+                i,
+                i + "solaris.ticket.".len(),
+                SecretKind::SolarisTicketProto,
+            );
+        }
+        if let Some(i) = find_ascii_ci(rest, b"x-amz-signature=") {
+            consider(i, i + "x-amz-signature=".len(), SecretKind::AmzSignature);
+        }
+        if let Some(i) = find_ascii_ci(rest, b"x-amz-security-token=") {
+            consider(
+                i,
+                i + "x-amz-security-token=".len(),
+                SecretKind::AmzSecurityToken,
+            );
+        }
+
+        let Some((idx, val_start, kind)) = earliest else {
+            scrubbed.push_str(rest);
+            break;
+        };
+        scrubbed.push_str(&rest[..idx]);
+        let after = &rest[val_start..];
+        let (replacement, end) = match kind {
+            SecretKind::OpenRouterKey => (
+                "<redacted-key>",
+                after
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_')))
+                    .unwrap_or(after.len()),
+            ),
+            SecretKind::BearerAuth => (
+                "Bearer <redacted>",
+                after
+                    .find(|c: char| {
+                        c.is_whitespace()
+                            || matches!(c, '"' | '\'' | ',' | '}' | ';' | '&' | ')' | ']')
+                    })
+                    .unwrap_or(after.len()),
+            ),
+            SecretKind::BasicAuth => (
+                "Basic <redacted>",
+                after
+                    .find(|c: char| {
+                        c.is_whitespace()
+                            || matches!(c, '"' | '\'' | ',' | '}' | ';' | '&' | ')' | ']')
+                    })
+                    .unwrap_or(after.len()),
+            ),
+            SecretKind::SolarisSession => (
+                "solaris_session=<redacted>",
+                after
+                    .find(|c: char| {
+                        c.is_whitespace()
+                            || matches!(c, ';' | '&' | '"' | '\'' | ',' | '}' | ')' | ']')
+                    })
+                    .unwrap_or(after.len()),
+            ),
+            SecretKind::TicketParam => (
+                "ticket=<redacted>",
+                after
+                    .find(|c: char| {
+                        c.is_whitespace()
+                            || matches!(c, '&' | ';' | '"' | '\'' | ',' | '}' | ')' | ']' | '#')
+                    })
+                    .unwrap_or(after.len()),
+            ),
+            SecretKind::SolarisTicketProto => (
+                "solaris.ticket.<redacted>",
+                after
+                    .find(|c: char| {
+                        c.is_whitespace()
+                            || matches!(c, ',' | ';' | '"' | '\'' | '}' | ')' | ']' | '&')
+                    })
+                    .unwrap_or(after.len()),
+            ),
+            SecretKind::AmzSignature => (
+                "X-Amz-Signature=<redacted>",
+                after
+                    .find(|c: char| {
+                        c.is_whitespace()
+                            || matches!(c, '&' | ';' | '"' | '\'' | ',' | '}' | ')' | ']' | '#')
+                    })
+                    .unwrap_or(after.len()),
+            ),
+            SecretKind::AmzSecurityToken => (
+                "X-Amz-Security-Token=<redacted>",
+                after
+                    .find(|c: char| {
+                        c.is_whitespace()
+                            || matches!(c, '&' | ';' | '"' | '\'' | ',' | '}' | ')' | ']' | '#')
+                    })
+                    .unwrap_or(after.len()),
+            ),
+        };
+        scrubbed.push_str(replacement);
+        rest = &after[end..];
+    }
+
+    if scrubbed.chars().count() > max_chars {
+        let mut out: String = scrubbed.chars().take(max_chars).collect();
+        out.push_str("… [truncated]");
+        out
+    } else if was_pre_truncated {
+        scrubbed.push_str("… [truncated]");
+        scrubbed
+    } else {
+        scrubbed
+    }
+}
+
 fn generate_opaque_token() -> String {
     let rng = SystemRandom::new();
     let mut bytes = [0u8; 32];
@@ -778,7 +1122,7 @@ fn starter_code_assets() -> Vec<SavedCodeAsset> {
                 "eyebrow": "THE LIST",
                 "headline": "3 AI TOOLS"
             }),
-            html_source: r#"<div class="clip" data-start="0" data-duration="2.5" style="display:grid;place-items:center;font-family:var(--brand-font-display,Sora);color:var(--brand-ink,#F7F5EF);"><div style="padding:14px 24px;border-radius:16px;background:rgba(26,14,14,0.86);border:1px solid rgba(240,90,0,0.45);text-align:center;"><div style="font-size:11px;letter-spacing:0.2em;color:var(--brand-accent-secondary,#F7B733);">{{eyebrow}}</div><div style="font-size:28px;font-weight:600;margin-top:4px;">{{headline}}</div></div></div>"#.to_string(),
+            html_source: r#"<div class="clip" data-start="0" data-duration="2.5" style="display:grid;place-items:center;font-family:var(--brand-font-display,Sora);color:var(--brand-ink,#F7F5EF);"><div class="solar-card" style="padding:18px 28px;border-radius:20px;background:rgba(16,9,9,0.88);border:1px solid rgba(240,90,0,0.55);box-shadow:0 18px 44px rgba(0,0,0,0.55),0 0 28px rgba(240,90,0,0.18);text-align:center;max-width:440px;"><div style="font-size:12px;font-weight:600;letter-spacing:0.22em;color:var(--brand-accent-secondary,#F7B733);">{{eyebrow}}</div><div style="font-size:34px;font-weight:700;line-height:1.1;letter-spacing:-0.02em;margin-top:6px;">{{headline}}</div></div></div><script>(function(){if(!window.gsap)return;var el=document.querySelector('.solar-card');var tl=gsap.timeline({paused:true});tl.fromTo(el,{opacity:0,y:22,scale:0.94},{opacity:1,y:0,scale:1,duration:0.42,ease:'power3.out'}).to(el,{opacity:1,duration:1.7}).to(el,{opacity:0,y:-14,duration:0.35,ease:'power2.in'});window.__timelines=window.__timelines||{};window.__timelines.main=tl;})();</script>"#.to_string(),
             default_duration_sec: 2.5,
             created_at: now,
         },
@@ -798,7 +1142,7 @@ fn starter_code_assets() -> Vec<SavedCodeAsset> {
                 "value": "10 HRS",
                 "label": "SAVED EVERY WEEK"
             }),
-            html_source: r#"<div class="clip" data-start="0" data-duration="3.0" style="display:flex;align-items:center;gap:12px;padding:14px 20px;border-radius:16px;background:rgba(8,4,4,0.88);border:1px solid rgba(247,245,239,0.16);color:#F7F5EF;font-family:var(--brand-font-display,Sora);"><span style="font-size:26px;font-weight:700;color:var(--brand-accent,#F05A00);">{{value}}</span><span style="font-size:12px;letter-spacing:0.08em;opacity:0.85;">{{label}}</span></div>"#.to_string(),
+            html_source: r#"<div class="clip" data-start="0" data-duration="3.0" style="display:flex;align-items:center;justify-content:center;font-family:var(--brand-font-display,Sora);"><div class="solar-stat" style="display:flex;align-items:center;gap:14px;padding:16px 24px;border-radius:18px;background:rgba(12,6,6,0.90);border:1px solid rgba(247,245,239,0.18);box-shadow:0 18px 40px rgba(0,0,0,0.52);color:#F7F5EF;max-width:440px;"><span style="font-size:32px;font-weight:700;letter-spacing:-0.02em;white-space:nowrap;color:var(--brand-accent,#F05A00);">{{value}}</span><span style="font-size:12px;font-weight:600;letter-spacing:0.12em;line-height:1.3;opacity:0.88;">{{label}}</span></div></div><script>(function(){if(!window.gsap)return;var el=document.querySelector('.solar-stat');var tl=gsap.timeline({paused:true});tl.fromTo(el,{opacity:0,y:18,scale:0.92},{opacity:1,y:0,scale:1,duration:0.4,ease:'back.out(1.4)'}).to(el,{opacity:1,duration:2.25}).to(el,{opacity:0,y:-12,duration:0.35,ease:'power2.in'});window.__timelines=window.__timelines||{};window.__timelines.main=tl;})();</script>"#.to_string(),
             default_duration_sec: 3.0,
             created_at: now,
         },
@@ -818,7 +1162,7 @@ fn starter_code_assets() -> Vec<SavedCodeAsset> {
                 "author": "@creator",
                 "comment": "the voice clone one is insane"
             }),
-            html_source: r#"<div class="clip" data-start="0" data-duration="2.8" style="padding:12px 16px;border-radius:18px;background:rgba(26,14,14,0.92);border:1px solid rgba(247,183,51,0.35);color:#F7F5EF;font-family:var(--brand-font-body,Sora);"><div style="font-size:11px;color:#F7B733;font-weight:600;">{{author}}</div><div style="font-size:14px;margin-top:2px;">{{comment}}</div></div>"#.to_string(),
+            html_source: r#"<div class="clip" data-start="0" data-duration="2.8" style="display:grid;place-items:center;font-family:var(--brand-font-body,Sora);"><div class="solar-bubble" style="padding:14px 20px;border-radius:20px;background:rgba(20,11,11,0.92);border:1px solid rgba(247,183,51,0.42);box-shadow:0 16px 38px rgba(0,0,0,0.52);color:#F7F5EF;max-width:420px;"><div style="font-size:12px;color:#F7B733;font-weight:600;letter-spacing:0.04em;">{{author}}</div><div style="font-size:16px;line-height:1.35;margin-top:4px;">{{comment}}</div></div></div><script>(function(){if(!window.gsap)return;var el=document.querySelector('.solar-bubble');var tl=gsap.timeline({paused:true});tl.fromTo(el,{opacity:0,y:16,scale:0.94},{opacity:1,y:0,scale:1,duration:0.38,ease:'back.out(1.3)'}).to(el,{opacity:1,duration:2.1}).to(el,{opacity:0,y:-10,duration:0.32,ease:'power2.in'});window.__timelines=window.__timelines||{};window.__timelines.main=tl;})();</script>"#.to_string(),
             default_duration_sec: 2.8,
             created_at: now,
         },
@@ -838,7 +1182,7 @@ fn starter_code_assets() -> Vec<SavedCodeAsset> {
                 "title": "Speaker Name",
                 "subtitle": "Founder & Host"
             }),
-            html_source: r#"<div class="clip" data-start="0" data-duration="3.2" style="display:flex;align-items:center;gap:10px;padding:10px 16px;border-radius:14px;background:rgba(8,4,4,0.88);border-left:3px solid var(--brand-accent,#F05A00);color:var(--brand-ink,#F7F5EF);font-family:var(--brand-font-display,Sora);"><div><div style="font-size:15px;font-weight:600;">{{title}}</div><div style="font-size:11px;color:var(--brand-accent-secondary,#F7B733);">{{subtitle}}</div></div></div>"#.to_string(),
+            html_source: r#"<div class="clip" data-start="0" data-duration="3.2" style="display:grid;place-items:center;font-family:var(--brand-font-display,Sora);"><div class="solar-lt" style="display:flex;align-items:center;gap:12px;padding:12px 20px;border-radius:16px;background:rgba(12,6,6,0.90);border:1px solid rgba(247,245,239,0.14);border-left:4px solid var(--brand-accent,#F05A00);box-shadow:0 16px 36px rgba(0,0,0,0.5);color:var(--brand-ink,#F7F5EF);max-width:420px;"><div><div style="font-size:18px;font-weight:600;">{{title}}</div><div style="font-size:12px;color:var(--brand-accent-secondary,#F7B733);margin-top:2px;">{{subtitle}}</div></div></div></div><script>(function(){if(!window.gsap)return;var el=document.querySelector('.solar-lt');var tl=gsap.timeline({paused:true});tl.fromTo(el,{opacity:0,x:-24},{opacity:1,x:0,duration:0.42,ease:'power3.out'}).to(el,{opacity:1,duration:2.4}).to(el,{opacity:0,x:-14,duration:0.35,ease:'power2.in'});window.__timelines=window.__timelines||{};window.__timelines.main=tl;})();</script>"#.to_string(),
             default_duration_sec: 3.2,
             created_at: now,
         },
@@ -858,9 +1202,98 @@ fn starter_code_assets() -> Vec<SavedCodeAsset> {
                 "label": "STEP 01 / 03",
                 "percent": 65
             }),
-            html_source: r#"<div class="clip" data-start="0" data-duration="3.0" style="padding:8px 14px;border-radius:999px;background:rgba(26,14,14,0.88);border:1px solid rgba(247,245,239,0.16);color:var(--brand-ink,#F7F5EF);font-family:var(--brand-font-body,Sora);"><div style="font-size:10px;letter-spacing:0.14em;color:var(--brand-accent-secondary,#F7B733);">{{label}}</div><div style="margin-top:4px;height:4px;width:160px;border-radius:999px;background:rgba(247,245,239,0.15);overflow:hidden;"><div style="height:100%;width:{{percent}}%;background:var(--brand-accent,#F05A00);"></div></div></div>"#.to_string(),
+            html_source: r#"<div class="clip" data-start="0" data-duration="3.0" style="display:grid;place-items:center;font-family:var(--brand-font-body,Sora);"><div class="solar-prog" style="padding:12px 20px;border-radius:999px;background:rgba(16,9,9,0.90);border:1px solid rgba(247,245,239,0.18);box-shadow:0 16px 36px rgba(0,0,0,0.48);color:var(--brand-ink,#F7F5EF);"><div style="display:flex;align-items:center;justify-content:space-between;gap:16px;font-size:11px;font-weight:600;letter-spacing:0.14em;color:var(--brand-accent-secondary,#F7B733);"><span>{{label}}</span><span>{{percent}}%</span></div><div style="margin-top:6px;height:6px;width:220px;border-radius:999px;background:rgba(247,245,239,0.14);overflow:hidden;"><div class="solar-prog-bar" style="height:100%;width:{{percent}}%;border-radius:999px;background:linear-gradient(90deg,var(--brand-accent,#F05A00),var(--brand-accent-secondary,#F7B733));transform-origin:left center;"></div></div></div></div><script>(function(){if(!window.gsap)return;var card=document.querySelector('.solar-prog');var bar=document.querySelector('.solar-prog-bar');var tl=gsap.timeline({paused:true});tl.fromTo(card,{opacity:0,y:14},{opacity:1,y:0,duration:0.35,ease:'power3.out'}).fromTo(bar,{scaleX:0.08},{scaleX:1,duration:1.1,ease:'power2.out'},0.15).to(card,{opacity:1,duration:1.3}).to(card,{opacity:0,y:-10,duration:0.3,ease:'power2.in'});window.__timelines=window.__timelines||{};window.__timelines.main=tl;})();</script>"#.to_string(),
             default_duration_sec: 3.0,
             created_at: now,
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_log_text_redacts_all_secret_patterns() {
+        let sample = concat!(
+            "key=sk-or-v1-abc123_XYZ ",
+            "auth1=bearer   \tSuperSecretToken123 ",
+            "auth2=BEARER my_tok ",
+            "basic=Basic dXNlcjpwYXNz ",
+            "cookie=solaris_session=sess_999; other=1 ",
+            "url=/api/v1/media?ticket=tkt_abc&x=1 ",
+            "proto=solaris.ticket.ws_tok_42,json ",
+            "s3=https://b.s3.amazonaws.com/f?X-Amz-Signature=deadbeef01&X-Amz-Security-Token=IQoJb3JpZ2lu%2Fabc&foo=bar ",
+            "cupbearer safe_word"
+        );
+        let out = sanitize_log_text(sample, 4000);
+        assert!(out.contains("key=<redacted-key>"));
+        assert!(!out.contains("abc123_XYZ"));
+        assert!(out.contains("auth1=Bearer <redacted>"));
+        assert!(!out.contains("SuperSecretToken123"));
+        assert!(out.contains("auth2=Bearer <redacted>"));
+        assert!(!out.contains("my_tok"));
+        assert!(out.contains("basic=Basic <redacted>"));
+        assert!(!out.contains("dXNlcjpwYXNz"));
+        assert!(out.contains("cookie=solaris_session=<redacted>; other=1"));
+        assert!(!out.contains("sess_999"));
+        assert!(out.contains("url=/api/v1/media?ticket=<redacted>&x=1"));
+        assert!(!out.contains("tkt_abc"));
+        assert!(out.contains("proto=solaris.ticket.<redacted>,json"));
+        assert!(!out.contains("ws_tok_42"));
+        assert!(out.contains("X-Amz-Signature=<redacted>&X-Amz-Security-Token=<redacted>&foo=bar"));
+        assert!(!out.contains("deadbeef01"));
+        assert!(!out.contains("IQoJb3JpZ2lu"));
+        // Word-boundary check preserves non-header words like "cupbearer"
+        assert!(out.contains("cupbearer safe_word"));
+    }
+
+    #[test]
+    fn sanitize_log_text_caps_huge_utf8_input_safely() {
+        let huge = "🔥".repeat(5000);
+        let out = sanitize_log_text(&huge, 32);
+        assert!(out.ends_with("… [truncated]"));
+        assert!(out.chars().count() <= 32 + "… [truncated]".chars().count());
+    }
+
+    #[test]
+    fn list_logs_respects_zero_limit_and_chronological_order() {
+        let dir = std::env::temp_dir().join(format!("solaris_state_logs_{}", Uuid::new_v4()));
+        let cfg = ServerConfig {
+            workspace_dir: dir.clone(),
+            ..ServerConfig::default()
+        };
+        let state = AppState::initialize(&cfg).expect("init state");
+        for i in 0..5 {
+            state.push_log(LogEntry {
+                id: format!("log-{i}"),
+                timestamp: Utc::now(),
+                level: if i % 2 == 0 {
+                    LogLevel::Info
+                } else {
+                    LogLevel::Error
+                },
+                source: "test".into(),
+                project_id: Some("p1".into()),
+                run_id: None,
+                agent_id: None,
+                message: format!("msg {i}"),
+                details: None,
+            });
+        }
+        assert!(state.list_logs(Some("p1"), None, 0).is_empty());
+        let last_two = state.list_logs(Some("p1"), None, 2);
+        assert_eq!(last_two.len(), 2);
+        assert_eq!(last_two[0].message, "msg 3");
+        assert_eq!(last_two[1].message, "msg 4");
+
+        let errors_only = state.list_logs(Some("p1"), Some(LogLevel::Error), 10);
+        assert_eq!(errors_only.len(), 2);
+        assert_eq!(errors_only[0].message, "msg 1");
+        assert_eq!(errors_only[1].message, "msg 3");
+
+        state.clear_logs(Some("p1"));
+        assert!(state.list_logs(Some("p1"), None, 10).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
