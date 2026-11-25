@@ -185,6 +185,8 @@ pub fn skill_references_for_role(role: AgentRole) -> Vec<SkillResourceDoc> {
         AgentRole::Gfx => &[
             "skill://captions-and-gfx/references/gfx-contract.md",
             "skill://captions-and-gfx/references/starter-assets.md",
+            "skill://captions-and-gfx/references/motion-craft.md",
+            "skill://captions-and-gfx/references/move-playbook.md",
         ],
         _ => &[],
     };
@@ -268,8 +270,8 @@ mod tests {
     fn embeds_progressive_disclosure_skill_references() {
         let refs = list_skill_resources();
         assert!(
-            refs.len() >= 6,
-            "expected at least 6 reference docs, found {}",
+            refs.len() >= 8,
+            "expected at least 8 reference docs, found {}",
             refs.len()
         );
         for uri in [
@@ -279,6 +281,8 @@ mod tests {
             "skill://director-core/references/failure-recovery.md",
             "skill://captions-and-gfx/references/gfx-contract.md",
             "skill://captions-and-gfx/references/starter-assets.md",
+            "skill://captions-and-gfx/references/motion-craft.md",
+            "skill://captions-and-gfx/references/move-playbook.md",
         ] {
             let res = get_skill_resource(uri).expect("missing skill reference resource");
             assert_eq!(res.uri, uri);
@@ -290,6 +294,8 @@ mod tests {
         let gfx_refs = skill_references_for_role(AgentRole::Gfx);
         assert!(gfx_refs.iter().any(|r| r.uri.ends_with("gfx-contract.md")));
         assert!(gfx_refs.iter().any(|r| r.uri.ends_with("starter-assets.md")));
+        assert!(gfx_refs.iter().any(|r| r.uri.ends_with("motion-craft.md")));
+        assert!(gfx_refs.iter().any(|r| r.uri.ends_with("move-playbook.md")));
         let dir_refs = skill_references_for_role(AgentRole::Director);
         assert!(dir_refs.iter().any(|r| r.uri.ends_with("direction-and-pacing.md")));
     }
@@ -311,6 +317,16 @@ mod tests {
             paths
                 .iter()
                 .any(|p| p.ends_with("captions-and-gfx/references/gfx-contract.md"))
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.ends_with("captions-and-gfx/references/motion-craft.md"))
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.ends_with("captions-and-gfx/references/move-playbook.md"))
         );
         assert!(
             paths

@@ -16,7 +16,7 @@ use crate::openrouter::{
     OpenRouterClient, ProviderPreferences, ReasoningConfig, ToolDefinition, truncate_msg,
 };
 use crate::planner::CreativePlan;
-use crate::skills::{skill_references_for_role, skills_for_role};
+use crate::skills::{get_skill_resource, skill_references_for_role, skills_for_role};
 use crate::swarm::speech::narration_expected;
 use crate::swarm::{DirectorPlan, SceneSpec, SwarmRunMode, is_voice_hint};
 use crate::tools::{
@@ -1331,6 +1331,16 @@ pub(crate) async fn run_programmatic_scene_worker(
     };
     let canonical_badge = format!("{:02} / {:02}", scene.scene_index, total_scenes);
 
+    let craft_refs: String = [
+        "skill://captions-and-gfx/references/motion-craft.md",
+        "skill://captions-and-gfx/references/move-playbook.md",
+    ]
+    .iter()
+    .filter_map(|uri| get_skill_resource(uri))
+    .map(|r| format!("## {}/{}\n{}", r.skill_name, r.relative_path, r.content))
+    .collect::<Vec<_>>()
+    .join("\n\n");
+
     let system_prompt = format!(
         "You are Solaris motion-design micro-agent '{agent_id}' authoring Scene {idx}/{total_scenes} for project '{}'.\n\
          You own ONLY this single scene window on track `g1`: `start_sec={:.2}`, `duration_sec={:.2}` (`clip_id=\"{clip_id}\"`).\n\
@@ -1345,7 +1355,7 @@ pub(crate) async fn run_programmatic_scene_worker(
          - Strict sandbox rules: root `<div class=\"clip\" data-start=\"0\" data-duration=\"{:.2}\">`, ZERO `<script src=...>`, ZERO external URLs/CDNs, ZERO `Math.random`, `Date.now`, `new Date`, `setInterval`, `setTimeout`, `requestAnimationFrame`, `fetch`, `XMLHttpRequest`, `WebSocket`, `import()`.\n\
          - Keep `inline_html` crisp and focused (~2.5–5 KB) so it renders fast and cleanly.\n\
          - {save_note}\n\
-         - Once placed, stop and reply concisely — Director runs Vision QA automatically.",
+         - Once placed, stop and reply concisely — Director runs Vision QA automatically.\n\n{craft_refs}",
         project.id,
         scene.start_sec,
         scene.duration_sec,

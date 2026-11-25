@@ -5,7 +5,8 @@
 1. [Exact Automated QA Thresholds](#1-exact-automated-qa-thresholds)
 2. [Multi-Timestamp Visual Sampling Strategy](#2-multi-timestamp-visual-sampling-strategy)
 3. [6-Axis Director Critique Rubric (1–10)](#3-6-axis-director-critique-rubric-110)
-4. [Fix-Line Contract & Max-3-Round Loop](#4-fix-line-contract--max-3-round-loop)
+4. [Repeated Review Notes → Exact Mechanism Diagnosis](#4-repeated-review-notes--exact-mechanism-diagnosis)
+5. [Scoped Fix-Line Contract & Max-3-Round Loop](#5-scoped-fix-line-contract--max-3-round-loop)
 
 ---
 
@@ -30,41 +31,68 @@
 
 ## 2. Multi-Timestamp Visual Sampling Strategy
 
-Never judge a timeline from a single midpoint frame—most visual defects happen at entrances, transitions, and overlay overlaps. Call `preview.seek` + `preview.capture_frame` at **3 to 5 deliberate timestamps**:
+Never judge a timeline from a single midpoint frame—most defects live at entrances, transitions, and overlay overlaps. Call `preview.seek` + `preview.capture_frame` at **3 to 5 deliberate timestamps**:
 
-1. **Hook (`0.3–0.6s`)**: Confirm frame is populated (no black start), eyes/subject sit cleanly in upper third, and hook title does not cover the speaker's face.
-2. **First Overlay Overlap**: Pick a timestamp where `T1` captions AND a `G1` card are simultaneously active. Confirm clean vertical separation, high contrast, and zero clipping at edges.
-3. **B-Roll / Cutaway Midpoint**: Confirm `V2` framing, `9:16` crop alignment, and color match against `V1`.
-4. **Climax / Stat Reveal**: Verify numbers/labels are readable at mobile scale (equivalent to 360px phone width) and brand tokens match `brand.get_playbook`.
-5. **Outro / Last Second**: Confirm clean end framing without frozen/orphaned overlays.
+1. **Hook (`0.3–0.6s`)**: Confirm frame is populated with strong ink (no black start), eyes/subject sit cleanly in upper third, and hook title does not cover the speaker's face.
+2. **First Overlay Overlap**: Pick a timestamp where `T1` captions AND a `G1` card are simultaneously active. Confirm clean vertical separation, high contrast, and zero edge clipping.
+3. **B-Roll / Programmatic Midpoint**: Confirm `V2` framing / `9:16` crop alignment / color match, OR in programmatic `G1` verify the full `100vh` atmosphere is alive (no pitch-black bottom void).
+4. **Climax / Stat Reveal**: Verify numbers and labels are legible at **360px phone width** and brand tokens match `brand.get_playbook`.
+5. **Outro / Last Second**: Confirm clean end framing without frozen/orphaned overlays or premature fade-to-black.
 
-> **Prerequisite**: `preview.capture_frame` works for **both** `V1`/`V2` footage timelines AND programmatic `G1`/`T1` overlay-only timelines (rendered over the brand backdrop). Headless Chromium is required to render `G1`/`T1` overlays; if no active clip exists on `V1`/`V2`/`G1`/`T1` at `time_sec`, pick a covered timestamp or fill the gap first.
+### The Stranger & Mute Tests (Apply to Every Captured Frame)
+1. **Describe the frame in one sentence as a stranger would**, naming every object. Anything you would have to explain is a design flaw.
+2. **Cover the words**: Do the visuals alone still communicate the beat (trend, comparison, proof, action)?
+3. **Phone-width test**: Imagine the frame shrunk to `360px` wide on a phone, muted. Can every headline, stat, and caption be read cleanly in under a second?
+
+> **Prerequisite**: `preview.capture_frame` works for **both** `V1`/`V2` footage timelines AND programmatic `G1`/`T1` overlay-only timelines (rendered over the brand backdrop). Headless Chromium is required to render `G1`/`T1` overlays.
 
 ---
 
 ## 3. 6-Axis Director Critique Rubric (1–10)
 
-Be a harsh supervising editor, not a proud author. **Any unresolved measured QA issue in an axis hard-caps that axis at `7` until fixed.**
+Be the harsh supervising motion director, not the proud author. **Any unresolved measured QA issue in an axis hard-caps that axis at `7` until fixed.**
 
 | Axis | 9–10 (Release Ready) | 7–8 (Solid, Minor Tweak) | 5–6 (Visible Amateur Tell) | < 5 (Broken / Unshippable) |
 | --- | --- | --- | --- | --- |
-| **Hook** | Frame 0 immediately delivers subject + visual/verbal hook; strong framing in first 2s | Hook lands cleanly within 0.5s | Slow buildup, generic title on blank frame | Black lead gap `>0.5s` or dead air |
-| **Brand** | Matches `brand_md` tokens, fonts, LUT intensity, and tone effortlessly | Right palette, one off-brand graphic or font mismatch | Generic stock look ignoring playbook | Wrong palette, placeholder text, unrecovered Log gray |
-| **Pacing** | Tight breath-safe cuts, B-roll every 3–5s, zero static stretches `>3.5s`, beat-aligned | One slightly long hold or loose cut | Repeated dead pauses or static holds `>4s` | Uncut raw footage or broken V1 gaps `>0.4s` |
-| **Readability** | 2–4 word bursts, AA contrast, clear of 9:16 chrome, zero T1/G1 collision, legible at phone width | One cramped line or tight edge margin | Overlaps face/chrome or 6+ word walls | Cut-off text, colliding overlays, unreadable color |
-| **Color & Framing** | Natural skin tones, clean shadow/highlight roll-off, intentional punch-ins, balanced V1/V2 match | Minor warmth/contrast mismatch on one cutaway | Flat Log footage or over-saturated 100% LUT crush | Clipped highlights, misaligned 9:16 crop cutting face |
-| **Audio & Polish** | Voice `-14 ± 2.5 LUFS`, music `<= -8 dB` + `-18 dB` ducking, click-free fades, all GFX lint-clean | Minor fade missing on one clip | Music too loud or ducking disabled | Severe loudness drift, unmuted clashing B-roll, lint errors |
+| **Hook** | Frame 0 immediately delivers subject/result + bold hook; first 2s pose a clear question or change | Hook lands cleanly within 0.5s | Slow buildup, generic title fading over flat ground | Black lead gap `>0.5s` or dead air |
+| **Brand** | Matches `brand_md` tokens, proportions, fonts, LUT intensity, and cohesive world effortlessly | Right palette, one off-brand graphic or font mismatch | Generic "tech" look ignoring playbook | Wrong palette, placeholder text, internal asset IDs visible, raw Log gray |
+| **Motion & Pacing** | Role-based eases, arrive slow / leave clean, tight breath-safe cuts, B-roll/beats every 0.5–3.5s, zero static holds `>3.5s` | One slightly long hold, loose cut, or floaty element | Everything fades-and-slides up on one ease; dead stretches `>4s` | Uncut raw footage, V1/G1 gaps `>0.4s`, jitter or stale blur |
+| **Readability** | Every line held `0.5s + 0.3s/word`, readable at 360px phone width, AA contrast, clear of 9:16 chrome, zero T1/G1 collision | One cramped line or tight edge margin | Overlaps face/chrome, tiny SVG labels, or 6+ word walls | Cut-off text, colliding overlays, unreadable color |
+| **Color & Framing** | Natural skin tones, clean shadow/highlight roll-off, intentional punch-ins, balanced V1/V2 match, hero fills 40%+ of stage | Minor warmth/contrast mismatch on one cutaway | Flat Log footage, 100% LUT crush, or tiny box in empty frame | Clipped highlights, misaligned 9:16 crop cutting face |
+| **Audio & Polish** | Voice `-14 ± 2.5 LUFS`, music `<= -8 dB` + `-18 dB` ducking, click-free fades, shadow-safe clips, all GFX lint-clean, held end card | Minor fade missing or one small blemish | Music too loud, ducking disabled, or several visible blemishes | Severe loudness drift, unmuted clashing B-roll, lint errors, broken frames |
 
 ---
 
-## 4. Fix-Line Contract & Max-3-Round Loop
+## 4. Repeated Review Notes → Exact Mechanism Diagnosis
+
+When one of these real-world defects appears on a captured frame, stop tweaking colors and fix the exact underlying mechanism:
+
+| Visual Defect Seen in Capture | Root Mechanism | Exact Solaris Fix |
+| --- | --- | --- |
+| **"Too much empty dark screen"** | Hero element too small or ambient backdrop stops at `50vh`. | Scale hero to fill `40%+` of stage; extend radial glow + subtle grid across full `100vh`. |
+| **"Empty at the start"** | Lead gap `>0.5s` or opening `G1` fades in from `opacity: 0`. | Start `V1`/`G1` at `0.0s` with frame-0 ink (`opacity >= 0.85` at `t=0`). |
+| **"Drop shadow is a sharp box"** | `clip-path` wipe at `inset(0 ...)` clipped a shadowed element. | Use shadow-safe negative insets (`inset(-40% 100% -40% -10%)`) or `filter: drop-shadow(...)`. |
+| **"Letters or glow cut off at bottom"** | Mask floor sits at the line box (`0%`) instead of below descenders. | Use `.mask` with `padding-bottom: 0.42em; margin-bottom: -0.42em; clip-path: inset(-30% -10% 0% -10%)`. |
+| **"Hairline seam through letters"** | `letter-spacing` tighter than `-0.025em`. | Clamp `letter-spacing >= -0.025em`. |
+| **"Stale blur frozen on card"** | `filter: blur()` tweened with `back.out` / `elastic` ease. | Move `back.out` to transform only; tween `blur` and `opacity` with `power2.out` / `expo.out`. |
+| **"Earlier frame shows exit state"** | Exit or repeated `fromTo` missing `immediateRender: false`. | Add `immediateRender: false` to all exits and repeated tweens. |
+| **"Counter shows $0 before counting"** | Counter text pre-rendered at `t=0`. | Hide with `tl.set(el, { opacity: 0 }, 0)` until count start `t`, then count + stamp. |
+| **"Boxes move robotically"** | Uniform sequential stagger or per-item wobble loop. | Overlap entrances 30–50%, vary eases by role, freeze landed titles. |
+| **"GFX collides with T1 captions"** | Floating `G1` left at default `y: 0` or full-canvas content spilled below `61vh`. | Offset floating `G1` via `timeline.set_transform(y=-0.24)`; keep 9:16 full-canvas foreground inside `5vh..61vh`. |
+
+---
+
+## 5. Scoped Fix-Line Contract & Max-3-Round Loop
 
 1. After inspecting QA JSON and captured PNG frames, list every axis scoring `< 8` with an explicit fix line:
    ```text
    t=4.2s · g1 (stat-1) · overlaps T1 caption at y=0.18 -> timeline.set_transform(track_id="g1", clip_id="stat-1", y=-0.24)
    t=0.4s · fx (global) · S-Log3 footage still washed out -> color.set_grade(contrast=1.18, saturation=1.16, lut_intensity=0.75)
    ```
-2. **Scope discipline**: Apply *only* the listed fixes—do not randomly rebuild working clips.
+2. **Scoped fix discipline ("change nothing else")**: Apply *only* the listed fixes—never randomly rebuild working clips. Fixed mappings:
+   - *"too fast"* → slow camera/entrance durations by `1.3×` and change nothing else.
+   - *"feels like slides"* → add a continuous rig drift, specular sweep, or object handoff and change nothing else.
+   - *"titles move"* → freeze landed titles dead still and change nothing else.
 3. Re-run `project.run_qa` and re-capture only the affected timestamps to confirm the fix resolved the issue without regressions.
 4. If a capture looks worse than before, revert immediately via `project.undo`.
 5. **Hard cap: maximum 3 QA rounds.** After Round 3, deliver the best revision and report transparently any axis still `< 8` plus the exact reason.

@@ -1,6 +1,6 @@
 ---
 name: color-and-look
-description: Applies Log-to-Rec.709 color recovery, Lift/Gamma/Gain balancing, exposure/white-balance correction, skin-tone protection, and .cube 3D LUT blending in Solaris. Use when grading S-Log3/Log-C/V-Log footage, matching B-roll to A-roll, applying a Brand Playbook LUT, or fixing washed-out, dark, or over-saturated frames. Not for audio mixing or GFX styling.
+description: Applies Log-to-Rec.709 color recovery, Lift/Gamma/Gain balancing, exposure/white-balance correction, skin-tone protection, overlay-contrast hygiene, and .cube 3D LUT blending in Solaris. Use when grading S-Log3/Log-C/V-Log footage, matching B-roll to A-roll, applying a Brand Playbook LUT, or fixing washed-out, dark, or over-saturated frames. Not for audio mixing or GFX styling.
 ---
 
 # Solaris Color & Look Craft
@@ -35,18 +35,19 @@ Always start from disciplined, repeatable numbers—then refine visually via `pr
 - **`exposure`**: Adjust in small `±0.05`–`±0.15` steps (`-1.0` to `+1.0` valid range) rather than crushing shadows with `lift` or blowing highlights with `gain`.
 - **Brand LUT blending**: Whenever `brand.get_playbook` includes `default_lut`, pass `lut_path` and blend at `0.65–0.85` (never blindly `1.0`, which frequently clips specular highlights and oversaturates skin).
 
-## 4. Visual Verification Loop
+## 4. Visual Verification & Overlay Contrast Hygiene
 
 1. After `color.set_grade`, call `preview.capture_frame` on the hero face shot and a bright/outdoor cutaway.
 2. Check for:
    - **Crushed blacks**: shadow detail turning into muddy solid blocks → raise `lift` toward `0.0` or lower `contrast`.
    - **Clipped highlights / waxy skin**: forehead or sky losing texture → lower `gain`, `exposure`, or `lut_intensity` by `0.10–0.15`.
    - **Unnatural skin cast**: orange/magenta/green shift on faces → nudge `temp` / `tint` back toward `0.0` and dial `saturation` down `0.05`.
+   - **Surface contrast under `G1`/`T1` overlays**: Always measure brand marks, captions, and glass cards against the graded footage behind them in both directions (bright highlights wash out white captions; crushed shadows swallow dark cards).
 3. If an aggressive grade degrades the image, revert immediately with `project.undo` and apply a smaller adjustment.
 
 ## 5. BANNED Color Defaults
 
 - Shipping flat, milky gray `is_log_footage: true` clips with default neutral `1.0` contrast/saturation.
 - Slamming `lut_intensity: 1.0` on top of high contrast (`>1.20`) and high saturation (`>1.25`).
-- Grading blind without calling `preview.capture_frame` to check real skin tones and highlight roll-off.
+- Grading blind without calling `preview.capture_frame` to check real skin tones, highlight roll-off, and overlay legibility.
 - Claiming you "read the luma waveform" from `color.get_scope_stats` (only report what you actually inspected in `preview.capture_frame`).
