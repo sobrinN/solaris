@@ -9,10 +9,17 @@ import {
   saveDesktopExportFile,
 } from "./engineBridge";
 
-interface DirectoryPickerOptions {
+interface SaveFilePickerAcceptType {
+  description?: string;
+  accept: Record<string, string[]>;
+}
+
+interface SaveFilePickerOptions {
   id?: string;
-  mode?: "read" | "readwrite";
+  suggestedName?: string;
   startIn?: "desktop" | "documents" | "downloads" | "music" | "pictures" | "videos";
+  types?: SaveFilePickerAcceptType[];
+  excludeAcceptAllOption?: boolean;
 }
 
 interface PermissionDescriptor {
@@ -25,24 +32,20 @@ interface WritableFileStreamLike extends WritableStream<Uint8Array> {
   abort(reason?: unknown): Promise<void>;
 }
 
-interface FileHandleLike {
-  createWritable(): Promise<WritableFileStreamLike>;
-}
-
-export interface ExportDirectoryHandle {
+export interface ExportFileHandle {
   readonly name: string;
-  getFileHandle(name: string, options?: { create?: boolean }): Promise<FileHandleLike>;
+  createWritable(): Promise<WritableFileStreamLike>;
   queryPermission?: (desc?: PermissionDescriptor) => Promise<PermissionState>;
   requestPermission?: (desc?: PermissionDescriptor) => Promise<PermissionState>;
 }
 
-type WindowWithDirectoryPicker = Window & {
-  showDirectoryPicker?: (options?: DirectoryPickerOptions) => Promise<ExportDirectoryHandle>;
+type WindowWithSaveFilePicker = Window & {
+  showSaveFilePicker?: (options?: SaveFilePickerOptions) => Promise<ExportFileHandle>;
 };
 
-export type ExportFolderTarget =
+export type ExportDestinationTarget =
   | { kind: "desktop_path"; name: string; path: string }
-  | { kind: "fs_handle"; name: string; handle: ExportDirectoryHandle };
+  | { kind: "fs_file_handle"; name: string; handle: ExportFileHandle };
 
 export const BROWSER_DOWNLOAD_LOCATION = "your browser's download folder";
 
@@ -52,20 +55,21 @@ export interface ExportDeliveryResult {
   browserDownload: boolean;
 }
 
-let rememberedExportFolder: ExportFolderTarget | null = null;
+let rememberedDesktopFolder: Extract<ExportDestinationTarget, { kind: "desktop_path" }> | null =
+  null;
 
-export function getRememberedExportFolder(): ExportFolderTarget | null {
-  return rememberedExportFolder;
+export function getRememberedExportFolder(): ExportDestinationTarget | null {
+  return rememberedDesktopFolder;
 }
 
-export function setRememberedExportFolder(target: ExportFolderTarget | null): void {
-  rememberedExportFolder = target;
+export function setRememberedExportFolder(target: ExportDestinationTarget | null): void {
+  rememberedDesktopFolder = target?.kind === "desktop_path" ? target : null;
 }
 
-export function supportsExportFolderPicker(): boolean {
+export function supportsExportDestinationPicker(): boolean {
   if (isDesktopTauri()) return true;
   if (typeof window === "undefined") return false;
-  return typeof (window as WindowWithDirectoryPicker).showDirectoryPicker === "function";
+  return typeof (window as WindowWithSaveFilePicker).showSaveFilePicker === "function";
 }
 
 function folderBaseName(rawPath: string): string {
@@ -83,6 +87,31 @@ export function exportExtensionForFormat(
   if (format === "mov_pro_res4444") return "mov";
   if (format === "webm_alpha") return "webm";
   return "mp4";
+}
+
+function savePickerTypesForFormat(format: ExportFormat): SaveFilePickerAcceptType[] {
+  if (format === "mov_pro_res4444") {
+    return [
+      {
+        description: "QuickTime Movie (ProRes 4444)",
+        accept: { "video/quicktime": [".mov"] },
+      },
+    ];
+  }
+  if (format === "webm_alpha") {
+    return [
+      {
+        description: "WebM Video",
+        accept: { "video/webm": [".webm"] },
+      },
+    ];
+  }
+  return [
+    {
+      description: "MP4 Video",
+      accept: { "video/mp4": [".mp4"] },
+    },
+  ];
 }
 
 export function sanitizeExportBaseName(raw: string): string {
@@ -106,11 +135,18 @@ export function buildExportFileName(
   return `${cleanBase}.${ext}`;
 }
 
-export async function pickExportFolder(): Promise<ExportFolderTarget | null> {
+// On the web we use `showSaveFilePicker` (single-file Save As) instead of
+// `showDirectoryPicker`, because Chromium blocks `showDirectoryPicker` on standard
+// user folders (Downloads, Desktop, Documents, Movies, Home) with a misleading
+// "contains system files" error, whereas `showSaveFilePicker` is allowed in all of them.
+export async function pickExportDestination(options: {
+  suggestedBaseName: string;
+  format: ExportFormat;
+}): Promise<ExportDestinationTarget | null> {
   if (isDesktopTauri()) {
     const picked = await pickDesktopExportFolder();
     if (!picked) return null;
-    const target: ExportFolderTarget = {
+    const target: ExportDestinationTarget = {
       kind: "desktop_path",
       name: folderBaseName(picked),
       path: picked,
@@ -121,23 +157,24 @@ export async function pickExportFolder(): Promise<ExportFolderTarget | null> {
 
   const picker =
     typeof window !== "undefined"
-      ? (window as WindowWithDirectoryPicker).showDirectoryPicker
+      ? (window as WindowWithSaveFilePicker).showSaveFilePicker
       : undefined;
   if (!picker) return null;
+
+  const suggestedName = buildExportFileName(options.suggestedBaseName, options.format);
 
   try {
     const handle = await picker({
       id: "solaris-exports",
-      mode: "readwrite",
+      suggestedName,
       startIn: "downloads",
+      types: savePickerTypesForFormat(options.format),
     });
-    const target: ExportFolderTarget = {
-      kind: "fs_handle",
-      name: handle.name || "Selected Folder",
+    return {
+      kind: "fs_file_handle",
+      name: handle.name || suggestedName,
       handle,
     };
-    setRememberedExportFolder(target);
-    return target;
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
       return null;
@@ -146,8 +183,8 @@ export async function pickExportFolder(): Promise<ExportFolderTarget | null> {
   }
 }
 
-export async function ensureFolderWritePermission(
-  target: ExportFolderTarget,
+export async function ensureExportWritePermission(
+  target: ExportDestinationTarget,
 ): Promise<boolean> {
   if (target.kind === "desktop_path") return true;
   const { handle } = target;
@@ -160,33 +197,6 @@ export async function ensureFolderWritePermission(
     return requested === "granted";
   }
   return true;
-}
-
-async function resolveUniqueFileHandle(
-  dir: ExportDirectoryHandle,
-  desiredName: string,
-): Promise<{ fileName: string; fileHandle: FileHandleLike }> {
-  const dotIdx = desiredName.lastIndexOf(".");
-  const stem = dotIdx > 0 ? desiredName.slice(0, dotIdx) : desiredName;
-  const ext = dotIdx > 0 ? desiredName.slice(dotIdx) : "";
-
-  for (let counter = 0; counter < 1000; counter += 1) {
-    const candidate = counter === 0 ? desiredName : `${stem}-${counter}${ext}`;
-    try {
-      await dir.getFileHandle(candidate, { create: false });
-      // File already exists — keep searching for a unique name
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "NotFoundError") {
-        const fileHandle = await dir.getFileHandle(candidate, { create: true });
-        return { fileName: candidate, fileHandle };
-      }
-      throw err;
-    }
-  }
-
-  const fallbackName = `${stem}-${Date.now()}${ext}`;
-  const fileHandle = await dir.getFileHandle(fallbackName, { create: true });
-  return { fileName: fallbackName, fileHandle };
 }
 
 // Holds the whole export in memory on purpose: a direct link would stream to disk, but it
@@ -216,7 +226,7 @@ export async function deliverExportToTarget(
   client: SolarisEngineClient,
   job: ExportJobStatus,
   desiredFileName: string,
-  target: ExportFolderTarget | null,
+  target: ExportDestinationTarget | null,
 ): Promise<ExportDeliveryResult> {
   if (target?.kind === "desktop_path" && job.output_path) {
     const saved = await saveDesktopExportFile(
@@ -248,12 +258,8 @@ export async function deliverExportToTarget(
 
   const res = await client.fetchExportDownload(job.id);
 
-  if (target?.kind === "fs_handle") {
-    const { fileName, fileHandle } = await resolveUniqueFileHandle(
-      target.handle,
-      desiredFileName,
-    );
-    const writable = await fileHandle.createWritable();
+  if (target?.kind === "fs_file_handle") {
+    const writable = await target.handle.createWritable();
     if (res.body && typeof res.body.pipeTo === "function") {
       await res.body.pipeTo(writable);
     } else {
@@ -266,9 +272,10 @@ export async function deliverExportToTarget(
         throw err;
       }
     }
+    const savedName = target.name || desiredFileName;
     return {
-      savedPath: `${target.name}/${fileName}`,
-      fileName,
+      savedPath: savedName,
+      fileName: savedName,
       browserDownload: false,
     };
   }

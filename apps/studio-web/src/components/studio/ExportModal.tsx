@@ -14,18 +14,19 @@ import type {
   ExportQuality,
   SolarisEngineClient,
 } from "@solaris/engine-client";
+import { isDesktopTauri } from "../../lib/engineBridge";
 import {
   BROWSER_DOWNLOAD_LOCATION,
   buildExportFileName,
   deliverExportToTarget,
-  ensureFolderWritePermission,
+  ensureExportWritePermission,
   exportExtensionForFormat,
   getRememberedExportFolder,
-  pickExportFolder,
+  pickExportDestination,
   sanitizeExportBaseName,
   setRememberedExportFolder,
-  supportsExportFolderPicker,
-  type ExportFolderTarget,
+  supportsExportDestinationPicker,
+  type ExportDestinationTarget,
 } from "../../lib/exportDelivery";
 import { SolarSelect } from "../ui/SolarSelect";
 
@@ -50,7 +51,7 @@ interface DeliveryState {
 
 interface ArmedExportDelivery {
   jobId: string;
-  target: ExportFolderTarget | null;
+  target: ExportDestinationTarget | null;
   fileName: string;
 }
 
@@ -70,10 +71,10 @@ export function ExportModal({
   const [fileNameInput, setFileNameInput] = useState(() =>
     sanitizeExportBaseName(projectName),
   );
-  const [selectedFolder, setSelectedFolder] = useState<ExportFolderTarget | null>(() =>
+  const [selectedTarget, setSelectedTarget] = useState<ExportDestinationTarget | null>(() =>
     getRememberedExportFolder(),
   );
-  const [pickingFolder, setPickingFolder] = useState(false);
+  const [pickingDestination, setPickingDestination] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [deliveryState, setDeliveryState] = useState<DeliveryState | null>(null);
@@ -85,7 +86,8 @@ export function ExportModal({
   const onExportDeliveredRef = useRef(onExportDelivered);
   onExportDeliveredRef.current = onExportDelivered;
 
-  const folderPickerAvailable = supportsExportFolderPicker();
+  const isDesktop = isDesktopTauri();
+  const destinationPickerAvailable = supportsExportDestinationPicker();
 
   const isJobActive =
     activeJob !== null &&
@@ -95,6 +97,7 @@ export function ExportModal({
 
   useEffect(() => {
     setFileNameInput(sanitizeExportBaseName(projectName));
+    setSelectedTarget((prev) => (prev?.kind === "fs_file_handle" ? null : prev));
   }, [projectId, projectName]);
 
   useEffect(() => {
@@ -107,7 +110,7 @@ export function ExportModal({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [open, onClose]);
 
-  // Automatically save/download the finished video to the user-selected folder,
+  // Automatically save/download the finished video to the chosen destination,
   // even if the Export modal was closed while the render ran in the background.
   useEffect(() => {
     if (!activeJob || activeJob.state !== "completed") return;
@@ -117,17 +120,24 @@ export function ExportModal({
 
     autoDeliveredIdsRef.current.add(activeJob.id);
     const jobSnapshot = activeJob;
-    const targetFolder = armed.target;
+    const target = armed.target;
     const fileName = armed.fileName;
 
     setDeliveryState({
       jobId: jobSnapshot.id,
       status: "saving",
-      location: targetFolder?.name ?? BROWSER_DOWNLOAD_LOCATION,
+      location: target?.name ?? BROWSER_DOWNLOAD_LOCATION,
     });
 
-    void deliverExportToTarget(client, jobSnapshot, fileName, targetFolder)
+    void deliverExportToTarget(client, jobSnapshot, fileName, target)
       .then((res) => {
+        if (target?.kind === "fs_file_handle") {
+          setSelectedTarget((prev) =>
+            prev?.kind === "fs_file_handle" && prev.handle === target.handle
+              ? null
+              : prev,
+          );
+        }
         setDeliveryState({
           jobId: jobSnapshot.id,
           status: "saved",
@@ -143,7 +153,7 @@ export function ExportModal({
           error:
             err instanceof Error
               ? err.message
-              : "Failed to save rendered video to the chosen folder",
+              : "Failed to save rendered video to the chosen destination",
         });
       });
   }, [activeJob, client, deliveryArmSeq]);
@@ -156,67 +166,82 @@ export function ExportModal({
     return Math.max(-24, Math.min(-8, parsed));
   };
 
-  const handleChooseFolder = async () => {
-    if (pickingFolder || isJobActive || !folderPickerAvailable) return;
-    setPickingFolder(true);
+  const handleChooseDestination = async () => {
+    if (pickingDestination || isJobActive || !destinationPickerAvailable) return;
+    setPickingDestination(true);
     setSubmitError(null);
     try {
-      const picked = await pickExportFolder();
+      const picked = await pickExportDestination({
+        suggestedBaseName: fileNameInput || projectName,
+        format,
+      });
       if (picked) {
-        setSelectedFolder(picked);
-        setRememberedExportFolder(picked);
+        setSelectedTarget(picked);
+        if (picked.kind === "desktop_path") {
+          setRememberedExportFolder(picked);
+        } else {
+          setFileNameInput(sanitizeExportBaseName(picked.name));
+        }
       }
     } catch (err) {
       setSubmitError(
-        err instanceof Error ? err.message : "Could not open folder picker",
+        err instanceof Error
+          ? `${err.message}. You can still render using Browser Downloads.`
+          : "Could not open save dialog. You can still render using Browser Downloads.",
       );
     } finally {
-      setPickingFolder(false);
+      setPickingDestination(false);
     }
   };
 
+  const handleClearWebDestination = () => {
+    if (isJobActive) return;
+    setSelectedTarget(null);
+    setSubmitError(null);
+  };
+
   const handleStart = async () => {
-    if (submitting || isJobActive || pickingFolder) return;
+    if (submitting || isJobActive || pickingDestination) return;
     setSubmitError(null);
 
-    let targetFolder = selectedFolder;
-    if (folderPickerAvailable) {
-      if (!targetFolder) {
-        setPickingFolder(true);
-        try {
-          targetFolder = await pickExportFolder();
-        } catch (err) {
+    let target = selectedTarget;
+    if (isDesktop && !target) {
+      setPickingDestination(true);
+      try {
+        target = await pickExportDestination({
+          suggestedBaseName: fileNameInput || projectName,
+          format,
+        });
+      } catch (err) {
+        setSubmitError(
+          err instanceof Error ? err.message : "Could not open folder picker",
+        );
+        setPickingDestination(false);
+        return;
+      } finally {
+        setPickingDestination(false);
+      }
+      if (!target) {
+        return;
+      }
+      setSelectedTarget(target);
+      setRememberedExportFolder(target);
+    } else if (target) {
+      try {
+        const permitted = await ensureExportWritePermission(target);
+        if (!permitted) {
           setSubmitError(
-            err instanceof Error ? err.message : "Could not open folder picker",
-          );
-          setPickingFolder(false);
-          return;
-        } finally {
-          setPickingFolder(false);
-        }
-        if (!targetFolder) {
-          // User cancelled folder selection; do not start render.
-          return;
-        }
-        setSelectedFolder(targetFolder);
-        setRememberedExportFolder(targetFolder);
-      } else {
-        try {
-          const permitted = await ensureFolderWritePermission(targetFolder);
-          if (!permitted) {
-            setSubmitError(
-              "Write permission for the output folder was denied. Choose a folder to continue.",
-            );
-            return;
-          }
-        } catch (err) {
-          setSubmitError(
-            err instanceof Error
-              ? err.message
-              : "Could not verify write permission for the output folder.",
+            "Write permission for the chosen destination was denied. Choose a location again or reset to Browser Downloads.",
           );
           return;
         }
+      } catch (err) {
+        setSubmitError(
+          err instanceof Error
+            ? err.message
+            : "Could not verify write permission for the chosen destination.",
+        );
+        return;
       }
     }
 
@@ -237,7 +262,7 @@ export function ExportModal({
       });
       armedDeliveryRef.current = {
         jobId: job.id,
-        target: targetFolder,
+        target,
         fileName: desiredFileName,
       };
       setDeliveryArmSeq((s) => s + 1);
@@ -254,35 +279,34 @@ export function ExportModal({
     setManualSaving(true);
     setSubmitError(null);
 
-    let targetFolder = selectedFolder;
-    if (folderPickerAvailable) {
-      if (!targetFolder) {
-        try {
-          targetFolder = await pickExportFolder();
-        } catch (err) {
-          setSubmitError(
-            err instanceof Error ? err.message : "Could not open folder picker",
-          );
-          setManualSaving(false);
-          return;
-        }
-        if (!targetFolder) {
-          setManualSaving(false);
-          return;
-        }
-        setSelectedFolder(targetFolder);
-        setRememberedExportFolder(targetFolder);
-      } else {
-        const permitted = await ensureFolderWritePermission(targetFolder).catch(
-          () => false,
+    let target = selectedTarget;
+    if (isDesktop && !target) {
+      try {
+        target = await pickExportDestination({
+          suggestedBaseName: fileNameInput || projectName,
+          format,
+        });
+      } catch (err) {
+        setSubmitError(
+          err instanceof Error ? err.message : "Could not open folder picker",
         );
-        if (!permitted) {
-          setSubmitError(
-            "Write permission for the selected folder was denied. Choose a folder to save.",
-          );
-          setManualSaving(false);
-          return;
-        }
+        setManualSaving(false);
+        return;
+      }
+      if (!target) {
+        setManualSaving(false);
+        return;
+      }
+      setSelectedTarget(target);
+      setRememberedExportFolder(target);
+    } else if (target) {
+      const permitted = await ensureExportWritePermission(target).catch(() => false);
+      if (!permitted) {
+        setSubmitError(
+          "Write permission for the chosen destination was denied. Choose a location again or reset to Browser Downloads.",
+        );
+        setManualSaving(false);
+        return;
       }
     }
 
@@ -294,7 +318,7 @@ export function ExportModal({
     setDeliveryState({
       jobId: activeJob.id,
       status: "saving",
-      location: targetFolder?.name ?? BROWSER_DOWNLOAD_LOCATION,
+      location: target?.name ?? BROWSER_DOWNLOAD_LOCATION,
     });
 
     try {
@@ -302,8 +326,15 @@ export function ExportModal({
         client,
         activeJob,
         desiredFileName,
-        targetFolder,
+        target,
       );
+      if (target?.kind === "fs_file_handle") {
+        setSelectedTarget((prev) =>
+          prev?.kind === "fs_file_handle" && prev.handle === target.handle
+            ? null
+            : prev,
+        );
+      }
       setDeliveryState({
         jobId: activeJob.id,
         status: "saved",
@@ -326,10 +357,10 @@ export function ExportModal({
   const currentDelivery =
     activeJob && deliveryState?.jobId === activeJob.id ? deliveryState : null;
   const activeExt = exportExtensionForFormat(format);
-  const folderDisplayPath =
-    selectedFolder?.kind === "desktop_path"
-      ? selectedFolder.path
-      : selectedFolder?.name;
+  const destinationDisplayPath =
+    selectedTarget?.kind === "desktop_path"
+      ? selectedTarget.path
+      : selectedTarget?.name;
 
   return (
     <div
@@ -368,71 +399,84 @@ export function ExportModal({
 
           <div>
             <label className="mb-1.5 block text-[11px] uppercase tracking-[0.14em] text-areia/60">
-              Output Folder
+              {isDesktop ? "Output Folder" : "Save Destination"}
             </label>
             <div className="flex items-center justify-between gap-2.5 rounded-xl border border-areia/14 bg-void/75 px-3 py-2">
               <div className="flex min-w-0 flex-1 items-center gap-2">
                 <FolderOpen
                   className={`h-4 w-4 shrink-0 ${
-                    selectedFolder || !folderPickerAvailable
+                    selectedTarget || !isDesktop
                       ? "text-amarelo-ideias"
                       : "text-areia/45"
                   }`}
                 />
                 <div className="min-w-0 flex-1">
-                  {folderPickerAvailable ? (
-                    selectedFolder ? (
-                      <>
-                        <div
-                          className="truncate text-xs font-medium text-areia"
-                          title={folderDisplayPath}
-                        >
-                          {selectedFolder.name}
-                        </div>
-                        <div
-                          className="truncate text-[10px] text-areia/55"
-                          title={folderDisplayPath}
-                        >
-                          {selectedFolder.kind === "desktop_path"
-                            ? selectedFolder.path
-                            : "Video downloads here automatically after render"}
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <div className="truncate text-xs text-areia/80">
-                          Choose destination folder
-                        </div>
-                        <div className="truncate text-[10px] text-areia/50">
-                          Video saves automatically when rendering completes
-                        </div>
-                      </>
-                    )
+                  {selectedTarget ? (
+                    <>
+                      <div
+                        className="truncate text-xs font-medium text-areia"
+                        title={destinationDisplayPath}
+                      >
+                        {selectedTarget.name}
+                      </div>
+                      <div
+                        className="truncate text-[10px] text-areia/55"
+                        title={destinationDisplayPath}
+                      >
+                        {selectedTarget.kind === "desktop_path"
+                          ? selectedTarget.path
+                          : "Saves directly to chosen file after render"}
+                      </div>
+                    </>
+                  ) : isDesktop ? (
+                    <>
+                      <div className="truncate text-xs text-areia/80">
+                        Choose destination folder
+                      </div>
+                      <div className="truncate text-[10px] text-areia/50">
+                        Video saves automatically when rendering completes
+                      </div>
+                    </>
                   ) : (
                     <>
                       <div className="truncate text-xs font-medium text-areia">
                         Browser Downloads
                       </div>
                       <div className="truncate text-[10px] text-areia/55">
-                        Auto-downloads when render finishes
+                        Auto-downloads when render finishes (or choose any save location)
                       </div>
                     </>
                   )}
                 </div>
               </div>
-              {folderPickerAvailable && (
-                <button
-                  type="button"
-                  disabled={pickingFolder || isJobActive}
-                  onClick={() => void handleChooseFolder()}
-                  className="shrink-0 rounded-full border border-areia/16 bg-carbono px-3 py-1 text-[11px] font-medium text-areia transition-colors hover:border-amarelo-ideias/45 hover:bg-accent disabled:opacity-50 motion-reduce:transition-none"
-                >
-                  {pickingFolder
-                    ? "Opening..."
-                    : selectedFolder
-                      ? "Change"
-                      : "Choose"}
-                </button>
+              {destinationPickerAvailable && (
+                <div className="flex shrink-0 items-center gap-1.5">
+                  {!isDesktop && selectedTarget?.kind === "fs_file_handle" && (
+                    <button
+                      type="button"
+                      disabled={pickingDestination || isJobActive}
+                      onClick={handleClearWebDestination}
+                      className="rounded-full border border-areia/14 px-2 py-1 text-[10px] text-areia/65 transition-colors hover:border-areia/30 hover:text-areia disabled:opacity-50"
+                      title="Use default Browser Downloads"
+                    >
+                      Reset
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    disabled={pickingDestination || isJobActive}
+                    onClick={() => void handleChooseDestination()}
+                    className="rounded-full border border-areia/16 bg-carbono px-3 py-1 text-[11px] font-medium text-areia transition-colors hover:border-amarelo-ideias/45 hover:bg-accent disabled:opacity-50 motion-reduce:transition-none"
+                  >
+                    {pickingDestination
+                      ? "Opening..."
+                      : selectedTarget
+                        ? "Change"
+                        : isDesktop
+                          ? "Choose"
+                          : "Save As..."}
+                  </button>
+                </div>
               )}
             </div>
           </div>
@@ -446,7 +490,12 @@ export function ExportModal({
                 type="text"
                 disabled={isJobActive}
                 value={fileNameInput}
-                onChange={(e) => setFileNameInput(e.target.value)}
+                onChange={(e) => {
+                  setFileNameInput(e.target.value);
+                  if (selectedTarget?.kind === "fs_file_handle") {
+                    setSelectedTarget(null);
+                  }
+                }}
                 onBlur={() =>
                   setFileNameInput(sanitizeExportBaseName(fileNameInput || projectName))
                 }
@@ -468,7 +517,12 @@ export function ExportModal({
               wrapperClassName="w-full"
               disabled={isJobActive}
               value={format}
-              onChange={(e) => setFormat(e.target.value as ExportFormat)}
+              onChange={(e) => {
+                setFormat(e.target.value as ExportFormat);
+                if (selectedTarget?.kind === "fs_file_handle") {
+                  setSelectedTarget(null);
+                }
+              }}
             >
               <option value="mp4" className="bg-carbono">
                 MP4 · H.264 + AAC (Social / Delivery)
@@ -555,7 +609,7 @@ export function ExportModal({
                 <div className="flex items-center gap-1.5 pt-0.5 text-[11px] text-areia/80">
                   <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-amarelo-ideias motion-reduce:animate-none" />
                   <span className="truncate">
-                    Downloading video to {currentDelivery.location}...
+                    Saving video to {currentDelivery.location}...
                   </span>
                 </div>
               )}
@@ -632,7 +686,7 @@ export function ExportModal({
           </button>
           <button
             type="button"
-            disabled={submitting || isJobActive || pickingFolder}
+            disabled={submitting || isJobActive || pickingDestination}
             onClick={() => void handleStart()}
             className="btn-solar-outline flex items-center gap-1.5 px-5 py-2 text-xs font-medium text-areia disabled:opacity-50"
           >
@@ -640,13 +694,15 @@ export function ExportModal({
             <span>
               {submitting
                 ? "Starting..."
-                : pickingFolder
-                  ? "Choosing Folder..."
+                : pickingDestination
+                  ? "Choosing Location..."
                   : isJobActive
                     ? "Rendering..."
-                    : folderPickerAvailable && !selectedFolder
+                    : isDesktop && !selectedTarget
                       ? "Choose Folder & Render"
-                      : "Render & Save"}
+                      : selectedTarget
+                        ? "Render & Save"
+                        : "Render & Download"}
             </span>
           </button>
         </div>
