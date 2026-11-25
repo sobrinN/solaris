@@ -55,7 +55,6 @@ interface PreEditorChatProps {
     prompt: string;
     aspect: AspectPreset;
     files: File[];
-    demoMode: boolean;
     agentMode: "openrouter" | "mcp";
     templateId?: string;
     templateName?: string;
@@ -239,7 +238,6 @@ export function PreEditorChat({
         prompt: prompt.trim(),
         aspect,
         files,
-        demoMode: false,
         agentMode,
         templateId: selectedTemplateId ?? undefined,
         templateName: tpl?.name,
@@ -248,27 +246,6 @@ export function PreEditorChat({
     } catch (err) {
       setErrorMsg(
         err instanceof Error ? err.message : "Failed to connect to Solaris Engine",
-      );
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleDemoLaunch = async () => {
-    if (submitting) return;
-    setSubmitting(true);
-    setErrorMsg(null);
-    try {
-      await onLaunchStudio({
-        prompt: "Three AI Tools Reel (Demo)",
-        aspect,
-        files,
-        demoMode: true,
-        agentMode,
-      });
-    } catch (err) {
-      setErrorMsg(
-        err instanceof Error ? err.message : "Failed to open Demo Studio",
       );
     } finally {
       setSubmitting(false);
@@ -385,19 +362,6 @@ export function PreEditorChat({
           >
             <Palette className="h-3.5 w-3.5 text-laranja-criacao" />
             <span className="hidden md:inline">Brand Playbook</span>
-          </button>
-
-          <div aria-hidden="true" className="mx-0.5 hidden h-4 w-px bg-areia/12 sm:block" />
-
-          <button
-            type="button"
-            onClick={() => void handleDemoLaunch()}
-            disabled={submitting}
-            title="Open a playable 7-track demo project in the Solaris timeline editor (NLE)"
-            className="btn-solar-outline flex h-8 items-center gap-1.5 whitespace-nowrap px-3.5 text-xs font-medium text-areia disabled:opacity-50"
-          >
-            <Sparkles className="h-3.5 w-3.5 text-amarelo-ideias" />
-            <span>Open Demo Studio</span>
           </button>
         </div>
       </header>

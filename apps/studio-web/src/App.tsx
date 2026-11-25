@@ -552,7 +552,6 @@ export function App() {
     prompt,
     aspect,
     files,
-    demoMode,
     agentMode,
     templateId,
     templateName,
@@ -561,7 +560,6 @@ export function App() {
     prompt: string;
     aspect: AspectPreset;
     files: File[];
-    demoMode: boolean;
     agentMode?: "openrouter" | "mcp";
     templateId?: string;
     templateName?: string;
@@ -587,9 +585,7 @@ export function App() {
       }
     }
     const existingDraft = draftProjectRef.current;
-    if (demoMode) {
-      project = await client.openDemoProject(selectedBrandId);
-    } else if (
+    if (
       !templateId &&
       existingDraft &&
       existingDraft.canvas.aspect_preset === aspect &&
@@ -639,7 +635,7 @@ export function App() {
 
     // Auto-start Swarm whenever the user provided a directing prompt (including zero-asset programmatic videos!)
     const shouldAutoRunSwarm =
-      !demoMode && agentMode === "openrouter" && Boolean(userPrompt);
+      agentMode === "openrouter" && Boolean(userPrompt);
 
     if (shouldAutoRunSwarm) {
       const targetPid = project.id;

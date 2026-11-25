@@ -185,7 +185,7 @@ async fn collect_document_excerpts(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn build_openrouter_director_plan(
-    backend: &dyn SolarisBackend,
+    backend: &Arc<dyn SolarisBackend>,
     openrouter: &OpenRouterClient,
     model: &str,
     fallbacks: &[String],
@@ -244,7 +244,7 @@ pub(crate) async fn build_openrouter_director_plan(
         })
         .collect();
 
-    let attached_documents = collect_document_excerpts(backend, project, cancel).await?;
+    let attached_documents = collect_document_excerpts(backend.as_ref(), project, cancel).await?;
 
     let asset_names: Vec<String> = assets
         .iter()
@@ -420,7 +420,7 @@ pub(crate) async fn build_openrouter_director_plan(
         let use_json_format = attempt == 1 && supports_json_mode;
 
         emit_swarm_log(
-            backend,
+            backend.as_ref(),
             LogLevel::Info,
             "openrouter",
             &project.id,
@@ -452,11 +452,52 @@ pub(crate) async fn build_openrouter_director_plan(
             ..ChatRequest::default()
         };
 
-        let resp = match openrouter.chat_stream(&req, Some(cancel), |_| {}).await {
+        let dir_pulse_ms = Arc::new(AtomicU64::new(0));
+        let dir_pulse_step = Arc::new(AtomicU32::new(0));
+        let dir_backend = backend.clone();
+        let dir_pid = project.id.clone();
+        let dir_anchors = if programmatic_visuals {
+            ["timeline.track.g1", "timeline.track.t1", "effects.library"]
+        } else {
+            ["media.pool", "timeline.track.v1", "color.inspector"]
+        };
+        let dir_label = if programmatic_visuals {
+            "storyboarding scenes"
+        } else {
+            "planning edit cuts"
+        };
+        let resp = match openrouter
+            .chat_stream(&req, Some(cancel), |_| {
+                let now = now_epoch_ms();
+                let prev = dir_pulse_ms.load(Ordering::Relaxed);
+                if now.saturating_sub(prev) >= 520
+                    && dir_pulse_ms
+                        .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
+                {
+                    let step = dir_pulse_step.fetch_add(1, Ordering::Relaxed) as usize;
+                    let anchor = dir_anchors[step % dir_anchors.len()];
+                    let b = dir_backend.clone();
+                    let pid = dir_pid.clone();
+                    tokio::spawn(async move {
+                        let _ = b
+                            .emit_cursor_pulse(
+                                &pid,
+                                "director-01",
+                                AgentRole::Director,
+                                anchor,
+                                dir_label,
+                            )
+                            .await;
+                    });
+                }
+            })
+            .await
+        {
             Ok(r) => r,
             Err(err) => {
                 emit_swarm_log(
-                    backend,
+                    backend.as_ref(),
                     LogLevel::Error,
                     "openrouter",
                     &project.id,
@@ -483,7 +524,7 @@ pub(crate) async fn build_openrouter_director_plan(
         match parse_director_plan(cleaned, inferred_duration_sec) {
             Ok(plan) => {
                 emit_swarm_log(
-                    backend,
+                    backend.as_ref(),
                     LogLevel::Info,
                     "openrouter",
                     &project.id,
@@ -509,7 +550,7 @@ pub(crate) async fn build_openrouter_director_plan(
                 );
                 if attempt == 1 {
                     emit_swarm_log(
-                        backend,
+                        backend.as_ref(),
                         LogLevel::Warn,
                         "openrouter",
                         &project.id,
@@ -561,7 +602,7 @@ pub(crate) async fn build_openrouter_director_plan(
                 }
 
                 emit_swarm_log(
-                    backend,
+                    backend.as_ref(),
                     LogLevel::Error,
                     "openrouter",
                     &project.id,
@@ -925,7 +966,7 @@ pub(crate) async fn run_llm_worker_loop(
             .chat_stream(&req, Some(cancel), |_| {
                 let now = now_epoch_ms();
                 let prev = last_pulse_ms.load(Ordering::Relaxed);
-                if now.saturating_sub(prev) >= 850
+                if now.saturating_sub(prev) >= 450
                     && last_pulse_ms
                         .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
                         .is_ok()
@@ -1384,7 +1425,7 @@ pub(crate) async fn run_programmatic_scene_worker(
             .chat_stream(&req, Some(cancel), |_| {
                 let now = now_epoch_ms();
                 let prev = last_pulse_ms.load(Ordering::Relaxed);
-                if now.saturating_sub(prev) >= 800
+                if now.saturating_sub(prev) >= 450
                     && last_pulse_ms
                         .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
                         .is_ok()

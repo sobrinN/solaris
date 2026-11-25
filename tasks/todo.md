@@ -315,3 +315,15 @@
 - [x] **Fix Studio QA Panel Readability & Export Modal Stage Label (`apps/studio-web/src/components/studio/SwarmActivityPanel.tsx`, `ExportModal.tsx`)**:
   - Replaced `line-clamp-2` and `truncate` in the QA panel with wrapping `break-words leading-snug` inside a taller scrollable container (`max-h-48`) so every QA issue/warning is readable in full; stabilized `ExportModal` progress row truncation for live frame counts.
 - [x] **Tests & Full Verification**: Added keep-alive/chunked CDP HTTP unit test, real persistent CDP Chromium smoke test, programmatic settled-scene QA timestamp test, and ran full Rust + TypeScript verification suite.
+
+---
+
+## Track 14 — Demo Removal & High-Velocity Swarm Cursor Fixes
+
+- [x] **Delete Demo Studio Stack (`apps/studio-web`, `packages/engine-client`, `crates/server`, `crates/media-engine`)**:
+  - Removed the `Open Demo Studio` CTA, `handleDemoLaunch`, and `demoMode` plumbing from `PreEditorChat.tsx`, `App.tsx`, `StudioWorkspace.tsx`, and `SwarmCursorLayer.tsx`.
+  - Removed `openDemoProject()` from `@solaris/engine-client`, deleted `crates/server/src/routes/demo.rs` + `/api/v1/projects/demo` + `demo_pack_lock`, deleted `crates/media-engine/src/demo_media.rs`, and cleared cached `.solaris-data/demo_media/` and `solaris-demo-reel.json`.
+- [x] **Fix & Speed Up Swarm Cursors (`SwarmCursorLayer.tsx`, `StudioWorkspace.tsx`, `globals.css`, `crates/agent-runtime/src/swarm/llm.rs`)**:
+  - Fixed initial event drop when cursors auto-enable on Swarm start (stop advancing `lastProcessedEventRef` while disabled, and initialize `swarmCursorsEnabled` immediately if Swarm is already active).
+  - Filtered the internal shared `"gfx-swarm"` track-lock alias out of `op_committed` cursor updates so parallel scene agents (`gfx-01..07`) no longer spawn a duplicate ghost cursor.
+  - Resolved `timeline.track.<id>` anchors strictly onto `[data-timeline-lane]` (avoiding sticky track headers), added subtle live work micro-motion on streaming pulses while snapping cleanly on commits, added streaming `cursor_pulse` emissions during Director planning (`520ms`), tightened worker pulse throttles (`450ms`), reduced choreography tick interval (`450ms`), and tightened `.swarm-cursor` CSS transition to `160ms`.

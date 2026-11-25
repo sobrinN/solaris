@@ -880,7 +880,7 @@ where
 
     let plan = if use_openrouter {
         match build_openrouter_director_plan(
-            backend.as_ref(),
+            &backend,
             &openrouter,
             &director_model,
             &director_fallbacks,

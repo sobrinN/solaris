@@ -72,6 +72,7 @@ function resolveAnchorCoordinates(
   anchor: string,
   xBias = 0.5,
   totalDurationSec = 24,
+  microJitter = false,
 ): { x: number; y: number } | null {
   const [baseAnchor, secStr] = anchor.split("@");
   const parsedSec = secStr !== undefined ? Number.parseFloat(secStr) : Number.NaN;
@@ -94,26 +95,32 @@ function resolveAnchorCoordinates(
         const maxX = Math.max(minX, Math.min(rect.right - 140, vw - 200));
         const minY = Math.max(56, rect.top + 4);
         const maxY = Math.max(minY, Math.min(rect.bottom - 24, vh - 40));
+        const dx = microJitter ? (Math.random() - 0.5) * 28 : 0;
+        const dy = microJitter ? (Math.random() - 0.5) * 10 : 0;
         return {
-          x: Math.max(minX, Math.min(maxX, rect.left + rect.width * ratio)),
-          y: Math.max(minY, Math.min(maxY, rect.top + rect.height * 0.45)),
+          x: Math.max(minX, Math.min(maxX, rect.left + rect.width * ratio + dx)),
+          y: Math.max(minY, Math.min(maxY, rect.top + rect.height * 0.45 + dy)),
         };
       }
     }
   }
 
   const prefix = baseAnchor.split(".").slice(0, 2).join(".");
-  const el =
+  const rawEl =
     document.querySelector<HTMLElement>(`[data-cursor-anchor="${escapeAttr(baseAnchor)}"]`) ??
     document.querySelector<HTMLElement>(`[data-cursor-anchor="${escapeAttr(prefix)}"]`) ??
     document.querySelector<HTMLElement>(`[data-cursor-anchor="timeline"]`);
-  if (!el) return null;
+  if (!rawEl) return null;
+  // Target the timeline lane directly when anchoring to a track row so cursors never cover mute/solo/lock headers
+  const el = baseAnchor.startsWith("timeline.track.")
+    ? (rawEl.querySelector<HTMLElement>("[data-timeline-lane]") ?? rawEl)
+    : rawEl;
   const rect = el.getBoundingClientRect();
   if (rect.width === 0 || rect.height === 0) return null;
 
   const spreadX = rect.width * (0.1 + xBias * 0.6);
-  const jitterX = (Math.random() - 0.5) * Math.min(rect.width * 0.16, 56);
-  const jitterY = (Math.random() - 0.5) * Math.min(rect.height * 0.35, 22);
+  const jitterX = microJitter ? (Math.random() - 0.5) * Math.min(rect.width * 0.16, 56) : 0;
+  const jitterY = microJitter ? (Math.random() - 0.5) * Math.min(rect.height * 0.35, 22) : 0;
   const minX = Math.max(12, rect.left + 8);
   const maxX = Math.max(minX, Math.min(rect.right - 150, vw - 210));
   const minY = Math.max(56, rect.top + 8);
@@ -126,7 +133,6 @@ function resolveAnchorCoordinates(
 
 interface SwarmCursorLayerProps {
   enabled: boolean;
-  demoMode?: boolean;
   swarmActive?: boolean;
   activeRoles?: AgentRole[];
   events?: EngineEventEnvelope[];
@@ -137,7 +143,6 @@ const CURSOR_IDLE_TTL_MS = 5200;
 
 export function SwarmCursorLayer({
   enabled,
-  demoMode = false,
   swarmActive = false,
   activeRoles = [],
   events = [],
@@ -146,9 +151,7 @@ export function SwarmCursorLayer({
   const [cursors, setCursors] = useState<Record<string, ActiveCursorState>>({});
   const cursorsRef = useRef<Record<string, ActiveCursorState>>(cursors);
   cursorsRef.current = cursors;
-  const lastProcessedEventRef = useRef<EngineEventEnvelope | null>(
-    events.length > 0 ? events[events.length - 1] : null,
-  );
+  const lastProcessedEventRef = useRef<EngineEventEnvelope | null>(null);
 
   // Drain EVERY newly arrived op_committed & cursor_pulse event in the batch so all
   // parallel micro-agents update simultaneously instead of dropping sibling events.
@@ -158,7 +161,6 @@ export function SwarmCursorLayer({
       return;
     }
     if (!enabled) {
-      lastProcessedEventRef.current = events[events.length - 1] ?? null;
       return;
     }
 
@@ -179,21 +181,30 @@ export function SwarmCursorLayer({
     lastProcessedEventRef.current = events[events.length - 1] ?? null;
     if (newEvents.length === 0) return;
 
+    const now = Date.now();
     const batchUpdates: Array<{
       agentId: string;
       role: AgentRole;
       anchor: string;
       label: string;
+      isCommit: boolean;
     }> = [];
 
     for (let i = 0; i < newEvents.length; i++) {
-      const p = newEvents[i].payload;
+      const ev = newEvents[i];
+      const ts = Date.parse(ev.timestamp);
+      if (Number.isFinite(ts) && now - ts > CURSOR_IDLE_TTL_MS) continue;
+      const p = ev.payload;
       if (p.event === "op_committed" && p.role !== "user") {
+        // Parallel scene micro-agents (gfx-01..07) commit through the shared "gfx-swarm" lock ID
+        // and emit their own per-agent cursor_pulse with exact @sec coordinates; skip the lock alias.
+        if (p.agent_id === "gfx-swarm") continue;
         batchUpdates.push({
           agentId: p.agent_id,
           role: p.role,
           anchor: p.ui_anchor,
           label: p.summary.slice(0, 26),
+          isCommit: true,
         });
       } else if (p.event === "cursor_pulse" && p.role !== "user") {
         batchUpdates.push({
@@ -201,18 +212,27 @@ export function SwarmCursorLayer({
           role: p.role,
           anchor: p.ui_anchor,
           label: p.label.slice(0, 26),
+          isCommit: p.label.startsWith("placed "),
         });
       }
     }
 
     if (batchUpdates.length === 0) return;
 
-    const now = Date.now();
+    const reducedMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const resolvedUpdates: ActiveCursorState[] = [];
     for (const upd of batchUpdates) {
       const actorBias =
         CHOREOGRAPHY_ACTORS.find((a) => a.role === upd.role)?.xBias ?? 0.5;
-      const coords = resolveAnchorCoordinates(upd.anchor, actorBias, totalDurationSec);
+      // Add subtle live work micro-motion on streaming pulses while snapping accurately on commits
+      const coords = resolveAnchorCoordinates(
+        upd.anchor,
+        actorBias,
+        totalDurationSec,
+        !upd.isCommit && !reducedMotion,
+      );
       if (!coords) continue;
       resolvedUpdates.push({
         agentId: upd.agentId,
@@ -240,50 +260,41 @@ export function SwarmCursorLayer({
 
   const activeRolesKey = activeRoles.join(",");
 
-  // High-responsiveness scanning micro-motions during demo mode OR real Swarm LLM streaming gaps
+  // High-responsiveness scanning micro-motions during real Swarm LLM streaming gaps
   useEffect(() => {
-    if (!enabled || (!demoMode && !swarmActive)) return;
+    if (!enabled || !swarmActive) return;
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     if (reduced) return;
 
     const roleList = activeRolesKey ? (activeRolesKey.split(",") as AgentRole[]) : [];
-    let demoOffset = 0;
 
     const tick = () => {
       const now = Date.now();
-      const targetActors =
-        swarmActive && roleList.length > 0
+      const matchedActors =
+        roleList.length > 0
           ? CHOREOGRAPHY_ACTORS.filter((a) => roleList.includes(a.role))
-          : swarmActive
-            ? [
-                {
-                  agentId: "director-01",
-                  role: "director" as AgentRole,
-                  anchors: ["media.pool", "timeline"],
-                  xBias: 0.45,
-                  label: "orchestrating",
-                },
-              ]
-            : [
-                CHOREOGRAPHY_ACTORS[demoOffset % CHOREOGRAPHY_ACTORS.length],
-                CHOREOGRAPHY_ACTORS[(demoOffset + 2) % CHOREOGRAPHY_ACTORS.length],
-                CHOREOGRAPHY_ACTORS[(demoOffset + 4) % CHOREOGRAPHY_ACTORS.length],
-              ];
-      demoOffset = (demoOffset + 1) % CHOREOGRAPHY_ACTORS.length;
+          : [];
+      const targetActors =
+        matchedActors.length > 0
+          ? matchedActors
+          : [
+              {
+                agentId: "director-01",
+                role: "director" as AgentRole,
+                anchors: ["media.pool", "timeline", "effects.library"],
+                xBias: 0.45,
+                label: "orchestrating",
+              },
+            ];
 
       // Resolve DOM coordinates outside setCursors so state updaters remain pure in React StrictMode
       const snapshot = cursorsRef.current;
       const driftPatches: Record<string, { x: number; y: number }> = {};
-      if (swarmActive) {
-        for (const [id, cur] of Object.entries(snapshot)) {
-          if (now - cur.lastUpdated >= 1100 && now - cur.lastRealEventAt < CURSOR_IDLE_TTL_MS) {
-            const coords = resolveAnchorCoordinates(cur.anchor, 0.5, totalDurationSec);
-            if (coords) {
-              driftPatches[id] = {
-                x: coords.x + (Math.random() - 0.5) * 18,
-                y: coords.y + (Math.random() - 0.5) * 8,
-              };
-            }
+      for (const [id, cur] of Object.entries(snapshot)) {
+        if (now - cur.lastUpdated >= 520 && now - cur.lastRealEventAt < CURSOR_IDLE_TTL_MS) {
+          const coords = resolveAnchorCoordinates(cur.anchor, 0.5, totalDurationSec, true);
+          if (coords) {
+            driftPatches[id] = coords;
           }
         }
       }
@@ -299,7 +310,7 @@ export function SwarmCursorLayer({
       }> = [];
       for (const actor of targetActors) {
         const anchor = actor.anchors[Math.floor(Math.random() * actor.anchors.length)];
-        const coords = resolveAnchorCoordinates(anchor, actor.xBias, totalDurationSec);
+        const coords = resolveAnchorCoordinates(anchor, actor.xBias, totalDurationSec, true);
         if (!coords) continue;
         resolvedActors.push({
           agentId: actor.agentId,
@@ -313,36 +324,33 @@ export function SwarmCursorLayer({
       }
 
       setCursors((prev) => {
-        const next: Record<string, ActiveCursorState> = swarmActive ? { ...prev } : {};
+        const next: Record<string, ActiveCursorState> = { ...prev };
         // Gently drift live parallel micro-agents (e.g. gfx-02..07) without extending lastRealEventAt
-        if (swarmActive) {
-          for (const [id, coords] of Object.entries(driftPatches)) {
-            const cur = prev[id];
-            if (
-              cur &&
-              now - cur.lastUpdated >= 1100 &&
-              now - cur.lastRealEventAt < CURSOR_IDLE_TTL_MS
-            ) {
-              next[id] = {
-                ...cur,
-                x: coords.x,
-                y: coords.y,
-                lastUpdated: now,
-              };
-            }
+        for (const [id, coords] of Object.entries(driftPatches)) {
+          const cur = prev[id];
+          if (
+            cur &&
+            now - cur.lastUpdated >= 520 &&
+            now - cur.lastRealEventAt < CURSOR_IDLE_TTL_MS
+          ) {
+            next[id] = {
+              ...cur,
+              x: coords.x,
+              y: coords.y,
+              lastUpdated: now,
+            };
           }
         }
         for (const actor of resolvedActors) {
           // If parallel scene micro-agents (gfx-02+) are already live, don't duplicate a synthetic gfx-01
           if (
-            swarmActive &&
             actor.role === "gfx" &&
             Object.keys(next).some((k) => k.startsWith("gfx-") && k !== actor.agentId)
           ) {
             continue;
           }
           const existing = next[actor.agentId];
-          if (swarmActive && existing && now - existing.lastUpdated < 1100) continue;
+          if (existing && now - existing.lastUpdated < 520) continue;
           next[actor.agentId] = {
             agentId: actor.agentId,
             role: actor.role,
@@ -359,13 +367,13 @@ export function SwarmCursorLayer({
       });
     };
 
-    const initial = setTimeout(tick, 180);
-    const interval = setInterval(tick, swarmActive ? 780 : 1850);
+    const initial = setTimeout(tick, 80);
+    const interval = setInterval(tick, 450);
     return () => {
       clearTimeout(initial);
       clearInterval(interval);
     };
-  }, [enabled, demoMode, swarmActive, activeRolesKey, totalDurationSec]);
+  }, [enabled, swarmActive, activeRolesKey, totalDurationSec]);
 
   // Expire idle cursors cleanly after inactivity (tracked via lastRealEventAt)
   useEffect(() => {

@@ -212,14 +212,6 @@ export class SolarisEngineClient {
     });
   }
 
-  openDemoProject(brandPlaybookId?: string): Promise<Project> {
-    return this.request<Project>("/api/v1/projects/demo", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ brand_playbook_id: brandPlaybookId }),
-    });
-  }
-
   acquireTrackLock(
     projectId: string,
     trackId: string,

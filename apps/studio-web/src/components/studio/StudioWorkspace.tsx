@@ -129,16 +129,17 @@ export function StudioWorkspace({
   onOpenBrandDrawer,
   onOpenAiSettings,
 }: StudioWorkspaceProps) {
-  const isDemoProject = useMemo(
-    () =>
-      project.id === "solaris-demo-reel" ||
-      project.tracks.some((t) => t.clips.some((c) => c.id.startsWith("demo-"))),
-    [project.id, project.tracks],
-  );
-
-  const [playheadSec, setPlayheadSec] = useState(() => (isDemoProject ? 1.2 : 0));
+  const [playheadSec, setPlayheadSec] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [swarmCursorsEnabled, setSwarmCursorsEnabled] = useState(false);
+  const [swarmCursorsEnabled, setSwarmCursorsEnabled] = useState(
+    () =>
+      activeSwarmRun !== null &&
+      (activeSwarmRun.state === "queued" ||
+        activeSwarmRun.state === "planning" ||
+        activeSwarmRun.state === "executing_spine" ||
+        activeSwarmRun.state === "executing_specialists" ||
+        activeSwarmRun.state === "running_qa"),
+  );
   const wasSwarmActiveRef = useRef(false);
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(
     project.media_pool[0]?.id ?? null,
@@ -1234,7 +1235,6 @@ export function StudioWorkspace({
     <div className="relative flex min-h-dvh flex-col overflow-y-auto bg-void text-areia lg:h-dvh lg:overflow-hidden">
       <SwarmCursorLayer
         enabled={swarmCursorsEnabled}
-        demoMode={isDemoProject}
         swarmActive={isSwarmActive}
         activeRoles={activeSwarmRun?.active_roles ?? EMPTY_ROLES}
         events={events}

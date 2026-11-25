@@ -1,5 +1,4 @@
 pub mod analyze;
-pub mod demo_media;
 pub mod error;
 pub mod export;
 pub mod ffmpeg;
@@ -18,7 +17,6 @@ pub use analyze::{
     measure_loudness, parse_ebur128_integrated_lufs, parse_scdet_stderr,
     parse_silencedetect_stderr, probe_and_analyze_fast,
 };
-pub use demo_media::{DemoMediaFile, DemoMediaPack, ensure_demo_media_pack};
 pub use error::MediaError;
 pub use export::{
     ExportFfmpegPlan, ExportPlanOptions, append_color_grade_filters,

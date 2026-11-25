@@ -1,7 +1,6 @@
 pub mod agent;
 pub mod assets;
 pub mod brands;
-pub mod demo;
 pub mod exports;
 pub mod media;
 pub mod projects;
@@ -38,7 +37,6 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/projects",
             get(projects::list_projects).post(projects::create_project),
         )
-        .route("/api/v1/projects/demo", post(demo::open_demo_project))
         .route("/api/v1/templates", get(projects::list_templates))
         .route(
             "/api/v1/projects/{id}",
@@ -2279,113 +2277,6 @@ mod tests {
         )
         .unwrap();
         assert!(remaining.is_empty());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn demo_project_populates_all_seven_tracks_streams_media_and_avoids_duplicates() {
-        let (app, dir) = test_app("demo_project", None);
-
-        let res1 = app
-            .clone()
-            .oneshot(
-                HttpRequest::builder()
-                    .method("POST")
-                    .uri("/api/v1/projects/demo")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"brand_playbook_id":"solaris-default"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(res1.status(), StatusCode::CREATED);
-        let proj1: Project = serde_json::from_slice(
-            &axum::body::to_bytes(res1.into_body(), usize::MAX)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(proj1.id, "solaris-demo-reel");
-        assert_eq!(proj1.media_pool.len(), 5);
-        assert!(proj1.media_pool.iter().all(|m| !m.path.is_empty()));
-        for track in &proj1.tracks {
-            assert!(
-                !track.clips.is_empty(),
-                "expected demo track '{}' to have clips",
-                track.id
-            );
-        }
-
-        // Verify real playable media streams for both visual A-Roll and stereo WAV music
-        let stream_v = app
-            .clone()
-            .oneshot(
-                HttpRequest::builder()
-                    .uri("/api/v1/projects/solaris-demo-reel/media/demo-m1/stream")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(stream_v.status(), StatusCode::OK);
-        let v_bytes = axum::body::to_bytes(stream_v.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert!(v_bytes.len() > 1024);
-
-        let stream_a = app
-            .clone()
-            .oneshot(
-                HttpRequest::builder()
-                    .uri("/api/v1/projects/solaris-demo-reel/media/demo-music/stream")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(stream_a.status(), StatusCode::OK);
-        let a_bytes = axum::body::to_bytes(stream_a.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert_eq!(&a_bytes[..4], b"RIFF");
-
-        // Second call refreshes canonical demo project without creating duplicates
-        let res2 = app
-            .clone()
-            .oneshot(
-                HttpRequest::builder()
-                    .method("POST")
-                    .uri("/api/v1/projects/demo")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from("{}"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(res2.status(), StatusCode::CREATED);
-
-        let list_res = app
-            .oneshot(
-                HttpRequest::builder()
-                    .uri("/api/v1/projects")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(list_res.status(), StatusCode::OK);
-        let summaries: Vec<serde_json::Value> = serde_json::from_slice(
-            &axum::body::to_bytes(list_res.into_body(), usize::MAX)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        let demo_count = summaries
-            .iter()
-            .filter(|s| s.get("id").and_then(|v| v.as_str()) == Some("solaris-demo-reel"))
-            .count();
-        assert_eq!(demo_count, 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

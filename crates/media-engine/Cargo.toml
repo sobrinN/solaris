@@ -7,7 +7,6 @@ license.workspace = true
 [dependencies]
 base64.workspace = true
 chrono.workspace = true
-flate2.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
 ring.workspace = true
