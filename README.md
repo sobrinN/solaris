@@ -8,7 +8,8 @@ Prompt a video in chat, attach raw footage and references, apply your brand play
 ## Core Capabilities
 
 - **Chat-First Intake**: Start in an obsidian **MediaComposer** chat—attach A-roll, B-roll, voiceovers, music, and scripts, choose a Brand Playbook, and transition straight into the live NLE studio.
-- **6-Panel Live NLE**: Media Pool & Effects/GFX library, Source Monitor with smart `9:16` reframe, Program Monitor, Broadcast Scopes (Luma Waveform, Vectorscope, `-14 LUFS` loudness), 3-Way Color & Captions Inspector, and a 7-track semantic timeline (`T1 TEXT`, `G1 GFX`, `V2 B-ROLL`, `V1 A-ROLL`, `FX GRADE`, `A1 VOICE`, `A2 MUSIC`).
+- **6-Panel Live NLE & Multi-Selection**: Media Pool & manageable Effects/GFX library (search, category filters, right-click rename/duplicate/delete/export, starter restore, and drag-to-G1), Source Monitor with smart `9:16` reframe, Program Monitor, Broadcast Scopes (Luma Waveform, Vectorscope, `-14 LUFS` loudness), 3-Way Color & Batch Clip Inspector, and a 7-track semantic timeline (`T1 TEXT`, `G1 GFX`, `V2 B-ROLL`, `V1 A-ROLL`, `FX GRADE`, `A1 VOICE`, `A2 MUSIC`) with Ctrl/Cmd-click, Shift-range, marquee selection, group drag, and single-undo batch edits.
+- **In-Studio Director Refinement & Narration-Only Captions**: Refine existing cuts in place using selected clips, playhead context, quick refinement chips, and per-project history without regenerating the whole timeline. Captions are generated strictly from real narrated speech transcripts (`>= 3` spoken words after stripping sound tags) and stay in sync.
 - **OpenRouter BYOK + Model Advisor**: Bring your own OpenRouter API key. Solaris inspects live model modalities (`video`, `audio`, `image`, `text`, `tools`) and recommends true omni-modal models for best results, with automatic keyframe + transcript fallbacks for vision/text models.
 - **Unified MCP + Skills**: Connect Codex, Antigravity, or Claude Code directly to the live NLE via MCP (`stdio` + Streamable HTTP) backed by a canonical `skills/` pack (`director-core`, `talking-head-shorts`, `faceless-explainer`, `color-and-look`, `captions-and-gfx`, `audio-and-mix`).
 - **Brand Playbooks & Reusable Code Assets**: Store `BRAND.md` directing rules, CSS design tokens, custom fonts, and `.cube` LUTs. Save any LLM-authored HTML/GSAP motion graphic with a typed JSON Schema so future videos reuse it in milliseconds.
@@ -49,7 +50,7 @@ solaris/
 ├── crates/
 │   ├── core-ir/               # Timeline IR, undo/redo, track locks, brands, assets
 │   ├── media-engine/          # AssetStorage trait, FFmpeg/FFprobe probing, LUTs, STT & export
-│   ├── agent-runtime/         # OpenRouter SSE client, ModelAdvisor, 34-tool runtime & Swarm
+│   ├── agent-runtime/         # OpenRouter SSE client, ModelAdvisor, 36-tool runtime & Swarm
 │   ├── mcp-server/            # Built-in MCP server (stdio + Streamable HTTP /mcp) & solaris-mcp CLI
 │   └── server/
 │       └── src/routes/        # Modular axum HTTP/WS/MCP routes (shared by Desktop & Web)

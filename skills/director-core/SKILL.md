@@ -20,7 +20,7 @@ Read only the files needed for the current task (progressive disclosure):
 
 | Need | Read |
 | --- | --- |
-| Full 34-tool parameter guide, `role_hint` taxonomy, `Transform2D` math, MCP resources | [references/tool-reference.md](references/tool-reference.md) |
+| Full 36-tool parameter guide, `role_hint` taxonomy, `Transform2D` math, MCP resources | [references/tool-reference.md](references/tool-reference.md) |
 | Numbers-only cut spec, storyline hooks, BANNED amateur defaults | [references/direction-and-pacing.md](references/direction-and-pacing.md) |
 | Closed multi-round QA rubric (1–10), exact check thresholds, fix line format | [references/critique-and-qa.md](references/critique-and-qa.md) |
 | Error recovery (locked tracks, missing transcripts, Chromium/FFmpeg, capture errors) | [references/failure-recovery.md](references/failure-recovery.md) |
@@ -30,19 +30,20 @@ Read only the files needed for the current task (progressive disclosure):
 | Captions, social safe zones, starter GFX catalog, custom HTML/GSAP graphics | `skill://captions-and-gfx` |
 | `-14 LUFS` voice normalization, `-18 dB` music ducking, J/L cuts, fades | `skill://audio-and-mix` |
 
-## Mode Check: New Edit vs Revision
+## Mode Check: New Edit vs Refinement
 
 Inspect existing state before creating or overwriting anything:
 1. Call `project.list` (or read `solaris://projects`) when no `project_id` was provided.
 2. Call `project.get` on the active project. **Preserve existing user edits**: never delete or overwrite manual clips, locked tracks, or custom grades unless the user explicitly asks to rebuild or replace them.
-3. For a **new project**, choose the right starter template in `project.create` (`template_id: "talking-head-short"` for 9:16 creator cuts, `"faceless-explainer"` for 16:9 narration/demos, or omit for a clean 7-track project) and pick a playbook via `brand.list_playbooks`.
+3. **Refinement Mode (`mode: "refine"` or `"auto"` on a non-empty timeline)**: Make targeted edits by existing `clip_id` (`gfx.update_clip`, `captions.update_clip`, `timeline.trim_clip`, `timeline.delete_clip`, `timeline.set_transform`, `color.set_grade`, `audio.set_mix`), honor `selected_clip_ids` and `playhead_sec`, never duplicate full-canvas `G1` scenes that already exist, respect locked tracks, and keep captions gated on real narrated transcripts (`>= 3` real words after stripping sound tags). `mode: "generate"` runs a full generation pass and appends new clips.
+4. For a **new project**, choose the right starter template in `project.create` (`template_id: "talking-head-short"` for 9:16 creator cuts, `"faceless-explainer"` for 16:9 narration/demos, or omit for a clean 7-track project) and pick a playbook via `brand.list_playbooks`.
 
 ## The 6-Stage Directing Pipeline
 
 ### Stage 1: Intake & Media Intelligence (Read-Only First)
 
 1. Call `project.get` and `brand.get_playbook` to capture canvas aspect (`vertical9x16`, `landscape16x9`, `square1x1`), `brand_md`, CSS `tokens`, `pacing_rules`, `default_lut`, and `reference_media` notes.
-2. **Zero-Asset Programmatic Mode**: If `media_pool` has zero Video/Image assets (no footage uploaded), do **NOT** fail or stall asking for files. Build the **entire video programmatically** across the requested duration using bespoke, continuous full-canvas (`position:fixed;inset:0;width:100vw;height:100vh`) responsive HTML/CSS/SVG/GSAP scenes on `G1` (`gfx.place`, zero black gaps, 3.5–5.5s per scene, saving reusable templates with `assets.save`) paired with synchronized kinetic captions on `T1` via `captions.place_script` (`y: 0.24`).
+2. **Zero-Asset Programmatic Mode**: If `media_pool` has zero Video/Image assets (no footage uploaded), do **NOT** fail or stall asking for files. Build the **entire video programmatically** across the requested duration using bespoke, continuous full-canvas (`position:fixed;inset:0;width:100vw;height:100vh`) responsive HTML/CSS/SVG/GSAP scenes on `G1` (`gfx.place`, zero black gaps, 3.5–5.5s per scene, saving reusable templates with `assets.save`) with NO captions on `T1` unless real narration audio exists and is transcribed (then use `captions.generate_from_transcript`).
 3. If local files were given by path, call `media.import` with accurate `role_hint` values (`a_roll`, `voice`, `b_roll`, `music`, `reference`) so auto-routing and transcription behave predictably.
 4. Call `media.get_manifest` for the project. Inspect `duration_sec`, `has_audio`, `is_log_footage`, `silences`, `beats`, `scene_cuts`, `integrated_lufs`, and `transcript`.
 5. **Auto-transcribe before planning**: for any primary `a_roll` or `voice` asset with `has_audio: true` and an empty `transcript`, call `media.transcribe` immediately.

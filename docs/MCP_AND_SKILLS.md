@@ -6,7 +6,7 @@ Solaris treats **MCP** and **Skills** as two complementary halves of agentic vid
 
 ---
 
-## 1. Canonical MCP Tool Surface (34 Tools)
+## 1. Canonical MCP Tool Surface (36 Tools)
 
 Transport: `stdio` (CLI coding agents) + `Streamable HTTP` (`/mcp`) with bearer token auth, `Origin`/`Host` validation, `Content-Type: application/json`, and tracked `Mcp-Session-Id` lifecycle (`POST` / `DELETE`).
 
@@ -16,13 +16,22 @@ Transport: `stdio` (CLI coding agents) + `Streamable HTTP` (`/mcp`) with bearer 
 | `media.*` | `media.import`, `media.get_manifest` (silences, beats, scene cuts, peaks, LUFS, transcript), `media.extract_keyframes`, `media.transcribe` |
 | `timeline.*` | `timeline.place_clip`, `timeline.split_clip`, `timeline.trim_clip`, `timeline.delete_clip`, `timeline.set_transform` |
 | `color.*` | `color.set_grade` (Lift/Gamma/Gain, temp, tint, contrast, sat, exp, LUT), `color.get_scope_stats` (grade/LUT/log metadata; pair with `preview.capture_frame` for visual verification) |
-| `captions.*` | `captions.generate_from_transcript`, `captions.place_script`, `captions.set_style` |
-| `gfx.*` & `assets.*` | `assets.search`, `assets.save`, `gfx.place`, `gfx.lint_html` |
+| `captions.*` | `captions.generate_from_transcript`, `captions.place_script`, `captions.set_style`, `captions.update_clip` |
+| `gfx.*` & `assets.*` | `assets.search`, `assets.save`, `gfx.place`, `gfx.update_clip`, `gfx.lint_html` |
 | `audio.*` | `audio.set_mix`, `audio.normalize_lufs`, `audio.enable_ducking` |
 | `brand.*` | `brand.get_playbook`, `brand.list_playbooks` |
 | `preview.*` & `render.*` | `preview.seek`, `preview.capture_frame` (returns composited/graded PNG for multimodal QA), `render.export` |
 
 Every external MCP tool call passes `AgentRole::McpExternal` into `ProjectEngine::apply(...)`, automatically animating the external agent's cursor inside the Studio UI in real time.
+
+### Refinement Mode Request Fields (`POST /api/v1/projects/{id}/swarm/run`)
+
+REST and Studio callers can target existing cuts without regenerating the timeline:
+- `mode`: `"auto" | "generate" | "refine"` (default `"auto"`, which resolves to `"refine"` when the project already has timeline clips; `"refine"` on an empty timeline returns HTTP `400`).
+- `selected_clip_ids`: optional `string[]` (max 64 safe clip IDs that exist on the project) passed as focused edit context.
+- `playhead_sec`: optional finite `number >= 0` indicating the current playhead timestamp.
+- `conversation_history`: optional `{ role: "user" | "assistant", text: string }[]` (last 12 turns, `<= 2000` chars each).
+- Responses expose `refinement_summary: string | null` on `SwarmRunStatus`.
 
 ---
 

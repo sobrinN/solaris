@@ -53,16 +53,18 @@ External MCP uses dotted names (`project.get`); internal OpenRouter swarm uses u
 | `color.set_grade` | `project_id` | `track_id` & `clip_id` (both or neither; omit to set global `project.active_grade`), `lift`/`gamma`/`gain` (`{r,g,b}`), `contrast`, `saturation`, `exposure`, `temp`, `tint`, `lut_path` (`string \| null`), `lut_intensity` (`0.0–1.0`). |
 | `color.get_scope_stats` | `project_id` | Returns `{ active_grade, brand_default_lut, log_footage_assets }`. Does **not** return pixel luma/vectorscope histograms—use `preview.capture_frame` to visually inspect exposure and skin tones. |
 
-### Captions, Assets & GFX (7 tools)
+### Captions, Assets & GFX (9 tools)
 
 | Tool | Required Params | Optional Params & Notes |
 | --- | --- | --- |
 | `captions.generate_from_transcript` | `project_id` | `media_id`, `preset` (`neon_glow` \| `mono_caps` \| `karaoke` \| `minimal`), `words_per_burst` (`1–6`). Maps against `V1` and `A1`, splits across `>0.6s` silences, sets `y: 0.20`, and replaces prior auto-captions. |
-| `captions.place_script` | `project_id`, `segments` (`[{text, start_sec, duration_sec}]`) | `preset`, `words_per_burst` (`1–6`), `y` (default `0.24`), `replace_existing` (default `true`). Places word-synced kinetic captions on `T1` without requiring an audio transcript (ideal for zero-asset programmatic videos). |
+| `captions.place_script` | `project_id`, `segments` (`[{text, start_sec, duration_sec}]`) | `preset`, `words_per_burst` (`1–6`), `y` (default `0.24`), `replace_existing` (default `true`). Places word-synced captions on `T1` only for narration already on the timeline that has no transcript. Never use for silent or zero-asset videos. |
 | `captions.set_style` | `project_id`, `preset` | `font_family`, `highlight_color` (hex). Restyles all `T1` clips. |
+| `captions.update_clip` | `project_id`, `clip_id` | `text` (keeps transcript word timings when the word count is unchanged, otherwise re-spreads words over the same span), `preset`, `font_family`, `highlight_color`. Edits ONE existing `T1` caption clip in place. |
 | `assets.search` | — | `query`, `category`. Matches asset `id`, `name`, and `tags`. |
 | `assets.save` | `id`, `name`, `html_source` | `category`, `tags`, `props_schema`, `default_props`, `default_duration_sec`. Lints HTML and validates ID regex `[a-zA-Z0-9_-]{1,64}`. |
 | `gfx.place` | `project_id`, `clip_id`, `label`, `start_sec`, `duration_sec` | `asset_id` + `props` (deep-merged over `default_props`), OR `inline_html`. Enforces `lint_gfx_html` server-side automatically. Always places at default `x:0, y:0, scale:1`—call `timeline.set_transform` afterward for floating cards (keep full-canvas programmatic scenes at `(0,0)`). |
+| `gfx.update_clip` | `project_id`, `clip_id` | `label`, `start_sec`, `duration_sec`, `asset_id`, `props` (deep-merged), `inline_html` (linted). Edits ONE existing `G1` clip in place as a single undo step. |
 | `gfx.lint_html` | `html` | Validates seekable & sandbox rules (`class="clip"`, `data-start`, `data-duration`, no banned APIs/URLs, `<= 128 KB`). Use to pre-verify or debug rejections (`gfx.place` also runs it automatically). |
 
 ### Audio Mix (3 tools)

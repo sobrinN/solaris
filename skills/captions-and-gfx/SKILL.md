@@ -15,7 +15,7 @@ Solaris renders `G1` (GFX) under `T1` (Captions) in both the Studio sandboxed if
 ## 1. Word-Synced Captions (`T1`)
 
 1. **With speech media**: Ensure the primary speech asset on `V1` or `A1` has a populated transcript (`media.get_manifest` → `media.transcribe` if empty), then call `captions.generate_from_transcript` (maps timestamps across `V1` and `A1`, splits across `>0.6s` silences, sets safe-zone `y: 0.20`, replaces prior auto-captions).
-2. **Programmatic / Zero-Asset Videos (No Audio Transcript)**: Call `captions.place_script` with timestamped narration segments (`[{ text, start_sec, duration_sec }]`, `words_per_burst: 3`, `y: 0.24`) so `T1` carries crisp word-by-word kinetic captions synchronized to every programmatic `G1` scene!
+2. **Silent or Zero-Asset Videos (No Narration Transcript)**: Place NO captions. Captions must reflect real narration, so `T1` stays empty until narration audio exists and is transcribed. Never script caption text for a video that has no speech. `captions.place_script` is only for narration that is on the timeline but has no transcript, and no internal agent calls it.
 3. Keep `words_per_burst` between **`2` and `4`** (hard QA cap is `6` words) and choose the right `preset` (`neon_glow`, `karaoke`, `mono_caps`, or `minimal`) via `captions.set_style` or the placement tool.
 
 ## 2. Social Safe Zones & Anti-Collision Positioning

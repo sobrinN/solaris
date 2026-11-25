@@ -61,17 +61,18 @@ To let parallel specialist agents (`caps`, `gfx`, `broll`, `grade`, `mix`) edit 
 | `AddMedia` | `media.pool` | Registers a `MediaAsset` in `project.media_pool` |
 | `UpdateMediaIntelligence` | `media.pool.<id>` | Attaches probed metadata, peaks, silences, LUFS, proxy path (non-undoable) |
 | `PlaceClip` | `timeline.track.<code_lower>` | Places a `Clip` onto a track (validates finite `duration_sec > 0` & unique ID) |
-| `SplitClip` | `timeline.clip.<id>` | Splits a clip at `split_at_timeline_sec`, adjusting `source_in_sec` and partitioning `CaptionWord`s |
+| `SplitClip` | `timeline.clip.<id>` | Splits a clip at `split_at_timeline_sec` using caller-supplied `right_clip_id` (deterministic redo & selection), adjusting `source_in_sec` and partitioning `CaptionWord`s |
 | `TrimClip` | `timeline.clip.<id>` | Adjusts `start_sec`, `duration_sec`, and/or `source_in_sec` |
 | `DeleteClip` | `timeline.track.<code_lower>` | Removes a clip by ID |
 | `UpdateClipTransform` | `program.stage` | Updates `x`, `y`, `scale`, `rotation_deg`, `opacity`, or `smart_reframe` box |
 | `SetColorGrade` | `color.inspector` | Updates master `active_grade` or clip-scoped `ClipKind::Grade` Lift/Gamma/Gain, temp/tint/contrast/sat/exp, LUT |
-| `UpdateCaptionClip` | `captions.inspector` | Updates caption words, preset (`NeonGlow`, `MonoCaps`, `Karaoke`, `Minimal`), font, color |
+| `UpdateCaptionClip` | `captions.inspector` | Updates caption words, preset (`NeonGlow`, `MonoCaps`, `Karaoke`, `Minimal`), font, color (used by `captions.update_clip`) |
 | `PlaceGfx` | `timeline.track.g1` | Instantiates a saved `SavedCodeAsset` (with typed JSON props) or inline HTML/GSAP onto `G1` |
 | `UpdateGfxProps` | `program.stage` | Updates typed JSON props on an existing `G1` GFX clip |
 | `SetAudioSettings` | `audio.mixer` | Updates `gain_db`, `ducking_enabled`, `duck_target_db`, fades |
 | `SetTrackFlags` | `timeline.track.<code_lower>` | Toggles `muted`, `solo`, `locked` |
 | `SetBrandPlaybook` | `brand.playbook` | Switches active `brand_playbook_id` |
+| `Batch` | `timeline` | Atomic group command (`commands`, optional `summary`). Snapshot-rolled back if any sub-command fails, checks track locks per sub-command, rejects nested `Batch` and `UpdateMediaIntelligence`, max 256 sub-commands, recorded as **one undo step** (also powers `gfx.update_clip` in-place edits and Studio multi-selection actions) |
 
 ---
 
@@ -84,5 +85,6 @@ Every committed command broadcasts an `EngineEventEnvelope` over `/api/v1/ws`:
 - `TrackLockChanged`: `{ project_id, track_id, holder_agent_id, role }`
 - `CursorPulse`: `{ project_id, agent_id, role, ui_anchor, label }` (allows external MCP clients or swarm workers to show live inspection focus even before committing an op)
 - `ExportProgress`: `{ project_id, job }` (queued, rendering_gfx, compositing, completed, failed)
-- `SwarmProgress`: `{ project_id, run }` (live multi-agent Swarm status snapshots: stage transitions, active specialist roles, fallback flag, and final QA report)
+- `SwarmProgress`: `{ project_id, run }` (live multi-agent Swarm status snapshots: stage transitions, active specialist roles, fallback flag, `refinement_summary`, and final QA report)
 - `PlayheadSeek`: `{ project_id, time_sec, agent_id, role }` (broadcast when an agent or MCP client runs `preview.seek` so Studio Web syncs the playhead in real time)
+- `AssetsChanged`: `{ action, asset_id }` (broadcast when saved GFX assets are saved, deleted, restored, or imported so Studio Web refreshes the GFX bin live)
