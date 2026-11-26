@@ -187,10 +187,10 @@ export function BroadcastScopes({
   return (
     <div
       data-cursor-anchor="scopes.panel"
-      className="flex h-full flex-col gap-3 rounded-2xl border border-areia/10 bg-carbono/70 p-3"
+      className="flex h-full min-h-0 flex-col gap-2 overflow-hidden rounded-2xl border border-areia/10 bg-carbono/70 p-2.5"
     >
-      <div className="flex flex-col gap-1.5">
-        <div className="flex items-center justify-between gap-1 whitespace-nowrap text-[10px] font-semibold uppercase tracking-[0.12em] text-areia/60">
+      <div className="flex min-h-0 flex-1 flex-col gap-1">
+        <div className="flex shrink-0 items-center justify-between gap-1 whitespace-nowrap text-[10px] font-semibold uppercase tracking-[0.12em] text-areia/60">
           <span className="truncate">Waveform · Luma</span>
           <span
             className={`shrink-0 tabular-nums ${
@@ -201,16 +201,18 @@ export function BroadcastScopes({
             {hasLiveFrame ? "LIVE" : "IRE"}
           </span>
         </div>
-        <canvas
-          ref={waveRef}
-          width={240}
-          height={96}
-          className="w-full rounded-xl border border-areia/10 bg-void/90"
-        />
+        <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-areia/10 bg-void/90">
+          <canvas
+            ref={waveRef}
+            width={240}
+            height={96}
+            className="h-full w-full"
+          />
+        </div>
       </div>
 
-      <div className="flex flex-col gap-1.5">
-        <div className="flex items-center justify-between gap-1 whitespace-nowrap text-[10px] font-semibold uppercase tracking-[0.12em] text-areia/60">
+      <div className="flex min-h-0 flex-1 flex-col gap-1">
+        <div className="flex shrink-0 items-center justify-between gap-1 whitespace-nowrap text-[10px] font-semibold uppercase tracking-[0.12em] text-areia/60">
           <span className="truncate">Vectorscope</span>
           <span
             className="shrink-0 text-amarelo-ideias/80"
@@ -219,20 +221,25 @@ export function BroadcastScopes({
             Rec.709
           </span>
         </div>
-        <div className="grid place-items-center rounded-xl border border-areia/10 bg-void/90 py-2">
-          <canvas ref={vecRef} width={132} height={132} className="h-[124px] w-[124px]" />
+        <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-areia/10 bg-void/90 p-1.5">
+          <canvas
+            ref={vecRef}
+            width={132}
+            height={132}
+            className="aspect-square h-full max-h-[124px] w-auto max-w-full"
+          />
         </div>
       </div>
 
       <div
         data-cursor-anchor="audio.mixer"
-        className="mt-auto space-y-2 rounded-xl border border-areia/10 bg-void/75 p-2.5"
+        className="shrink-0 space-y-1.5 rounded-xl border border-areia/10 bg-void/75 p-2"
       >
         <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
           <span>Loudness</span>
           <span className="tabular-nums text-amarelo-ideias">{lufsText}</span>
         </div>
-        <div className="space-y-1.5 text-[10px] text-areia/70">
+        <div className="space-y-1 text-[10px] text-areia/70">
           <div className="flex items-center gap-2">
             <span className="w-10">VOICE</span>
             <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-grafite">

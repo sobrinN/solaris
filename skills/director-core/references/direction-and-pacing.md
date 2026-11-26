@@ -124,4 +124,5 @@ Reject and fix any of these before delivering:
 - **Em dashes (`—`) or en dashes (`–`) in on-screen copy**: Use commas, colons, or short sentences.
 - **100% LUT crush / raw Log gray / music drowning voice**: Shipping flat Log footage, slamming `lut_intensity: 1.0`, or leaving `A2` music un-ducked.
 - **Invented numbers or placeholder filler**: Putting unsourced stats (`"300% FASTER"`), pre-roll `"$0"`, or internal asset IDs (`"progress-bar-solar"`) on screen.
+- **Unsolicited scene counters & fake progress/loading bars**: Never stamp `01 / 06`, `2/5`, or useless bottom loading/progress bars on every scene, and never trap every beat inside the exact same top-pill + dark-box + 3-row checklist slide template unless the user explicitly asks for a step counter or progress bar.
 - **Accent text on an accent ground**: Red text on red glow disappears—keep high contrast.

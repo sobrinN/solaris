@@ -29,6 +29,7 @@ import {
 
 interface TimelinePanelProps {
   tracks: Track[];
+  activeTrackIds?: string[];
   mediaPool?: MediaAsset[];
   savedAssets?: SavedCodeAsset[];
   playheadSec: number;
@@ -140,6 +141,7 @@ function sliceWaveformPeaks(
 
 export function TimelinePanel({
   tracks,
+  activeTrackIds = [],
   mediaPool = [],
   savedAssets = [],
   playheadSec,
@@ -167,7 +169,28 @@ export function TimelinePanel({
   const marqueeRef = useRef<MarqueeDraft | null>(null);
   const tracksContainerRef = useRef<HTMLDivElement | null>(null);
   const [dropHoverTrackId, setDropHoverTrackId] = useState<string | null>(null);
+  const [emptyDropHover, setEmptyDropHover] = useState(false);
+  const [showAllTracks, setShowAllTracks] = useState(false);
+  const [draggingPayload, setDraggingPayload] = useState<"media" | "gfx" | null>(null);
 
+  const activeTrackSet = useMemo(() => new Set(activeTrackIds), [activeTrackIds]);
+  const visibleTracks = useMemo(() => {
+    if (showAllTracks) return tracks;
+    return tracks.filter((t) => {
+      if (t.clips.length > 0 || activeTrackSet.has(t.id)) return true;
+      if (
+        draggingPayload === "media" &&
+        !t.locked &&
+        (t.id === "v1" || t.id === "v2" || t.id === "a1" || t.id === "a2")
+      ) {
+        return true;
+      }
+      if (draggingPayload === "gfx" && !t.locked && t.id === "g1") {
+        return true;
+      }
+      return false;
+    });
+  }, [tracks, activeTrackSet, showAllTracks, draggingPayload]);
   const selectedSet = useMemo(() => new Set(selectedClipIds), [selectedClipIds]);
   const timelineClipOrder = useMemo(
     () =>
@@ -544,13 +567,46 @@ export function TimelinePanel({
       {/* Tracks */}
       <div
         ref={tracksContainerRef}
-        className="relative flex flex-col divide-y divide-areia/[0.06] overflow-x-auto"
+        onDragOver={(e) => {
+          if (
+            Boolean(onPlaceGfxFromAsset) &&
+            e.dataTransfer.types.includes(GFX_ASSET_DRAG_MIME)
+          ) {
+            if (draggingPayload !== "gfx") setDraggingPayload("gfx");
+          } else if (
+            Boolean(onDropMediaOnTrack) &&
+            e.dataTransfer.types.includes("application/x-solaris-media-id")
+          ) {
+            if (draggingPayload !== "media") setDraggingPayload("media");
+          }
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+            setDraggingPayload(null);
+          }
+        }}
+        onDrop={() => setDraggingPayload(null)}
+        className="relative flex max-h-[240px] flex-col divide-y divide-areia/[0.06] overflow-x-auto overflow-y-auto"
       >
         {/* Timecode Ruler */}
-        <div className="flex h-6 items-stretch bg-void/75">
-          <div className="sticky left-0 z-20 flex w-40 shrink-0 items-center justify-between border-r border-areia/10 bg-void/95 px-2.5 text-[10px] font-medium uppercase tracking-[0.12em] text-areia/45 backdrop-blur-sm">
+        <div className="sticky top-0 z-20 flex h-6 shrink-0 items-stretch bg-void/90 backdrop-blur-sm">
+          <div className="sticky left-0 z-30 flex w-40 shrink-0 items-center justify-between border-r border-areia/10 bg-void/95 px-2.5 text-[10px] font-medium uppercase tracking-[0.12em] text-areia/45 backdrop-blur-sm">
             <span>Tracks</span>
-            <span className="tabular-nums text-areia/35">{tracks.length}</span>
+            <button
+              type="button"
+              onClick={() => setShowAllTracks((v) => !v)}
+              className="tabular-nums rounded px-1 py-0.5 text-areia/45 transition-colors hover:bg-accent hover:text-areia motion-reduce:transition-none"
+              title={
+                showAllTracks
+                  ? "Show only active tracks"
+                  : `Show all ${tracks.length} tracks`
+              }
+              aria-pressed={showAllTracks}
+            >
+              {showAllTracks || visibleTracks.length === tracks.length
+                ? `${visibleTracks.length}`
+                : `${visibleTracks.length}/${tracks.length}`}
+            </button>
           </div>
           <div
             style={zoom > 1 ? { minWidth: `${Math.round(zoom * 100)}%` } : undefined}
@@ -590,7 +646,63 @@ export function TimelinePanel({
           </div>
         </div>
 
-        {tracks.map((track) => {
+        {visibleTracks.length === 0 ? (
+          <div
+            onDragOver={(e) => {
+              const hasMedia =
+                Boolean(onDropMediaOnTrack) &&
+                e.dataTransfer.types.includes("application/x-solaris-media-id");
+              const hasGfx =
+                Boolean(onPlaceGfxFromAsset) &&
+                e.dataTransfer.types.includes(GFX_ASSET_DRAG_MIME);
+              if (hasMedia || hasGfx) {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "copy";
+                setEmptyDropHover(true);
+              }
+            }}
+            onDragLeave={() => setEmptyDropHover(false)}
+            onDrop={(e) => {
+              setEmptyDropHover(false);
+              if (onPlaceGfxFromAsset) {
+                const gfxId =
+                  e.dataTransfer.getData(GFX_ASSET_DRAG_MIME) ||
+                  e.dataTransfer.getData("text/plain");
+                const asset = gfxId ? savedAssets.find((a) => a.id === gfxId) : undefined;
+                if (asset) {
+                  e.preventDefault();
+                  onPlaceGfxFromAsset(asset, 0);
+                  return;
+                }
+              }
+              if (onDropMediaOnTrack) {
+                const mediaId = e.dataTransfer.getData("application/x-solaris-media-id");
+                if (mediaId) {
+                  e.preventDefault();
+                  const item = mediaPool.find((m) => m.id === mediaId);
+                  const target =
+                    item?.kind === "audio"
+                      ? item.role_hint === "voice" || item.role_hint === "voiceover"
+                        ? "a1"
+                        : "a2"
+                      : "v1";
+                  onDropMediaOnTrack(target, mediaId, 0);
+                }
+              }
+            }}
+            className={`flex h-14 items-center justify-center px-4 text-center text-[11px] transition-colors motion-reduce:transition-none ${
+              emptyDropHover
+                ? "bg-laranja-criacao/15 text-areia"
+                : "bg-void/35 text-areia/45"
+            }`}
+          >
+            <span className="pointer-events-none">
+              Timeline is empty — direct the swarm or drop media/GFX here to create channels.
+            </span>
+          </div>
+        ) : null}
+
+        {visibleTracks.map((track) => {
           const acceptsMediaDrop =
             Boolean(onDropMediaOnTrack) &&
             !track.locked &&

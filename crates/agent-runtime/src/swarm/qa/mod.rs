@@ -1,4 +1,5 @@
 mod checks;
+mod repair;
 mod vision;
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -15,6 +16,7 @@ use checks::{
     check_and_fix_audio, check_and_fix_log_grade, check_and_fix_safe_zones, check_gfx_lint,
     check_timeline_pacing,
 };
+use repair::repair_gfx_clips_from_vision;
 use vision::inspect_playback_frames;
 
 #[derive(Debug, Clone, Default)]
@@ -172,7 +174,7 @@ pub async fn run_qa_pass_with_options(
     }
 
     // 5. Playback frame capture & optional OpenRouter multimodal vision critique
-    let (frames_inspected, multimodal_summary) = inspect_playback_frames(
+    let mut vision_res = inspect_playback_frames(
         backend,
         openrouter,
         vision_model,
@@ -182,6 +184,53 @@ pub async fn run_qa_pass_with_options(
         &mut checks,
     )
     .await;
+
+    // 6. Closed-loop visual auto-repair: when Enhance/auto_fix is enabled and Vision QA
+    // identified fixable G1 clips, patch their HTML in place and re-verify once.
+    if auto_fix
+        && !cancel.is_cancelled()
+        && !vision_res.clip_fixes.is_empty()
+        && let (Some(client), Some(vmodel)) = (openrouter, vision_model)
+        && client.is_configured()
+    {
+        let repaired = repair_gfx_clips_from_vision(
+            backend,
+            client,
+            vmodel,
+            options.director_supports_reasoning,
+            &project,
+            brand.as_ref(),
+            &vision_res.clip_fixes,
+            &vision_res.captured_by_clip,
+            cancel,
+            ops_counter,
+            &mut auto_fixes_applied,
+            &mut checks,
+        )
+        .await;
+
+        if repaired > 0
+            && !cancel.is_cancelled()
+            && let Ok(updated) = backend.get_project(project_id).await
+        {
+            project = updated;
+            checks.retain(|c| {
+                !c.id.starts_with("vision-issue-")
+                    && !c.id.starts_with("vision-warn-")
+                    && c.id != "visual-frame-capture"
+            });
+            vision_res = inspect_playback_frames(
+                backend,
+                openrouter,
+                vision_model,
+                options.director_supports_reasoning,
+                &project,
+                cancel,
+                &mut checks,
+            )
+            .await;
+        }
+    }
 
     if cancel.is_cancelled() {
         checks.push(QaCheckItem {
@@ -196,9 +245,9 @@ pub async fn run_qa_pass_with_options(
 
     finalize_report(
         checks,
-        frames_inspected,
+        vision_res.frames_inspected,
         auto_fixes_applied,
-        multimodal_summary,
+        vision_res.multimodal_summary,
     )
 }
 
@@ -1253,20 +1302,20 @@ mod tests {
             });
         }
         let samples = vision::compute_project_sample_timestamps(&proj, 0.0, 24.0);
-        assert_eq!(samples.len(), 3);
+        assert_eq!(samples.len(), 6);
         // Hook scene [0.0..3.5]: settled at 1.75s (well past 0.4s entrance stagger)
         assert!(samples[0] >= 1.0 && samples[0] <= 2.5, "got {}", samples[0]);
-        // Mid scene [12.5..17.0]: settled mid-scene (~14.75s)
+        // Mid scene [12.5..17.0] (index 3): settled mid-scene (~14.75s)
         assert!(
-            samples[1] >= 13.5 && samples[1] <= 16.0,
+            samples[3] >= 13.5 && samples[3] <= 16.0,
             "got {}",
-            samples[1]
+            samples[3]
         );
-        // Final scene [21.0..24.0]: settled mid-scene (~22.5s)
+        // Final scene [21.0..24.0] (index 5): settled mid-scene (~22.5s)
         assert!(
-            samples[2] >= 21.9 && samples[2] <= 23.4,
+            samples[5] >= 21.9 && samples[5] <= 23.4,
             "got {}",
-            samples[2]
+            samples[5]
         );
     }
 }

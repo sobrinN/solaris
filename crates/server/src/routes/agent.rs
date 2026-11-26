@@ -6,9 +6,9 @@ use axum::http::StatusCode;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use solaris_agent_runtime::{
-    CreativePlan, CreativePlanInput, ModelRecommendation, ModelRoleKind, SkillDoc, SolarisBackend,
-    SwarmRunRequest, build_local_creative_plan, generate_creative_plan, list_skills,
-    prepare_swarm_request, run_qa_pass, run_swarm,
+    CreativePlan, CreativePlanInput, ModelRecommendation, ModelRoleKind, QaPassOptions, SkillDoc,
+    SolarisBackend, SwarmRunRequest, build_local_creative_plan, generate_creative_plan,
+    list_skills, prepare_swarm_request, run_qa_pass_with_options, run_swarm,
 };
 use solaris_core_ir::{
     AspectPreset, BrandPlaybook, EngineEvent, LogEntry, LogLevel, MediaAsset, QaReport,
@@ -553,20 +553,39 @@ pub async fn run_project_qa(
     }
     let auto_fix = body.map(|b| b.0.auto_fix).unwrap_or(true);
     let cancel = CancellationToken::new();
-    let (openrouter, vision_rec) = if state.inner.openrouter.is_configured() {
-        let rec = state
-            .inner
-            .model_advisor
-            .recommend(ModelRoleKind::DirectorMultimodal)
-            .await;
-        (Some(&state.inner.openrouter), Some(rec))
-    } else {
-        (None, None)
-    };
+    let (openrouter, vision_rec, director_supports_reasoning) =
+        if state.inner.openrouter.is_configured() {
+            let rec = state
+                .inner
+                .model_advisor
+                .recommend(ModelRoleKind::DirectorMultimodal)
+                .await;
+            let supports_reasoning = state
+                .inner
+                .model_advisor
+                .model_supports_parameter(&rec.primary, "reasoning")
+                .await;
+            (Some(&state.inner.openrouter), Some(rec), supports_reasoning)
+        } else {
+            (None, None, false)
+        };
     let vision_ref = vision_rec
         .as_ref()
         .map(|r| (r.primary.as_str(), r.fallbacks.as_slice()));
-    let report = run_qa_pass(&state, openrouter, vision_ref, &id, auto_fix, &cancel, None).await;
+    let report = run_qa_pass_with_options(
+        &state,
+        openrouter,
+        vision_ref,
+        &id,
+        auto_fix,
+        &cancel,
+        None,
+        QaPassOptions {
+            specialist_errors: &[],
+            director_supports_reasoning,
+        },
+    )
+    .await;
     Ok(Json(report))
 }
 

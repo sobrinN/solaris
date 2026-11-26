@@ -9,7 +9,7 @@ mod speech;
 #[cfg(test)]
 mod test_support;
 
-pub use qa::run_qa_pass;
+pub use qa::{QaPassOptions, run_qa_pass, run_qa_pass_with_options};
 pub use request::{SwarmChatRole, SwarmChatTurn, SwarmRunMode, prepare_swarm_request};
 
 use std::sync::Arc;
@@ -497,10 +497,14 @@ pub(crate) fn infer_target_duration_from_prompt(prompt: &str, media_fallback_sec
         let prev = idx.checked_sub(1).and_then(|p| tokens.get(p).copied());
         let next = tokens.get(idx + 1).copied();
 
-        // Handle explicit second suffixes like "30sec", "45secs", "30seconds"
+        // Handle explicit second suffixes like "30sec", "45secs", "30seconds", "20segundos"
         if let Some(num_str) = tok
-            .strip_suffix("seconds")
+            .strip_suffix("segundos")
+            .or_else(|| tok.strip_suffix("segundo"))
+            .or_else(|| tok.strip_suffix("seconds"))
             .or_else(|| tok.strip_suffix("second"))
+            .or_else(|| tok.strip_suffix("segs"))
+            .or_else(|| tok.strip_suffix("seg"))
             .or_else(|| tok.strip_suffix("secs"))
             .or_else(|| tok.strip_suffix("sec"))
             && let Ok(val) = num_str.parse::<f64>()
@@ -539,9 +543,11 @@ pub(crate) fn infer_target_duration_from_prompt(prompt: &str, media_fallback_sec
             }
         }
 
-        // Handle minute suffixes like "1m", "2m", "2min", "1minute"
+        // Handle minute suffixes like "1m", "2m", "2min", "1minute", "1minuto"
         if let Some(num_str) = tok
-            .strip_suffix("minutes")
+            .strip_suffix("minutos")
+            .or_else(|| tok.strip_suffix("minuto"))
+            .or_else(|| tok.strip_suffix("minutes"))
             .or_else(|| tok.strip_suffix("minute"))
             .or_else(|| tok.strip_suffix("mins"))
             .or_else(|| tok.strip_suffix("min"))
@@ -554,18 +560,29 @@ pub(crate) fn infer_target_duration_from_prompt(prompt: &str, media_fallback_sec
             return (val * 60.0).clamp(4.0, 180.0);
         }
 
-        // Handle separated forms like "30 seconds", "30 sec", "1 minute"
+        // Handle separated forms like "30 seconds", "20 segundos", "30 sec", "1 minute", "1 minuto"
         if let Ok(val) = tok.parse::<f64>()
             && val.is_finite()
             && let Some(next_tok) = next
         {
-            if matches!(next_tok, "s" | "sec" | "secs" | "second" | "seconds")
-                && (3.0..1000.0).contains(&val)
+            if matches!(
+                next_tok,
+                "s" | "sec"
+                    | "secs"
+                    | "second"
+                    | "seconds"
+                    | "seg"
+                    | "segs"
+                    | "segundo"
+                    | "segundos"
+            ) && (3.0..1000.0).contains(&val)
             {
                 return val.clamp(4.0, 180.0);
             }
-            if matches!(next_tok, "m" | "min" | "mins" | "minute" | "minutes")
-                && val > 0.0
+            if matches!(
+                next_tok,
+                "m" | "min" | "mins" | "minute" | "minutes" | "minuto" | "minutos"
+            ) && val > 0.0
                 && val <= 60.0
             {
                 return (val * 60.0).clamp(4.0, 180.0);
@@ -2662,6 +2679,18 @@ mod tests {
         );
         assert_eq!(infer_target_duration_sec("1m product tour", &proj), 60.0);
         assert_eq!(infer_target_duration_sec("2m deep dive", &proj), 120.0);
+        assert_eq!(
+            infer_target_duration_sec(
+                "Crie um video de 20 segundos explicando como fritar ovo",
+                &proj
+            ),
+            20.0
+        );
+        assert_eq!(
+            infer_target_duration_sec("15seg receita rapida", &proj),
+            15.0
+        );
+        assert_eq!(infer_target_duration_sec("1 minuto tutorial", &proj), 60.0);
         // Decade style descriptors and 4-digit year decades must NOT be mistaken for durations
         assert_eq!(
             infer_target_duration_sec("80s retro style neon montage", &proj),

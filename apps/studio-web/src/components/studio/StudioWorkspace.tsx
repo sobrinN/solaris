@@ -1239,21 +1239,21 @@ export function StudioWorkspace({
   const canvasAspect = project.canvas.width / Math.max(1, project.canvas.height);
 
   // Adapt the center Program Monitor column width to the project's actual aspect ratio
-  // (9:16, 1:1, or 16:9) so portrait/square canvases don't leave huge empty black sidebars.
+  // (9:16, 1:1, or 16:9) so the rendered video maximizes height with zero wasted black sidebars.
   const studioGridStyle = useMemo(() => {
     if (studioGridSize.w < 1024 || studioGridSize.h <= 0) return undefined;
     if (viewerMode === "source" || canvasAspect > 1.2) return undefined;
 
     const isXl = studioGridSize.w >= 1280;
     const showScopes = isXl && scopesOpen;
-    const stageInnerH = Math.max(200, studioGridSize.h - 94);
-    const idealProgramPx = Math.round(stageInnerH * canvasAspect + 44);
-    const minProgramPx = canvasAspect < 0.85 ? 250 : 320;
+    const stageInnerH = Math.max(240, studioGridSize.h - 54);
+    const idealProgramPx = Math.round(stageInnerH * canvasAspect + 24);
+    const minProgramPx = canvasAspect < 0.85 ? 280 : 360;
     const otherMin = showScopes
-      ? 300 + 212 + 280 + 60
+      ? 268 + 200 + 260 + 56
       : isXl
-        ? 320 + 296 + 48
-        : 276 + 268 + 48;
+        ? 290 + 272 + 44
+        : 260 + 252 + 44;
     const maxProgramPx = Math.max(minProgramPx, studioGridSize.w - otherMin);
     const programColPx = Math.round(
       Math.max(minProgramPx, Math.min(idealProgramPx, maxProgramPx)),
@@ -1261,18 +1261,41 @@ export function StudioWorkspace({
 
     if (showScopes) {
       return {
-        gridTemplateColumns: `minmax(300px, 1.2fr) ${programColPx}px minmax(212px, 0.72fr) minmax(280px, 1fr)`,
+        gridTemplateColumns: `minmax(268px, 1.05fr) ${programColPx}px minmax(200px, 0.65fr) minmax(260px, 0.95fr)`,
       };
     }
     if (isXl) {
       return {
-        gridTemplateColumns: `minmax(320px, 1.15fr) ${programColPx}px minmax(296px, 1fr)`,
+        gridTemplateColumns: `minmax(290px, 1.05fr) ${programColPx}px minmax(272px, 0.95fr)`,
       };
     }
     return {
-      gridTemplateColumns: `minmax(276px, 1.1fr) ${programColPx}px minmax(268px, 1fr)`,
+      gridTemplateColumns: `minmax(260px, 1.05fr) ${programColPx}px minmax(252px, 0.95fr)`,
     };
   }, [studioGridSize.w, studioGridSize.h, viewerMode, canvasAspect, scopesOpen]);
+
+  // Show active swarm tracks live as agents work on them so channels appear dynamically.
+  const activeSwarmTrackIds = useMemo(() => {
+    const roles = activeSwarmRun?.active_roles ?? EMPTY_ROLES;
+    const ids = new Set<string>();
+    for (const role of roles) {
+      if (role === "razor") {
+        ids.add("v1");
+        ids.add("a1");
+      } else if (role === "b_roll") {
+        ids.add("v2");
+      } else if (role === "grade") {
+        ids.add("fx");
+      } else if (role === "gfx") {
+        ids.add("g1");
+      } else if (role === "caps") {
+        ids.add("t1");
+      } else if (role === "mix") {
+        ids.add("a2");
+      }
+    }
+    return Array.from(ids);
+  }, [activeSwarmRun]);
 
   const reframeBoxWidthPct =
     project.canvas.aspect_preset === "vertical9x16"
@@ -1564,9 +1587,9 @@ export function StudioWorkspace({
         {/* Center Hero Stage: Program Monitor */}
         <div
           data-cursor-anchor="program.stage"
-          className="flex min-h-[280px] flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-2.5 lg:min-h-0"
+          className="flex min-h-[320px] flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-2 lg:min-h-0"
         >
-          <div className="mb-2 flex flex-wrap items-center justify-between gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em]">
+          <div className="mb-1.5 flex flex-wrap items-center justify-between gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em]">
             {project.media_pool.length > 0 ? (
               <div
                 role="tablist"
@@ -1637,7 +1660,7 @@ export function StudioWorkspace({
           </div>
 
           <div
-            className={`relative min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-areia/12 bg-void p-1.5 ${
+            className={`relative min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl bg-void ${
               viewerMode === "program" ? "flex" : "hidden"
             }`}
           >
@@ -1729,10 +1752,11 @@ export function StudioWorkspace({
         </div>
       </div>
 
-      {/* Bottom: 7-Track Timeline */}
+      {/* Bottom: Dynamic Timeline */}
       <div className="shrink-0 px-2.5 pb-2.5">
         <TimelinePanel
           tracks={project.tracks}
+          activeTrackIds={activeSwarmTrackIds}
           mediaPool={project.media_pool}
           savedAssets={assets}
           playheadSec={playheadSec}

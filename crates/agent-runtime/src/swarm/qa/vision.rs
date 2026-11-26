@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
@@ -12,6 +14,28 @@ use crate::openrouter::{
 use crate::skills::get_skill_resource;
 use crate::swarm::llm::{route_models, strip_json_fence};
 
+const MAX_PROGRAMMATIC_QA_FRAMES: usize = 7;
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub(super) struct VisionClipFix {
+    #[serde(default)]
+    pub clip_id: String,
+    #[serde(default)]
+    pub severity: String,
+    #[serde(default)]
+    pub defect: String,
+    #[serde(default)]
+    pub fix_instruction: String,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct VisionQaInspection {
+    pub frames_inspected: usize,
+    pub multimodal_summary: Option<String>,
+    pub clip_fixes: Vec<VisionClipFix>,
+    pub captured_by_clip: HashMap<String, String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct VisionQaResponse {
     #[serde(default)]
@@ -20,6 +44,8 @@ struct VisionQaResponse {
     issues: Vec<String>,
     #[serde(default)]
     warnings: Vec<String>,
+    #[serde(default)]
+    clip_fixes: Vec<VisionClipFix>,
 }
 
 pub(super) fn scrub_secrets(raw: &str) -> String {
@@ -121,15 +147,21 @@ pub(super) fn compute_project_sample_timestamps(
         scenes.sort_by(|a, b| a.0.total_cmp(&b.0));
 
         if !scenes.is_empty() {
-            // Sample settled mid-scene hero moments (after GSAP entrance stagger finishes,
-            // before any end-of-scene transition) for Hook, Mid, and Climax/Outro scenes.
-            let mut indices = vec![0usize];
-            if scenes.len() >= 3 {
-                indices.push(scenes.len() / 2);
-                indices.push(scenes.len() - 1);
-            } else if scenes.len() == 2 {
-                indices.push(1);
-            }
+            // Sample settled mid-scene hero moments across ALL scenes (up to 7) so defects
+            // in intermediate scenes (clipped labels, overlapping badges, slide chrome) are never missed.
+            let indices: Vec<usize> = if scenes.len() <= MAX_PROGRAMMATIC_QA_FRAMES {
+                (0..scenes.len()).collect()
+            } else {
+                let last = scenes.len() - 1;
+                let mut picked = Vec::with_capacity(MAX_PROGRAMMATIC_QA_FRAMES);
+                for slot in 0..MAX_PROGRAMMATIC_QA_FRAMES {
+                    let idx = (slot * last) / (MAX_PROGRAMMATIC_QA_FRAMES - 1);
+                    if picked.last().copied() != Some(idx) {
+                        picked.push(idx);
+                    }
+                }
+                picked
+            };
             let mut sample_times = Vec::with_capacity(indices.len());
             for idx in indices {
                 let (s, dur) = scenes[idx];
@@ -152,6 +184,14 @@ pub(super) fn compute_project_sample_timestamps(
     compute_sample_timestamps(span_start, span_end)
 }
 
+fn active_g1_clip_at(project: &Project, ts: f64) -> Option<(String, String)> {
+    let g1 = project.tracks.iter().find(|t| t.id == "g1" && !t.muted)?;
+    g1.clips
+        .iter()
+        .find(|c| ts >= c.start_sec - 0.01 && ts <= c.start_sec + c.duration_sec + 0.01)
+        .map(|c| (c.id.clone(), c.label.clone()))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn inspect_playback_frames(
     backend: &dyn SolarisBackend,
@@ -161,24 +201,27 @@ pub(super) async fn inspect_playback_frames(
     project: &Project,
     cancel: &CancellationToken,
     checks: &mut Vec<QaCheckItem>,
-) -> (usize, Option<String>) {
+) -> VisionQaInspection {
     let Some((span_start, span_end)) = active_span_for_tracks(project, &["v1", "v2"])
         .or_else(|| active_span_for_tracks(project, &["g1"]))
         .or_else(|| active_span_for_tracks(project, &["t1"]))
         .or_else(|| active_span_for_tracks(project, &[]))
     else {
-        return (0, None);
+        return VisionQaInspection::default();
     };
     if cancel.is_cancelled() {
-        return (0, None);
+        return VisionQaInspection::default();
     }
 
     let sample_times = compute_project_sample_timestamps(project, span_start, span_end);
     if sample_times.is_empty() {
-        return (0, None);
+        return VisionQaInspection::default();
     }
 
     let mut captured = Vec::new();
+    let mut captured_by_clip: HashMap<String, String> = HashMap::new();
+    let mut frame_manifest = Vec::new();
+
     for ts in sample_times {
         if cancel.is_cancelled() {
             break;
@@ -187,6 +230,18 @@ pub(super) async fn inspect_playback_frames(
             .emit_playhead_seek(&project.id, ts, "director-qa", AgentRole::Director)
             .await;
         if let Ok(frame) = backend.capture_preview_frame(&project.id, ts).await {
+            let g1_meta = active_g1_clip_at(project, ts);
+            if let Some((ref cid, _)) = g1_meta {
+                captured_by_clip
+                    .entry(cid.clone())
+                    .or_insert_with(|| frame.png_base64.clone());
+            }
+            frame_manifest.push(json!({
+                "frame_index": captured.len() + 1,
+                "time_sec": (ts * 100.0).round() / 100.0,
+                "clip_id": g1_meta.as_ref().map(|(id, _)| id.as_str()),
+                "label": g1_meta.as_ref().map(|(_, lbl)| lbl.as_str()),
+            }));
             captured.push(frame);
         }
     }
@@ -202,7 +257,7 @@ pub(super) async fn inspect_playback_frames(
             time_sec: None,
             auto_fixed: false,
         });
-        return (0, None);
+        return VisionQaInspection::default();
     }
 
     checks.push(QaCheckItem {
@@ -210,13 +265,15 @@ pub(super) async fn inspect_playback_frames(
         category: "visual".to_string(),
         severity: QaSeverity::Pass,
         message: format!(
-            "Captured and inspected {frames_inspected} playback frame(s) (hook/mid/climax)."
+            "Captured and inspected {frames_inspected} playback frame(s) across timeline scenes."
         ),
         time_sec: None,
         auto_fixed: false,
     });
 
     let mut multimodal_summary = None;
+    let mut clip_fixes = Vec::new();
+
     if let (Some(client), Some((model, fallbacks))) = (openrouter, vision_model)
         && client.is_configured()
         && !cancel.is_cancelled()
@@ -241,30 +298,39 @@ pub(super) async fn inspect_playback_frames(
             .unwrap_or(0);
 
         let is_programmatic_zero_asset = video_clips == 0 && gfx_clips > 0;
+        let clip_fixes_schema = "Also populate \"clip_fixes\": [{\"clip_id\": string (exact clip_id from frames), \"severity\": \"issue\" | \"warning\", \"defect\": string, \"fix_instruction\": string}] for EVERY G1 frame that has a visual defect, clipping/overlap, unsolicited scene counter (`01/06`), or useless bottom progress/loading bar so Solaris can auto-repair that clip's HTML.";
         let task_prompt = if is_programmatic_zero_asset {
             if caption_clips > 0 {
-                "Review these Solaris programmatic motion-graphics playback frames (hook, mid, climax). \
-                 IMPORTANT: `programmatic_zero_asset` is TRUE — this project intentionally has 0 imported video_clips and is a pure HTML/CSS/SVG/GSAP motion-graphics video on G1 + captions on T1 (`caption_clips > 0`). \
-                 Do NOT report '0 video clips' or 'no camera footage' as an issue, and do NOT penalize intentional vertical clearance in the `64vh..76vh` band reserved for T1 captions as long as the ambient backdrop extends across 100vh. \
-                 Evaluate the motion graphics as a studio explainer: put genuine critical defects (completely blank/unrendered frame, unreadable/clipped text, severe overlap where captions cover diagrams/headlines, broken layout or heavily blurred ghost cards) in \"issues\", and minor polish notes (spacing, font sizing, badge consistency, caption copy redundancy) in \"warnings\". \
-                 Reply ONLY with JSON: {\"summary\": string, \"issues\": [string], \"warnings\": [string]}."
+                format!(
+                    "Review these Solaris programmatic motion-graphics playback frames (each listed with its `clip_id` in `frames`). \
+                     IMPORTANT: `programmatic_zero_asset` is TRUE — this project intentionally has 0 imported video_clips and is a pure HTML/CSS/SVG/GSAP motion-graphics video on G1 + captions on T1 (`caption_clips > 0`). \
+                     Do NOT report '0 video clips' or 'no camera footage' as an issue, and do NOT penalize intentional vertical clearance in the `64vh..76vh` band reserved for T1 captions as long as the ambient backdrop extends across 100vh. \
+                     Evaluate as a harsh supervising motion director: put critical defects (blank/unrendered frame, unreadable/clipped text or labels, badge overlapping text, severe overlap where captions cover diagrams/headlines, broken layout, heavily blurred ghost cards, or unsolicited `01/06` scene counters / useless bottom loading/progress bars) in \"issues\", and minor polish notes (spacing, font sizing, copy redundancy, repetitive identical slide boxes) in \"warnings\". \
+                     {clip_fixes_schema} \
+                     Reply ONLY with JSON: {{\"summary\": string, \"issues\": [string], \"warnings\": [string], \"clip_fixes\": [...]}}."
+                )
             } else {
-                "Review these Solaris programmatic motion-graphics playback frames (hook, mid, climax). \
-                 IMPORTANT: `programmatic_zero_asset` is TRUE and `caption_clips` is 0 — this project intentionally has 0 imported video_clips and NO T1 captions, so G1 scenes should use the full balanced vertical stage (`8vh..84vh` in 9:16) with rich 100vh atmosphere. \
-                 Do NOT report '0 video clips' or 'no camera footage' as an issue or defect! \
-                 Evaluate the motion graphics as a studio explainer: put genuine critical defects (completely blank/unrendered frame, severe bottom-half empty black void, unreadable/clipped text, broken layout or heavily blurred ghost cards) in \"issues\", and minor polish notes (spacing, font sizing, badge consistency, icon consistency, copy redundancy) in \"warnings\". \
-                 Reply ONLY with JSON: {\"summary\": string, \"issues\": [string], \"warnings\": [string]}."
+                format!(
+                    "Review these Solaris programmatic motion-graphics playback frames (each listed with its `clip_id` in `frames`). \
+                     IMPORTANT: `programmatic_zero_asset` is TRUE and `caption_clips` is 0 — this project intentionally has 0 imported video_clips and NO T1 captions, so G1 scenes should use the full balanced vertical stage (`8vh..84vh` in 9:16) with rich 100vh atmosphere. \
+                     Do NOT report '0 video clips' or 'no camera footage' as an issue or defect! \
+                     Evaluate as a harsh supervising motion director: put critical defects (blank/unrendered frame, severe bottom-half empty black void, unreadable/clipped text or labels, badge overlapping text, broken layout, heavily blurred ghost cards, or unsolicited `01/06` scene counters / useless bottom loading/progress bars) in \"issues\", and minor polish notes (spacing, font sizing, icon consistency, copy redundancy, repetitive identical slide boxes) in \"warnings\". \
+                     {clip_fixes_schema} \
+                     Reply ONLY with JSON: {{\"summary\": string, \"issues\": [string], \"warnings\": [string], \"clip_fixes\": [...]}}."
+                )
             }
         } else {
-            "Review these Solaris timeline playback frames (hook, mid, climax) for visual completeness, composition, legibility, contrast, and broadcast polish. Put critical defects (blank/pitch-black background, missing scene graphics, unreadable/clipped text, broken framing) in \"issues\" and minor polish notes in \"warnings\". Reply ONLY with JSON: {\"summary\": string, \"issues\": [string], \"warnings\": [string]}."
+            format!(
+                "Review these Solaris timeline playback frames for visual completeness, composition, legibility, contrast, and broadcast polish. Put critical defects (blank/pitch-black background, missing scene graphics, unreadable/clipped text, broken framing, unsolicited `01/06` counters or useless bottom progress bars) in \"issues\" and minor polish notes in \"warnings\". {clip_fixes_schema} Reply ONLY with JSON: {{\"summary\": string, \"issues\": [string], \"warnings\": [string], \"clip_fixes\": [...]}}."
+            )
         };
         let qa_rubric = get_skill_resource("skill://director-core/references/critique-and-qa.md")
             .map(|r| format!("\n\n## {}/{}\n{}", r.skill_name, r.relative_path, r.content))
             .unwrap_or_default();
         let base_system_prompt = if is_programmatic_zero_asset {
-            "You are Solaris Multimodal QA Director reviewing a programmatic motion-graphics video (G1 HTML/SVG/GSAP + T1 captions, intentionally 0 camera clips). Never penalize the absence of camera footage; judge graphic craft, legibility, safe-zone separation, and composition honestly using the rubric below. Reply ONLY with valid JSON."
+            "You are Solaris Multimodal QA Director reviewing a programmatic motion-graphics video (G1 HTML/SVG/GSAP + optional T1 captions, intentionally 0 camera clips). Never penalize the absence of camera footage; judge graphic craft, legibility, safe-zone separation, anti-chrome hygiene (no unsolicited 01/06 counters or useless bottom loading bars), and composition honestly using the rubric below. Reply ONLY with valid JSON."
         } else {
-            "You are Solaris Multimodal QA Director. Be strict and honest: blank/pitch-black backgrounds or missing visual graphics are critical issues, not minor warnings. Evaluate every frame using the rubric below. Reply ONLY with valid JSON."
+            "You are Solaris Multimodal QA Director. Be strict and honest: blank/pitch-black backgrounds, clipped text, overlapping badges, or missing visual graphics are critical issues, not minor warnings. Evaluate every frame using the rubric below. Reply ONLY with valid JSON."
         };
         let system_prompt = format!("{base_system_prompt}{qa_rubric}");
 
@@ -273,6 +339,7 @@ pub(super) async fn inspect_playback_frames(
                 "task": task_prompt,
                 "canvas": project.canvas,
                 "active_grade": project.active_grade,
+                "frames": frame_manifest,
                 "timeline_context": {
                     "video_clips": video_clips,
                     "gfx_clips": gfx_clips,
@@ -307,7 +374,7 @@ pub(super) async fn inspect_playback_frames(
                 effort: Some("low".to_string()),
                 ..ReasoningConfig::default()
             }),
-            max_tokens: Some(2560),
+            max_tokens: Some(4096),
             temperature: Some(0.1),
             ..ChatRequest::default()
         };
@@ -320,7 +387,7 @@ pub(super) async fn inspect_playback_frames(
                     .and_then(|c| c.message.content.as_ref())
                     .map(|c| c.as_text())
                     .unwrap_or_default();
-                let (summary_opt, parsed_checks) = parse_vision_qa_output(&text);
+                let (summary_opt, parsed_checks, parsed_fixes) = parse_vision_qa_detailed(&text);
                 let issue_count = parsed_checks
                     .iter()
                     .filter(|c| c.severity == QaSeverity::Issue)
@@ -345,16 +412,18 @@ pub(super) async fn inspect_playback_frames(
                     run_id: None,
                     agent_id: Some("director-qa".to_string()),
                     message: format!(
-                        "Vision QA completed ({}, finish={:?}, {}, issues={issue_count}, warnings={warn_count})",
+                        "Vision QA completed ({}, finish={:?}, {}, issues={issue_count}, warnings={warn_count}, clip_fixes={})",
                         resp.model.as_deref().unwrap_or(model),
                         resp.finish_reason(),
-                        resp.usage_summary()
+                        resp.usage_summary(),
+                        parsed_fixes.len()
                     ),
                     details: summary_opt.clone(),
                 });
                 if summary_opt.is_some() {
                     multimodal_summary = summary_opt;
                 }
+                clip_fixes = parsed_fixes;
                 checks.extend(parsed_checks);
             }
             Err(crate::error::AgentError::Cancelled) => {}
@@ -383,10 +452,23 @@ pub(super) async fn inspect_playback_frames(
         }
     }
 
-    (frames_inspected, multimodal_summary)
+    VisionQaInspection {
+        frames_inspected,
+        multimodal_summary,
+        clip_fixes,
+        captured_by_clip,
+    }
 }
 
+#[cfg(test)]
 pub(super) fn parse_vision_qa_output(text: &str) -> (Option<String>, Vec<QaCheckItem>) {
+    let (summary, checks, _) = parse_vision_qa_detailed(text);
+    (summary, checks)
+}
+
+pub(super) fn parse_vision_qa_detailed(
+    text: &str,
+) -> (Option<String>, Vec<QaCheckItem>, Vec<VisionClipFix>) {
     let mut out = Vec::new();
     if text.trim().is_empty() {
         out.push(QaCheckItem {
@@ -397,7 +479,7 @@ pub(super) fn parse_vision_qa_output(text: &str) -> (Option<String>, Vec<QaCheck
             time_sec: None,
             auto_fixed: false,
         });
-        return (None, out);
+        return (None, out, Vec::new());
     }
 
     let cleaned = strip_json_fence(text);
@@ -439,7 +521,16 @@ pub(super) fn parse_vision_qa_output(text: &str) -> (Option<String>, Vec<QaCheck
                 auto_fixed: false,
             });
         }
-        (summary, out)
+        let fixes: Vec<VisionClipFix> = parsed
+            .clip_fixes
+            .into_iter()
+            .filter(|f| {
+                !f.clip_id.trim().is_empty()
+                    && (!f.defect.trim().is_empty() || !f.fix_instruction.trim().is_empty())
+            })
+            .take(12)
+            .collect();
+        (summary, out, fixes)
     } else {
         let snippet: String = text.trim().chars().take(180).collect();
         out.push(QaCheckItem {
@@ -450,6 +541,6 @@ pub(super) fn parse_vision_qa_output(text: &str) -> (Option<String>, Vec<QaCheck
             time_sec: None,
             auto_fixed: false,
         });
-        (Some(snippet), out)
+        (Some(snippet), out, Vec::new())
     }
 }
