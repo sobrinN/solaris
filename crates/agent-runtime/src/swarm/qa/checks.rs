@@ -802,6 +802,19 @@ pub(super) fn check_gfx_lint(
                     time_sec: Some(clip.start_sec),
                     auto_fixed: false,
                 });
+            } else if report.descendant_svg_trap {
+                error_count += 1;
+                checks.push(QaCheckItem {
+                    id: format!("gfx-lint-svg-trap-{}", clip.id),
+                    category: "gfx".to_string(),
+                    severity: QaSeverity::Issue,
+                    message: format!(
+                        "GFX '{}' has a descendant CSS 'svg' absolute/fixed selector that captures nested icons; use a direct-child selector (e.g. '.funnel > svg') or an explicit class.",
+                        clip.label
+                    ),
+                    time_sec: Some(clip.start_sec),
+                    auto_fixed: false,
+                });
             }
         }
     }

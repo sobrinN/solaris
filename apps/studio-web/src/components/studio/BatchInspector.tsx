@@ -109,10 +109,10 @@ export function BatchInspector({
   return (
     <aside
       aria-label="Batch clip inspector"
-      className="flex h-full flex-col gap-3 overflow-y-auto rounded-2xl border border-areia/10 bg-carbono/70 p-3 text-xs"
+      className="solaris-scroll flex h-full flex-col gap-2.5 overflow-y-auto rounded-xl border border-areia/[0.08] bg-carbono/65 p-2.5 text-xs shadow-[inset_0_1px_0_rgba(247,245,239,0.04)]"
     >
       {/* Header */}
-      <div className="flex items-start justify-between gap-2 border-b border-areia/10 pb-2.5">
+      <div className="flex items-start justify-between gap-2 border-b border-areia/[0.08] pb-2">
         <div className="min-w-0">
           <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-amarelo-ideias">
             Batch Edit
@@ -246,7 +246,7 @@ export function BatchInspector({
                   onBlur={() => {
                     if (draft !== undefined) commitTransformField(field, draft);
                   }}
-                  className="h-1 w-full cursor-pointer accent-laranja-criacao"
+                  className="solaris-slider w-full cursor-pointer"
                 />
               </label>
             );
@@ -310,7 +310,7 @@ export function BatchInspector({
                     onBlur={() => {
                       if (draft !== undefined) commitAudioField(field, draft);
                     }}
-                    className="h-1 flex-1 cursor-pointer accent-amarelo-ideias"
+                    className="solaris-slider solaris-slider--gold flex-1 cursor-pointer"
                   />
                   <span
                     className={`w-10 text-right tabular-nums ${

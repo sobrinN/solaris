@@ -210,6 +210,107 @@ function scanHtml(html: string): ScannedHtml {
 
 const CSS_IMPORT_RE = /(?:^|[^A-Za-z0-9_-])@import(?=$|[^A-Za-z0-9_-])/i;
 
+function findMatchingBrace(s: string, openBrace: number): number {
+  let depth = 0;
+  for (let i = openBrace; i < s.length; i += 1) {
+    if (s[i] === "{") depth += 1;
+    else if (s[i] === "}") {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function stripImportant(val: string): string {
+  const trimmed = val.trim();
+  if (trimmed.endsWith("!important")) {
+    return trimmed.slice(0, -"!important".length).trimEnd();
+  }
+  return trimmed;
+}
+
+function hasDescendantSvgAbsoluteTrap(css: string): boolean {
+  const lower = css.toLowerCase();
+  let cursor = 0;
+  while (cursor < lower.length) {
+    const open = lower.indexOf("{", cursor);
+    if (open === -1) break;
+    const preludeSegment = lower.slice(cursor, open);
+    const semi = preludeSegment.indexOf(";");
+    if (semi !== -1 && preludeSegment.slice(0, semi).trimStart().startsWith("@")) {
+      cursor = cursor + semi + 1;
+      continue;
+    }
+    const close = findMatchingBrace(lower, open);
+    if (close === -1) break;
+    const selectorBlock = preludeSegment.trim();
+    const body = lower.slice(open + 1, close);
+    cursor = close + 1;
+
+    if (selectorBlock.startsWith("@")) {
+      if (
+        selectorBlock.startsWith("@media") ||
+        selectorBlock.startsWith("@supports") ||
+        selectorBlock.startsWith("@layer") ||
+        selectorBlock.startsWith("@container") ||
+        selectorBlock.startsWith("@scope")
+      ) {
+        if (hasDescendantSvgAbsoluteTrap(body)) return true;
+      }
+      continue;
+    }
+
+    let positionsAbsolutely = false;
+    let hasInset = false;
+    let hasFullDim = false;
+    let hasTop = false;
+    let hasLeft = false;
+    for (const decl of body.split(";")) {
+      const colon = decl.indexOf(":");
+      if (colon === -1) continue;
+      const prop = decl.slice(0, colon).trim();
+      const val = stripImportant(decl.slice(colon + 1));
+      if (prop === "position" && (val === "absolute" || val === "fixed")) {
+        positionsAbsolutely = true;
+      } else if (prop === "inset") {
+        hasInset = true;
+      } else if (
+        (prop === "width" || prop === "height") &&
+        (val === "100%" || val === "100vw" || val === "100vh" || val === "100dvh")
+      ) {
+        hasFullDim = true;
+      } else if (prop === "top") {
+        hasTop = true;
+      } else if (prop === "left") {
+        hasLeft = true;
+      }
+    }
+    if (!positionsAbsolutely) continue;
+    const isBackdropSized = hasInset || hasFullDim || (hasTop && hasLeft);
+
+    for (const rawSel of selectorBlock.split(",")) {
+      const sel = rawSel.trim();
+      if (sel === "svg") return true;
+      if (isBackdropSized && sel.length >= 4 && sel.endsWith("svg")) {
+        const beforeSvg = sel.slice(0, -3);
+        if (/\s$/.test(beforeSvg)) {
+          const trimmedParent = beforeSvg.trimEnd();
+          if (
+            trimmedParent.length > 0 &&
+            !trimmedParent.endsWith(">") &&
+            !trimmedParent.endsWith("+") &&
+            !trimmedParent.endsWith("~")
+          ) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
 const FORBIDDEN_MEDIA_TAGS = new Set(["video", "audio", "source", "object", "embed"]);
 
 const API_RULES: Array<{
@@ -350,6 +451,7 @@ export function lintGfxHtml(html: string): GfxLintIssue[] {
 
   let hasCssImport = false;
   let hasExtCssUrl = false;
+  let hasDescendantSvgAbs = false;
   for (const rawCss of styleSources) {
     const css = stripCssComments(rawCss);
     if (!hasCssImport && CSS_IMPORT_RE.test(css)) {
@@ -362,6 +464,9 @@ export function lintGfxHtml(html: string): GfxLintIssue[] {
           break;
         }
       }
+    }
+    if (!hasDescendantSvgAbs && hasDescendantSvgAbsoluteTrap(css)) {
+      hasDescendantSvgAbs = true;
     }
   }
 
@@ -450,7 +555,16 @@ export function lintGfxHtml(html: string): GfxLintIssue[] {
     });
   }
 
-  const hasSvgTag = tags.some((t) => t.name === "svg");
+  const svgTagCount = tags.filter((t) => t.name === "svg").length;
+  const hasSvgTag = svgTagCount > 0;
+  if (svgTagCount >= 2 && hasDescendantSvgAbs) {
+    issues.push({
+      code: "descendant-svg-absolute",
+      severity: "warning",
+      message:
+        "Descendant CSS selector targeting 'svg' with position:absolute/fixed can capture nested icon <svg> elements; use a direct-child selector (e.g. '.funnel > svg') or an explicit class on the background <svg>.",
+    });
+  }
   if (
     hasSvgTag &&
     scriptSources.some(

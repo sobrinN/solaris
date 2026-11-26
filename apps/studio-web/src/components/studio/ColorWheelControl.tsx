@@ -70,8 +70,8 @@ export function ColorWheelControl({
   const py = ((Math.sqrt(3) / 2) * (value.g - value.b)) * 1.9;
   const mag = Math.hypot(px, py);
   const norm = mag > 1 ? 1 / mag : 1;
-  const dotX = px * norm * 18;
-  const dotY = py * norm * 18;
+  const dotX = px * norm * 21;
+  const dotY = py * norm * 21;
   const pctValue = Math.round(Math.min(1, mag) * 100);
 
   return (
@@ -175,22 +175,23 @@ export function ColorWheelControl({
           draggedRef.current = false;
         }}
         title="Drag to grade · Double-click to reset"
-        className="relative h-12 w-12 cursor-crosshair select-none rounded-full border border-areia/15 focus-visible:outline-2 focus-visible:outline-laranja-criacao xl:h-14 xl:w-14"
+        className="relative h-14 w-14 cursor-crosshair select-none rounded-full border border-areia/15 shadow-[inset_0_0_12px_rgba(0,0,0,0.85)] focus-visible:outline-2 focus-visible:outline-laranja-criacao xl:h-[62px] xl:w-[62px]"
         style={{
           background:
             "conic-gradient(from 90deg, #ff4d4d 0deg, #f7b733 60deg, #34d399 120deg, #38bdf8 180deg, #60a5fa 240deg, #a78bfa 300deg, #ff4d4d 360deg)",
-          opacity: 0.88,
         }}
       >
-        <div className="pointer-events-none absolute inset-2 rounded-full bg-void/72 backdrop-blur-[1px]" />
+        <div className="pointer-events-none absolute inset-[5px] rounded-full border border-areia/10 bg-void/88" />
+        <div className="pointer-events-none absolute top-1/2 right-2.5 left-2.5 h-px -translate-y-1/2 bg-areia/10" />
+        <div className="pointer-events-none absolute top-2.5 bottom-2.5 left-1/2 w-px -translate-x-1/2 bg-areia/10" />
         <div
-          className="pointer-events-none absolute top-1/2 left-1/2 h-2.5 w-2.5 rounded-full border border-areia bg-laranja-criacao shadow"
+          className="pointer-events-none absolute top-1/2 left-1/2 h-2.5 w-2.5 rounded-full border border-areia bg-laranja-criacao shadow-[0_0_8px_rgba(240,90,0,0.85)]"
           style={{
             transform: `translate(calc(-50% + ${dotX.toFixed(1)}px), calc(-50% + ${dotY.toFixed(1)}px))`,
           }}
         />
       </div>
-      <span className="text-[10px] font-medium tracking-[0.1em] text-areia/65">
+      <span className="text-[9px] font-semibold tracking-[0.14em] text-areia/65">
         {label}
       </span>
     </div>

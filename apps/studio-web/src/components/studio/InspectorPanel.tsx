@@ -339,15 +339,30 @@ export function InspectorPanel({
   }
 
   const activeTab = inspectorTab === "clip" && !hasClipControls ? "color" : inspectorTab;
+  const isGradeModified =
+    Math.abs(grade.temp) > 0.005 ||
+    Math.abs(grade.tint) > 0.005 ||
+    Math.abs(grade.contrast - 1) > 0.005 ||
+    Math.abs(grade.saturation - 1) > 0.005 ||
+    Math.abs(grade.exposure) > 0.005 ||
+    Math.abs(grade.lift.r) > 0.005 ||
+    Math.abs(grade.lift.g) > 0.005 ||
+    Math.abs(grade.lift.b) > 0.005 ||
+    Math.abs(grade.gamma.r) > 0.005 ||
+    Math.abs(grade.gamma.g) > 0.005 ||
+    Math.abs(grade.gamma.b) > 0.005 ||
+    Math.abs(grade.gain.r) > 0.005 ||
+    Math.abs(grade.gain.g) > 0.005 ||
+    Math.abs(grade.gain.b) > 0.005;
 
   return (
-    <aside className="flex h-full flex-col gap-3 overflow-y-auto rounded-2xl border border-areia/10 bg-carbono/70 p-3 text-xs">
+    <aside className="solaris-scroll flex h-full flex-col gap-2.5 overflow-y-auto rounded-xl border border-areia/[0.08] bg-carbono/65 p-2.5 text-xs shadow-[inset_0_1px_0_rgba(247,245,239,0.04)]">
       {/* Pro Segmented Inspector Tabs */}
-      <div className="flex items-center justify-between gap-2 border-b border-areia/10 pb-2">
+      <div className="flex items-center justify-between gap-2 border-b border-areia/[0.08] pb-2">
         <div
           role="tablist"
           aria-label="Inspector sections"
-          className="flex items-center gap-0.5 rounded-full border border-areia/10 bg-void/70 p-0.5 text-[10px]"
+          className="flex items-center gap-0.5 rounded-full border border-areia/10 bg-void/75 p-0.5 text-[10px]"
         >
           <button
             type="button"
@@ -392,13 +407,11 @@ export function InspectorPanel({
             </button>
           )}
         </div>
-        <span className="truncate text-[10px] font-medium text-areia/45">
-          {activeTab === "color"
-            ? gradeTargetLabel
-            : activeTab === "clip" && selectedClip
-              ? selectedClip.clip.label
-              : "Word-sync"}
-        </span>
+        {activeTab !== "color" && (
+          <span className="truncate text-[10px] font-medium text-areia/45">
+            {activeTab === "clip" && selectedClip ? selectedClip.clip.label : "Word-sync"}
+          </span>
+        )}
       </div>
 
       {activeTab === "clip" && (
@@ -603,7 +616,7 @@ export function InspectorPanel({
                       commitTransform(effectiveTransform);
                     }
                   }}
-                  className="h-1 w-full cursor-pointer accent-laranja-criacao"
+                  className="solaris-slider w-full cursor-pointer"
                 />
               </label>
             ))}
@@ -679,7 +692,7 @@ export function InspectorPanel({
                       commitAudio(effectiveAudio);
                     }
                   }}
-                  className="h-1 flex-1 cursor-pointer accent-amarelo-ideias"
+                  className="solaris-slider solaris-slider--gold flex-1 cursor-pointer"
                 />
                 <span className="w-10 text-right tabular-nums text-areia/80">
                   {effectiveAudio[field].toFixed(1)}
@@ -696,23 +709,48 @@ export function InspectorPanel({
       {/* Interactive 3-Way Color Wheels + Sliders */}
       <div
         data-cursor-anchor="color.inspector"
-        className={activeTab === "color" ? "space-y-3" : "hidden"}
+        className={activeTab === "color" ? "space-y-2.5" : "hidden"}
       >
-        <div className="flex items-center justify-between gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
+        <div className="flex items-center justify-between gap-1.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-areia/60">
           <span>Master Wheels</span>
-          <span
-            className={`truncate rounded-full px-2 py-0.5 text-[10px] font-semibold normal-case tracking-normal ${
-              gradeTargetLabel.startsWith("FX")
-                ? "border border-track-fx/45 bg-track-fx/15 text-areia"
-                : "text-amarelo-ideias/80"
-            }`}
-            title={`Color controls currently target ${gradeTargetLabel}`}
-          >
-            {gradeTargetLabel}
-          </span>
+          <div className="flex items-center gap-1.5">
+            {isGradeModified && (
+              <button
+                type="button"
+                onClick={() => {
+                  const resetGrade = {
+                    ...grade,
+                    lift: { r: 0, g: 0, b: 0 },
+                    gamma: { r: 0, g: 0, b: 0 },
+                    gain: { r: 0, g: 0, b: 0 },
+                    temp: 0,
+                    tint: 0,
+                    contrast: 1,
+                    saturation: 1,
+                    exposure: 0,
+                  };
+                  onPreviewGrade(resetGrade);
+                  onCommitGrade(resetGrade);
+                }}
+                className="text-[10px] font-medium normal-case tracking-normal text-areia/70 hover:text-amarelo-ideias"
+              >
+                Reset
+              </button>
+            )}
+            <span
+              className={`truncate rounded-full px-2 py-0.5 text-[9px] font-semibold normal-case tracking-normal ${
+                gradeTargetLabel.startsWith("FX")
+                  ? "border border-track-fx/45 bg-track-fx/15 text-areia"
+                  : "border border-amarelo-ideias/25 bg-amarelo-ideias/10 text-amarelo-ideias"
+              }`}
+              title={`Color controls currently target ${gradeTargetLabel}`}
+            >
+              {gradeTargetLabel}
+            </span>
+          </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-1.5 text-center">
+        <div className="grid grid-cols-3 gap-1.5 rounded-lg border border-areia/[0.07] bg-void/70 px-1.5 py-2.5 text-center">
           <ColorWheelControl
             label="LIFT"
             value={grade.lift}
@@ -733,7 +771,7 @@ export function InspectorPanel({
           />
         </div>
 
-        <div className="space-y-2 pt-1">
+        <div className="space-y-2 rounded-lg border border-areia/[0.07] bg-void/55 p-2.5">
           {(
             [
               ["temp", "Temp", -1, 1, 0.02],
@@ -744,7 +782,7 @@ export function InspectorPanel({
             ] as const
           ).map(([field, label, min, max, step]) => (
             <label key={field} className="flex items-center gap-2 text-[11px]">
-              <span className="w-16 text-areia/65">{label}</span>
+              <span className="w-16 text-[10px] text-areia/65">{label}</span>
               <input
                 type="range"
                 min={min}
@@ -770,7 +808,7 @@ export function InspectorPanel({
                     [field]: parseFloat(e.currentTarget.value),
                   });
                 }}
-                className="h-1 flex-1 cursor-pointer accent-laranja-criacao"
+                className="solaris-slider flex-1 cursor-pointer"
               />
               <span className="w-9 text-right tabular-nums text-[10px] text-areia/75">
                 {grade[field].toFixed(2)}
@@ -780,7 +818,7 @@ export function InspectorPanel({
 
           {hasBrandLut && (
             <label className="flex items-center gap-2 text-[11px]">
-              <span className="w-16 text-amarelo-ideias/85">LUT Mix</span>
+              <span className="w-16 text-[10px] text-amarelo-ideias/85">LUT Mix</span>
               <input
                 type="range"
                 min={0}
@@ -806,7 +844,7 @@ export function InspectorPanel({
                     lut_intensity: parseFloat(e.currentTarget.value),
                   });
                 }}
-                className="h-1 flex-1 cursor-pointer accent-amarelo-ideias"
+                className="solaris-slider solaris-slider--gold flex-1 cursor-pointer"
               />
               <span className="w-9 text-right tabular-nums text-[10px] text-amarelo-ideias">
                 {Math.round(grade.lut_intensity * 100)}%
@@ -847,12 +885,12 @@ export function InspectorPanel({
       </div>
 
       {/* Swarm Telemetry */}
-      <div className="mt-auto space-y-2 border-t border-areia/10 pt-3">
-        <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
+      <div className="mt-auto space-y-1.5 border-t border-areia/[0.08] pt-2.5">
+        <div className="flex items-center justify-between text-[9px] font-semibold uppercase tracking-[0.14em] text-areia/55">
           <span>Swarm Roles</span>
-          <span className="tabular-nums text-amarelo-ideias">6 roles</span>
+          <span className="tabular-nums text-amarelo-ideias/85">6 roles</span>
         </div>
-        <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[10px]">
+        <div className="grid grid-cols-2 gap-x-2.5 gap-y-1.5 text-[10px]">
           {[
             ["caps", "bg-track-t1"],
             ["b_roll", "bg-track-v2"],
@@ -862,16 +900,22 @@ export function InspectorPanel({
             ["mix", "bg-track-a1"],
           ].map(([role, colorClass]) => {
             const count = swarmRoleCounts[role] ?? 0;
-            const widthPct = count === 0 ? 0 : Math.min(100, 22 + count * 18);
+            const widthPct = count === 0 ? 0 : Math.min(100, 24 + count * 18);
             return (
               <div key={role} className="flex items-center gap-1.5">
-                <span className="w-9 text-areia/70">{role}</span>
-                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-grafite">
+                <span
+                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${count > 0 ? colorClass : "bg-areia/20"}`}
+                />
+                <span className="w-9 truncate text-areia/70">{role}</span>
+                <div className="h-1 flex-1 overflow-hidden rounded-full bg-grafite">
                   <div
                     className={`h-full rounded-full ${colorClass}`}
                     style={{ width: `${widthPct}%` }}
                   />
                 </div>
+                <span className="w-3 text-right tabular-nums text-[9px] text-areia/60">
+                  {count}
+                </span>
               </div>
             );
           })}

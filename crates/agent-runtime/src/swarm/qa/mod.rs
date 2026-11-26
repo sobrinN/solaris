@@ -2,6 +2,7 @@ mod checks;
 mod repair;
 mod vision;
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use chrono::Utc;
@@ -180,55 +181,119 @@ pub async fn run_qa_pass_with_options(
         vision_model,
         options.director_supports_reasoning,
         &project,
+        None,
         cancel,
         &mut checks,
     )
     .await;
+    let mut total_frames_inspected = vision_res.frames_inspected;
 
     // 6. Closed-loop visual auto-repair: when Enhance/auto_fix is enabled and Vision QA
-    // identified fixable G1 clips, patch their HTML in place and re-verify once.
+    // identified fixable G1 clips, patch their HTML in place and re-verify ONLY the repaired
+    // clips (up to 2 rounds: round 1 fixes all reported defects; round 2 retries ONLY remaining
+    // critical "issue" clips with an escalated structural-fix prompt).
+    const MAX_VISUAL_REPAIR_ROUNDS: usize = 2;
+    let mut repaired_clip_ids: HashSet<String> = HashSet::new();
     if auto_fix
         && !cancel.is_cancelled()
-        && !vision_res.clip_fixes.is_empty()
         && let (Some(client), Some(vmodel)) = (openrouter, vision_model)
         && client.is_configured()
     {
-        let repaired = repair_gfx_clips_from_vision(
-            backend,
-            client,
-            vmodel,
-            options.director_supports_reasoning,
-            &project,
-            brand.as_ref(),
-            &vision_res.clip_fixes,
-            &vision_res.captured_by_clip,
-            cancel,
-            ops_counter,
-            &mut auto_fixes_applied,
-            &mut checks,
-        )
-        .await;
+        for repair_round in 1..=MAX_VISUAL_REPAIR_ROUNDS {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let active_fixes = if repair_round == 1 {
+                vision_res.clip_fixes.clone()
+            } else {
+                repair::filter_remaining_issue_fixes(&vision_res.clip_fixes)
+            };
+            if active_fixes.is_empty() {
+                break;
+            }
 
-        if repaired > 0
-            && !cancel.is_cancelled()
-            && let Ok(updated) = backend.get_project(project_id).await
-        {
+            let round_repaired_ids = repair_gfx_clips_from_vision(
+                backend,
+                client,
+                vmodel,
+                options.director_supports_reasoning,
+                &project,
+                brand.as_ref(),
+                &active_fixes,
+                &vision_res.captured_by_clip,
+                repair_round,
+                cancel,
+                ops_counter,
+                &mut repaired_clip_ids,
+                &mut auto_fixes_applied,
+                &mut checks,
+            )
+            .await;
+
+            if round_repaired_ids.is_empty() || cancel.is_cancelled() {
+                break;
+            }
+            let Ok(updated) = backend.get_project(project_id).await else {
+                break;
+            };
             project = updated;
-            checks.retain(|c| {
-                !c.id.starts_with("vision-issue-")
-                    && !c.id.starts_with("vision-warn-")
-                    && c.id != "visual-frame-capture"
-            });
-            vision_res = inspect_playback_frames(
+
+            let round_set: HashSet<String> = round_repaired_ids.into_iter().collect();
+            let mut verify_checks = Vec::new();
+            let verified = inspect_playback_frames(
                 backend,
                 openrouter,
                 vision_model,
                 options.director_supports_reasoning,
                 &project,
+                Some(&round_set),
                 cancel,
-                &mut checks,
+                &mut verify_checks,
             )
             .await;
+
+            total_frames_inspected = total_frames_inspected.max(verified.frames_inspected);
+            for (cid, b64) in verified.captured_by_clip {
+                vision_res.captured_by_clip.insert(cid, b64);
+            }
+
+            let mut untouched_fixes = Vec::new();
+            let mut seen_untouched: HashSet<(String, String)> = HashSet::new();
+            for fix in vision_res.clip_fixes {
+                let cid = fix.clip_id.trim().to_string();
+                if !round_set.contains(&cid)
+                    && seen_untouched.insert((cid, fix.defect.trim().to_string()))
+                {
+                    untouched_fixes.push(fix);
+                }
+            }
+
+            checks.retain(|c| {
+                !c.id.starts_with("vision-issue-")
+                    && !c.id.starts_with("vision-warn-")
+                    && !c.id.starts_with("vision-unresolved-")
+            });
+            for (idx, f) in untouched_fixes.iter().enumerate() {
+                checks.push(QaCheckItem {
+                    id: format!("vision-unresolved-{idx}"),
+                    category: "visual".to_string(),
+                    severity: if f.severity.eq_ignore_ascii_case("issue") {
+                        QaSeverity::Issue
+                    } else {
+                        QaSeverity::Warning
+                    },
+                    message: format!("Clip '{}': {}", f.clip_id, f.defect),
+                    time_sec: None,
+                    auto_fixed: false,
+                });
+            }
+            checks.extend(verify_checks);
+
+            untouched_fixes.extend(verified.clip_fixes);
+            vision_res.clip_fixes = untouched_fixes;
+            if verified.multimodal_summary.is_some() {
+                vision_res.multimodal_summary = verified.multimodal_summary;
+            }
         }
     }
 
@@ -245,7 +310,7 @@ pub async fn run_qa_pass_with_options(
 
     finalize_report(
         checks,
-        vision_res.frames_inspected,
+        total_frames_inspected,
         auto_fixes_applied,
         vision_res.multimodal_summary,
     )

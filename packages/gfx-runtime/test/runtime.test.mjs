@@ -206,3 +206,43 @@ test("extractPropFields handles null props, null values falling back to defaults
   assert.equal(parsed.find((f) => f.key === "flagTrue")?.value, true);
   assert.equal(parsed.find((f) => f.key === "flagNull")?.value, true);
 });
+
+test("lintGfxHtml warns on descendant svg position:absolute trap and allows direct-child selector", () => {
+  const trapped =
+    '<style>.funnel svg { position: absolute; inset: 0; width: 100%; height: 100%; }</style>' +
+    '<div class="clip funnel" data-start="0" data-duration="4" style="color:var(--brand-ink)">' +
+    '<svg viewBox="0 0 100 100"></svg><div class="ic"><svg viewBox="0 0 24 24"></svg></div></div>';
+  const issues = lintGfxHtml(trapped);
+  assert.ok(issues.some((i) => i.severity === "warning" && i.code === "descendant-svg-absolute"));
+
+  const bareSvg =
+    '<style>svg { position: absolute; top: 0; }</style>' +
+    '<div class="clip" data-start="0" data-duration="4" style="color:var(--brand-ink)">' +
+    '<svg viewBox="0 0 100 100"></svg><svg viewBox="0 0 24 24"></svg></div>';
+  assert.ok(
+    lintGfxHtml(bareSvg).some((i) => i.severity === "warning" && i.code === "descendant-svg-absolute"),
+  );
+
+  const mediaImportant =
+    '<style>@media (min-width: 1px) { .funnel svg { position: absolute !important; inset: 0; } } .other { color: #fff; }</style>' +
+    '<div class="clip funnel" data-start="0" data-duration="4" style="color:var(--brand-ink)">' +
+    '<svg viewBox="0 0 100 100"></svg><div class="ic"><svg viewBox="0 0 24 24"></svg></div></div>';
+  assert.ok(
+    lintGfxHtml(mediaImportant).some(
+      (i) => i.severity === "warning" && i.code === "descendant-svg-absolute",
+    ),
+  );
+
+  const smallIcon =
+    '<style>.badge svg { position: absolute; width: 14px; height: 14px; }</style>' +
+    '<div class="clip" data-start="0" data-duration="4" style="color:var(--brand-ink)">' +
+    '<svg viewBox="0 0 100 100"></svg><div class="badge"><svg viewBox="0 0 24 24"></svg></div></div>';
+  assert.deepEqual(lintGfxHtml(smallIcon), []);
+
+  const scoped =
+    '<style>.funnel > svg { position: absolute; inset: 0; width: 100%; height: 100%; }</style>' +
+    '<div class="clip funnel" data-start="0" data-duration="4" style="color:var(--brand-ink)">' +
+    '<svg viewBox="0 0 100 100"></svg><div class="ic"><svg viewBox="0 0 24 24"></svg></div></div>';
+  assert.deepEqual(lintGfxHtml(scoped), []);
+});
+

@@ -225,7 +225,7 @@ export function LogsDrawer({ open, logs, onClear, onClose }: LogsDrawerProps) {
           </div>
         )}
 
-        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+        <div className="solaris-scroll min-h-0 flex-1 overflow-y-auto p-4">
           <DiagnosticLogList
             logs={filtered}
             emptyMessage="No diagnostic logs match the current filter."

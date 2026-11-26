@@ -211,13 +211,13 @@ export function ProjectManagerPopover({
         aria-expanded={open}
         aria-haspopup="dialog"
         title={`Switch or manage projects (${currentProject.name})`}
-        className={`flex h-8 max-w-[280px] items-center gap-2 rounded-full border px-3 text-xs transition-colors motion-reduce:transition-none ${
+        className={`flex h-7 max-w-[280px] items-center gap-1.5 rounded-full border px-2.5 text-[11px] transition-colors motion-reduce:transition-none ${
           open
             ? "border-laranja-criacao/65 bg-accent text-areia"
-            : "border-areia/14 bg-void/70 text-areia/90 hover:border-areia/28 hover:bg-accent"
+            : "border-areia/10 bg-void/70 text-areia/90 hover:border-areia/28 hover:bg-accent"
         }`}
       >
-        <FolderKanban className="h-3.5 w-3.5 shrink-0 text-laranja-criacao" />
+        <FolderKanban className="h-3 w-3 shrink-0 text-laranja-criacao" />
         <span className="truncate font-medium">{currentProject.name}</span>
         <span className="hidden shrink-0 rounded bg-grafite/90 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-amarelo-ideias sm:inline">
           {currentAspectLabel}
@@ -226,7 +226,7 @@ export function ProjectManagerPopover({
           r{currentProject.revision}
         </span>
         <ChevronDown
-          className={`h-3.5 w-3.5 shrink-0 text-areia/55 transition-transform duration-150 motion-reduce:transition-none ${
+          className={`h-3 w-3 shrink-0 text-areia/55 transition-transform duration-150 motion-reduce:transition-none ${
             open ? "rotate-180 text-areia" : ""
           }`}
         />

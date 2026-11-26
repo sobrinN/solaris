@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::AtomicU32;
 
 use chrono::Utc;
@@ -37,6 +37,14 @@ struct ClipRepairPlan {
     current_html: String,
     defects: Vec<VisionClipFix>,
     frame_png_b64: Option<String>,
+}
+
+pub(super) fn filter_remaining_issue_fixes(clip_fixes: &[VisionClipFix]) -> Vec<VisionClipFix> {
+    clip_fixes
+        .iter()
+        .filter(|f| f.severity.eq_ignore_ascii_case("issue") && !f.clip_id.trim().is_empty())
+        .cloned()
+        .collect()
 }
 
 fn group_actionable_fixes(
@@ -171,6 +179,7 @@ async fn request_repaired_html(
     project: &Project,
     brand: Option<&BrandPlaybook>,
     plan: &ClipRepairPlan,
+    repair_round: usize,
     cancel: &CancellationToken,
 ) -> Result<String, String> {
     let is_portrait = project.canvas.height > project.canvas.width;
@@ -204,6 +213,8 @@ async fn request_repaired_html(
          RULES:\n\
          - Fix every reported overlap, clipped label, edge cutoff, layout imbalance, bottom void, empty node ring, low-contrast disclaimer, or redundant copy.\n\
          - {layout_band_rule} When fixing a bottom-half void without T1 captions, switch the stage container to a 3-zone CSS Grid (`display:grid;grid-template-rows:auto 1fr auto;align-items:center;padding:7vh 5vw 9vh;box-sizing:border-box;`) so Header, Hero (`1fr`), and Bottom Callout/Legend fill the frame evenly.\n\
+         - CSS SCOPING FOR BACKGROUND SVGs (CRITICAL): NEVER write a descendant selector like `.funnel svg {{ position: absolute; inset: 0; width: 100%; height: 100%; }}` when nested icon `<svg>` elements exist inside that container — GSAP transforms make child cards containing blocks and stretch every icon `<svg>` directly over the card text! ALWAYS target backdrop SVGs with a direct-child selector (`.funnel > svg`) or an explicit class (`.funnel-bg`).\n\
+         - FLOW-POSITIONED BADGES & SEALS: NEVER hang a circular seal or badge off a giant headline with `position: absolute` and negative `right`/`top` offsets in 9:16 portrait — place badges in normal Flex/Grid flow (above the headline in the eyebrow row or inline with explicit `gap`) so headline-badge collision is impossible. Keep decorative rings/radars behind foreground pills subtle (`opacity <= 0.35`) and remove high-contrast accent dots that touch pill/card edges.\n\
          - SVG & DIAGRAM ANTI-COLLISION & CENTERING: NEVER leave a cyan/accent dot or circle sitting on top of text (like a central panel title). Move multi-word labels, risk cards, or callouts into clean HTML CSS Flex/Grid containers rather than cramped `<text x y>` over dense SVG paths. Keep short SVG labels cleanly outside node radii (`>= 16px` clearance), center hero diagrams symmetrically at `(W/2, H/2)`, and keep `>= 32px` inner padding inside enclosing shields/rings so labels never cross outlines. Whenever GSAP animates `rotation` or `scale` on an SVG element, ALWAYS specify explicit `svgOrigin: \"<cx> <cy>\"` matching the `viewBox` center so rotating globes/rings never swing off-center. Populate any empty placeholder node circle with a crisp linear icon or solid glowing core dot.\n\
          - REMOVE any unsolicited scene/step counter badges (`01 / 06`, `02/06`, `ETAPA 02`, `PASSO 1`, `STEP 2`, `Scene 1/6`) and REMOVE any useless bottom loading/progress bars unless the defect explicitly asks to keep them.\n\
          - Keep at least `16px` (`3vw`) padding inside cards/viewport so zero characters clip, keep secondary footers/disclaimers `>= 13px` at `>= 0.70` ink opacity, and never let absolute-positioned badges overlap captions or headlines.\n\
@@ -225,17 +236,26 @@ async fn request_repaired_html(
         })
         .collect();
 
-    let payload = json!({
+    let mut payload_obj = json!({
         "clip_id": plan.clip.id,
         "label": plan.clip.label,
         "duration_sec": plan.clip.duration_sec,
         "canvas": project.canvas,
         "has_active_captions": has_captions,
         "brand_tokens": brand.map(|b| &b.tokens),
+        "repair_round": repair_round,
         "defects_to_fix": defects_json,
         "current_inline_html": plan.current_html,
-    })
-    .to_string();
+    });
+    if repair_round >= 2
+        && let Some(obj) = payload_obj.as_object_mut()
+    {
+        obj.insert(
+            "escalation_note".to_string(),
+            json!("RETRY ROUND 2 (CRITICAL): A previous repair pass STILL left the defect(s) shown in the attached screenshot. Do NOT make tiny pixel nudges (such as shifting right:-14vw to right:-17vw). Apply a structural CSS/HTML fix: convert any colliding position:absolute badge/seal into normal CSS Flex/Grid flow, replace any descendant .container svg backdrop selector with .container > svg or an explicit class, and remove or fade decorative SVG dots that touch card/pill edges."),
+        );
+    }
+    let payload = payload_obj.to_string();
 
     let mut parts = vec![ContentPart::text(payload)];
     if let Some(ref b64) = plan.frame_png_b64 {
@@ -251,7 +271,7 @@ async fn request_repaired_html(
         model: req_model,
         models: req_models,
         messages: vec![
-            ChatMessage::system(system_prompt),
+            ChatMessage::system_cached(system_prompt),
             ChatMessage::user_parts(parts),
         ],
         session_id: Some(format!("solaris-qa-repair-{}-{}", project.id, plan.clip.id)),
@@ -292,18 +312,20 @@ pub(super) async fn repair_gfx_clips_from_vision(
     brand: Option<&BrandPlaybook>,
     clip_fixes: &[VisionClipFix],
     captured_by_clip: &HashMap<String, String>,
+    repair_round: usize,
     cancel: &CancellationToken,
     ops_counter: Option<&AtomicU32>,
+    already_repaired: &mut HashSet<String>,
     auto_fixes_applied: &mut u32,
     checks: &mut Vec<QaCheckItem>,
-) -> u32 {
+) -> Vec<String> {
     if cancel.is_cancelled() || !openrouter.is_configured() || clip_fixes.is_empty() {
-        return 0;
+        return Vec::new();
     }
 
     let plans = group_actionable_fixes(project, clip_fixes, captured_by_clip);
     if plans.is_empty() {
-        return 0;
+        return Vec::new();
     }
 
     let _ = backend
@@ -312,7 +334,10 @@ pub(super) async fn repair_gfx_clips_from_vision(
             "director-qa",
             AgentRole::Director,
             "timeline.track.g1",
-            &format!("enhancing {} GFX scene(s)", plans.len()),
+            &format!(
+                "enhancing {} GFX scene(s) (pass {repair_round})",
+                plans.len()
+            ),
         )
         .await;
 
@@ -326,6 +351,7 @@ pub(super) async fn repair_gfx_clips_from_vision(
             project,
             brand,
             plan,
+            repair_round,
             cancel,
         )
     });
@@ -362,7 +388,17 @@ pub(super) async fn repair_gfx_clips_from_vision(
             continue;
         }
         let lint = lint_gfx_html(&new_html);
-        if !lint.valid {
+        if !lint.valid || lint.descendant_svg_trap {
+            let reason_details = if !lint.valid {
+                lint.errors.join("; ")
+            } else {
+                lint.warnings
+                    .iter()
+                    .filter(|w| w.contains("Descendant CSS selector"))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            };
             backend.emit_log(LogEntry {
                 id: uuid::Uuid::new_v4().to_string(),
                 timestamp: Utc::now(),
@@ -375,7 +411,7 @@ pub(super) async fn repair_gfx_clips_from_vision(
                     "Skipped Vision QA repair for '{}' ({}): repaired HTML failed lint",
                     plan.clip.label, plan.clip.id
                 ),
-                details: Some(lint.errors.join("; ")),
+                details: Some(reason_details),
             });
             continue;
         }
@@ -406,7 +442,7 @@ pub(super) async fn repair_gfx_clips_from_vision(
     }
 
     if ready_plans.is_empty() || cancel.is_cancelled() {
-        return 0;
+        return Vec::new();
     }
 
     let summary = if ready_plans.len() == 1 {
@@ -429,24 +465,32 @@ pub(super) async fn repair_gfx_clips_from_vision(
     )
     .await
     {
-        return 0;
+        return Vec::new();
     }
 
-    let repaired_count = ready_plans.len() as u32;
-    *auto_fixes_applied += repaired_count;
+    let mut repaired_ids = Vec::with_capacity(ready_plans.len());
     for plan in ready_plans {
+        if already_repaired.insert(plan.clip.id.clone()) {
+            *auto_fixes_applied += 1;
+        }
+        repaired_ids.push(plan.clip.id.clone());
         let first_defect = plan
             .defects
             .first()
             .map(|d| d.defect.trim())
             .filter(|s| !s.is_empty())
             .unwrap_or("visual layout defect");
+        let pass_suffix = if repair_round > 1 {
+            format!(" (pass {repair_round})")
+        } else {
+            String::new()
+        };
         checks.push(QaCheckItem {
-            id: format!("vision-repaired-{}", plan.clip.id),
+            id: format!("vision-repaired-r{repair_round}-{}", plan.clip.id),
             category: "visual".to_string(),
             severity: QaSeverity::Fixed,
             message: format!(
-                "Auto-repaired GFX '{}' ({}): addressed '{}'.",
+                "Auto-repaired GFX '{}' ({}){pass_suffix}: addressed '{}'.",
                 plan.clip.label, plan.clip.id, first_defect
             ),
             time_sec: Some(plan.clip.start_sec),
@@ -461,14 +505,14 @@ pub(super) async fn repair_gfx_clips_from_vision(
             run_id: None,
             agent_id: Some("director-qa".to_string()),
             message: format!(
-                "Vision QA auto-repaired GFX '{}' ({})",
+                "Vision QA auto-repaired GFX '{}' ({}){pass_suffix}",
                 plan.clip.label, plan.clip.id
             ),
             details: Some(first_defect.to_string()),
         });
     }
 
-    repaired_count
+    repaired_ids
 }
 
 #[cfg(test)]
@@ -554,5 +598,10 @@ mod tests {
             "issue clip must be prioritized first"
         );
         assert_eq!(plans[1].clip.id, "s1");
+
+        let remaining_issues = filter_remaining_issue_fixes(&fixes);
+        assert_eq!(remaining_issues.len(), 2);
+        assert!(remaining_issues.iter().all(|f| f.severity == "issue"));
+        assert!(!remaining_issues.iter().any(|f| f.clip_id == "s1"));
     }
 }

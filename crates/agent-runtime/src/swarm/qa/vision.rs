@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 use serde::Deserialize;
@@ -184,6 +184,44 @@ pub(super) fn compute_project_sample_timestamps(
     compute_sample_timestamps(span_start, span_end)
 }
 
+pub(super) fn compute_clip_sample_timestamps(
+    project: &Project,
+    clip_ids: &HashSet<String>,
+) -> Vec<f64> {
+    if clip_ids.is_empty() {
+        return Vec::new();
+    }
+    let Some(g1) = project.tracks.iter().find(|t| t.id == "g1" && !t.muted) else {
+        return Vec::new();
+    };
+    let mut scenes: Vec<(f64, f64)> = g1
+        .clips
+        .iter()
+        .filter(|c| {
+            clip_ids.contains(&c.id)
+                && c.start_sec.is_finite()
+                && c.duration_sec.is_finite()
+                && c.duration_sec > 0.05
+        })
+        .map(|c| (c.start_sec.max(0.0), c.duration_sec))
+        .collect();
+    scenes.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let mut sample_times = Vec::with_capacity(scenes.len());
+    for (s, dur) in scenes {
+        let settled_offset = if dur >= 1.6 {
+            (dur * 0.50).clamp(0.95, dur - 0.55)
+        } else {
+            dur * 0.55
+        };
+        let t = (s + settled_offset).clamp(s, (s + dur - 0.02).max(s));
+        if sample_times.last().is_none_or(|prev| t > *prev + 0.02) {
+            sample_times.push(t);
+        }
+    }
+    sample_times
+}
+
 fn active_g1_clip_at(project: &Project, ts: f64) -> Option<(String, String)> {
     let g1 = project.tracks.iter().find(|t| t.id == "g1" && !t.muted)?;
     g1.clips
@@ -199,21 +237,26 @@ pub(super) async fn inspect_playback_frames(
     vision_model: Option<(&str, &[String])>,
     director_supports_reasoning: bool,
     project: &Project,
+    only_clip_ids: Option<&HashSet<String>>,
     cancel: &CancellationToken,
     checks: &mut Vec<QaCheckItem>,
 ) -> VisionQaInspection {
-    let Some((span_start, span_end)) = active_span_for_tracks(project, &["v1", "v2"])
-        .or_else(|| active_span_for_tracks(project, &["g1"]))
-        .or_else(|| active_span_for_tracks(project, &["t1"]))
-        .or_else(|| active_span_for_tracks(project, &[]))
-    else {
-        return VisionQaInspection::default();
-    };
     if cancel.is_cancelled() {
         return VisionQaInspection::default();
     }
 
-    let sample_times = compute_project_sample_timestamps(project, span_start, span_end);
+    let sample_times = if let Some(clip_ids) = only_clip_ids {
+        compute_clip_sample_timestamps(project, clip_ids)
+    } else {
+        let Some((span_start, span_end)) = active_span_for_tracks(project, &["v1", "v2"])
+            .or_else(|| active_span_for_tracks(project, &["g1"]))
+            .or_else(|| active_span_for_tracks(project, &["t1"]))
+            .or_else(|| active_span_for_tracks(project, &[]))
+        else {
+            return VisionQaInspection::default();
+        };
+        compute_project_sample_timestamps(project, span_start, span_end)
+    };
     if sample_times.is_empty() {
         return VisionQaInspection::default();
     }
@@ -260,16 +303,18 @@ pub(super) async fn inspect_playback_frames(
         return VisionQaInspection::default();
     }
 
-    checks.push(QaCheckItem {
-        id: "visual-frame-capture".to_string(),
-        category: "visual".to_string(),
-        severity: QaSeverity::Pass,
-        message: format!(
-            "Captured and inspected {frames_inspected} playback frame(s) across timeline scenes."
-        ),
-        time_sec: None,
-        auto_fixed: false,
-    });
+    if only_clip_ids.is_none() {
+        checks.push(QaCheckItem {
+            id: "visual-frame-capture".to_string(),
+            category: "visual".to_string(),
+            severity: QaSeverity::Pass,
+            message: format!(
+                "Captured and inspected {frames_inspected} playback frame(s) across timeline scenes."
+            ),
+            time_sec: None,
+            auto_fixed: false,
+        });
+    }
 
     let mut multimodal_summary = None;
     let mut clip_fixes = Vec::new();
@@ -542,5 +587,40 @@ pub(super) fn parse_vision_qa_detailed(
             auto_fixed: false,
         });
         (Some(snippet), out, Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use solaris_core_ir::{AspectPreset, AudioSettings, Clip, ClipKind, GfxInstance, Transform2D};
+
+    #[test]
+    fn compute_clip_sample_timestamps_samples_only_requested_clips_in_order() {
+        let mut proj = Project::new_default("targeted_sample", AspectPreset::Vertical9x16);
+        let g1 = proj.tracks.iter_mut().find(|t| t.id == "g1").unwrap();
+        for (id, start) in [("c3", 8.0), ("c1", 0.0), ("c2", 4.0)] {
+            g1.clips.push(Clip {
+                id: id.into(),
+                label: id.into(),
+                start_sec: start,
+                duration_sec: 4.0,
+                source_in_sec: 0.0,
+                transform: Transform2D::default(),
+                audio: AudioSettings::default(),
+                payload: ClipKind::Gfx {
+                    gfx: GfxInstance {
+                        asset_id: None,
+                        props: json!({}),
+                        inline_html: Some("<div/>".into()),
+                    },
+                },
+            });
+        }
+
+        let target: HashSet<String> = ["c3".to_string(), "c1".to_string()].into_iter().collect();
+        let times = compute_clip_sample_timestamps(&proj, &target);
+        assert_eq!(times, vec![2.0, 10.0]);
     }
 }

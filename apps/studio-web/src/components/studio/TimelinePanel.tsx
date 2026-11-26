@@ -73,6 +73,16 @@ const TRACK_STRIP_COLORS: Record<TrackKind, string> = {
   music: "bg-track-a2",
 };
 
+const TRACK_CLIP_TINTS: Record<TrackKind, string> = {
+  text: "bg-track-t1/[0.11] border-track-t1/30 hover:border-track-t1/55",
+  gfx: "bg-track-g1/[0.11] border-track-g1/30 hover:border-track-g1/55",
+  b_roll: "bg-track-v2/[0.11] border-track-v2/30 hover:border-track-v2/55",
+  a_roll: "bg-track-v1/[0.11] border-track-v1/30 hover:border-track-v1/55",
+  grade: "bg-track-fx/[0.12] border-track-fx/35 hover:border-track-fx/60",
+  voice: "bg-track-a1/[0.11] border-track-a1/30 hover:border-track-a1/55",
+  music: "bg-track-a2/[0.11] border-track-a2/30 hover:border-track-a2/55",
+};
+
 function formatTimecode(sec: number, fps: number): string {
   const clamped = Math.max(0, Number.isFinite(sec) ? sec : 0);
   const hours = Math.floor(clamped / 3600);
@@ -466,10 +476,10 @@ export function TimelinePanel({
   return (
     <section
       data-cursor-anchor="timeline"
-      className="flex flex-col rounded-2xl border border-areia/10 bg-carbono/75"
+      className="flex flex-col rounded-xl border border-areia/[0.08] bg-carbono/65 shadow-[inset_0_1px_0_rgba(247,245,239,0.04)]"
     >
       {/* Transport Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-areia/10 px-4 py-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-areia/[0.08] px-3 py-1.5">
         <div className="flex items-center gap-2">
           <button
             type="button"
@@ -827,9 +837,22 @@ export function TimelinePanel({
                 onPointerUp={finishLanePointerUp}
                 onPointerCancel={finishLanePointerUp}
                 className={`relative min-w-0 flex-1 cursor-pointer select-none transition-colors motion-reduce:transition-none ${
-                  dropHoverTrackId === track.id ? "bg-laranja-criacao/15" : "bg-void/40"
+                  dropHoverTrackId === track.id ? "bg-laranja-criacao/15" : "bg-void/45"
                 }`}
               >
+                {/* Vertical timecode gridlines */}
+                {rulerTicks.map((sec) => {
+                  if (sec === 0) return null;
+                  const pct = (sec / timelineSpan) * 100;
+                  return (
+                    <span
+                      key={sec}
+                      aria-hidden="true"
+                      className="pointer-events-none absolute top-0 bottom-0 w-px bg-areia/[0.045]"
+                      style={{ left: `${pct}%` }}
+                    />
+                  );
+                })}
                 {track.clips.map((clip) => {
                   const selected = selectedSet.has(clip.id);
                   const isSinglePreview =
@@ -893,14 +916,14 @@ export function TimelinePanel({
                         }
                       }}
                       title={`${clip.label} (${effectiveStart.toFixed(2)}s · ${effectiveDur.toFixed(2)}s)`}
-                      className={`group absolute top-1 bottom-1 overflow-hidden rounded-md border bg-grafite/85 px-2 py-0.5 text-left text-[10px] text-areia/90 shadow-sm transition-colors motion-reduce:transition-none ${
+                      className={`group absolute top-1 bottom-1 overflow-hidden rounded-md border px-2 py-0.5 text-left text-[10px] text-areia/95 shadow-sm transition-colors motion-reduce:transition-none ${
                         track.locked
                           ? "cursor-not-allowed opacity-75"
                           : "cursor-grab active:cursor-grabbing"
                       } ${
                         selected
-                          ? "border-amarelo-ideias ring-1 ring-laranja-criacao/60"
-                          : "border-areia/12 hover:border-areia/30"
+                          ? "border-amarelo-ideias bg-grafite/95 ring-1 ring-laranja-criacao/65"
+                          : TRACK_CLIP_TINTS[track.kind]
                       }`}
                       style={{
                         left: `${leftPct}%`,

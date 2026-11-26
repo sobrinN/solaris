@@ -1538,14 +1538,9 @@ pub async fn execute_tool(
                 next_gfx.props = deep_merge_json(&found.default_props, &next_gfx.props);
                 next_gfx.asset_id = Some(aid.to_string());
             }
+            let mut lint_advisory_warnings = Vec::new();
             if let Some(html) = inline_html {
-                let lint = lint_gfx_html(&html);
-                if !lint.valid {
-                    return Err(AgentError::ToolError(format!(
-                        "GFX HTML failed lint: {}",
-                        lint.errors.join("; ")
-                    )));
-                }
+                lint_advisory_warnings = validate_gfx_html_for_tool(&html)?;
                 next_gfx.inline_html = Some(html);
             }
             match args.get("props") {
@@ -1587,7 +1582,7 @@ pub async fn execute_tool(
                 )
                 .await?;
             Ok(ToolOutput {
-                text: res.summary.clone(),
+                text: format_gfx_tool_summary(&res.summary, &lint_advisory_warnings),
                 structured: serde_json::to_value(&res).unwrap_or_default(),
                 image_png_base64: None,
                 images_png_base64: Vec::new(),
@@ -1684,13 +1679,7 @@ pub async fn execute_tool(
                         .to_string(),
                 ));
             };
-            let lint = lint_gfx_html(html);
-            if !lint.valid {
-                return Err(AgentError::ToolError(format!(
-                    "GFX HTML failed lint: {}",
-                    lint.errors.join("; ")
-                )));
-            }
+            let lint_advisory_warnings = validate_gfx_html_for_tool(html)?;
 
             let (res, _) = backend
                 .apply_op(
@@ -1711,7 +1700,7 @@ pub async fn execute_tool(
                 )
                 .await?;
             Ok(ToolOutput {
-                text: res.summary.clone(),
+                text: format_gfx_tool_summary(&res.summary, &lint_advisory_warnings),
                 structured: serde_json::to_value(&res).unwrap_or_default(),
                 image_png_base64: None,
                 images_png_base64: Vec::new(),
@@ -1947,6 +1936,37 @@ pub async fn execute_tool(
             })
         }
         other => Err(AgentError::ToolError(format!("unknown tool '{other}'"))),
+    }
+}
+
+fn validate_gfx_html_for_tool(html: &str) -> Result<Vec<String>, AgentError> {
+    let lint = lint_gfx_html(html);
+    if !lint.valid || lint.descendant_svg_trap {
+        let mut reasons = lint.errors;
+        if lint.descendant_svg_trap {
+            reasons.extend(
+                lint.warnings
+                    .into_iter()
+                    .filter(|w| w.contains("Descendant CSS selector")),
+            );
+        }
+        return Err(AgentError::ToolError(format!(
+            "GFX HTML failed lint: {}",
+            reasons.join("; ")
+        )));
+    }
+    Ok(lint
+        .warnings
+        .into_iter()
+        .filter(|w| !w.contains("Brand Playbook CSS variables"))
+        .collect())
+}
+
+fn format_gfx_tool_summary(summary: &str, warnings: &[String]) -> String {
+    if warnings.is_empty() {
+        summary.to_string()
+    } else {
+        format!("{summary} (lint warnings: {})", warnings.join("; "))
     }
 }
 
@@ -2983,5 +3003,50 @@ mod tests {
             g1.clips.is_empty(),
             "rolled-back batch must leave g1 untouched"
         );
+    }
+
+    #[tokio::test]
+    async fn gfx_place_rejects_descendant_svg_trap_and_accepts_direct_child_selector() {
+        let project = Project::new_default("gfx_trap_tool_test", AspectPreset::Vertical9x16);
+        let pid = project.id.clone();
+        let backend = ExecMockBackend {
+            engine: RwLock::new(ProjectEngine::new(project)),
+            keyframes: Vec::new(),
+            assets: Vec::new(),
+        };
+
+        let trapped_html = r##"<style>.funnel svg { position: absolute; inset: 0; width: 100%; height: 100%; }</style><div class="clip funnel" data-start="0" data-duration="4" style="color:var(--brand-ink)"><svg viewBox="0 0 100 100"></svg><div class="ic"><svg viewBox="0 0 24 24"></svg></div></div>"##;
+        let err = execute_tool(
+            &backend,
+            "gfx.place",
+            json!({
+                "project_id": pid,
+                "clip_id": "g1-trapped",
+                "label": "Trapped",
+                "start_sec": 0.0,
+                "duration_sec": 4.0,
+                "inline_html": trapped_html,
+            }),
+            CommandMeta::default(),
+        )
+        .await;
+        assert!(err.is_err());
+
+        let scoped_html = r##"<style>.funnel > svg { position: absolute; inset: 0; width: 100%; height: 100%; }</style><div class="clip funnel" data-start="0" data-duration="4" style="color:var(--brand-ink)"><svg viewBox="0 0 100 100"></svg><div class="ic"><svg viewBox="0 0 24 24"></svg></div></div>"##;
+        let ok = execute_tool(
+            &backend,
+            "gfx.place",
+            json!({
+                "project_id": pid,
+                "clip_id": "g1-scoped",
+                "label": "Scoped",
+                "start_sec": 0.0,
+                "duration_sec": 4.0,
+                "inline_html": scoped_html,
+            }),
+            CommandMeta::default(),
+        )
+        .await;
+        assert!(ok.is_ok());
     }
 }

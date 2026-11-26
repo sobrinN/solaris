@@ -5,6 +5,8 @@ pub struct GfxLintReport {
     pub valid: bool,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
+    #[serde(skip)]
+    pub descendant_svg_trap: bool,
 }
 
 /// Matches JS regex `\w` (`[A-Za-z0-9_]`), intentionally excluding `$` so `$fetch()` matches `\bfetch\s*\(`.
@@ -253,6 +255,126 @@ fn css_has_external_url(css: &str) -> bool {
             return true;
         }
         i = cursor.min(len);
+    }
+    false
+}
+
+/// Finds the matching closing `}` for a `{` at `open_brace`, tracking nested braces.
+fn find_matching_brace(s: &str, open_brace: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut depth = 0usize;
+    let mut i = open_brace;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn strip_important(val: &str) -> &str {
+    let trimmed = val.trim();
+    if let Some(idx) = trimmed.rfind("!important")
+        && idx + "!important".len() == trimmed.len()
+    {
+        return trimmed[..idx].trim_end();
+    }
+    trimmed
+}
+
+/// Detects descendant CSS selectors like `.funnel svg { position: absolute; inset: 0; ... }`
+/// or bare `svg { position: absolute; ... }` (without a direct-child `>` combinator) that
+/// inadvertently capture nested icon `<svg>` elements when a scene contains multiple `<svg>` tags.
+fn css_has_descendant_svg_absolute_trap(css: &str) -> bool {
+    let lower = css.to_ascii_lowercase();
+    let mut cursor = 0usize;
+    while cursor < lower.len() {
+        let Some(open_rel) = lower[cursor..].find('{') else {
+            break;
+        };
+        let open = cursor + open_rel;
+        let prelude_segment = &lower[cursor..open];
+        if let Some(semi_rel) = prelude_segment.find(';') {
+            let semi = cursor + semi_rel;
+            if lower[cursor..semi].trim_start().starts_with('@') {
+                cursor = semi + 1;
+                continue;
+            }
+        }
+        let Some(close) = find_matching_brace(&lower, open) else {
+            break;
+        };
+        let selector_block = prelude_segment.trim();
+        let body = &lower[open + 1..close];
+        cursor = close + 1;
+
+        if selector_block.starts_with('@') {
+            if (selector_block.starts_with("@media")
+                || selector_block.starts_with("@supports")
+                || selector_block.starts_with("@layer")
+                || selector_block.starts_with("@container")
+                || selector_block.starts_with("@scope"))
+                && css_has_descendant_svg_absolute_trap(body)
+            {
+                return true;
+            }
+            continue;
+        }
+
+        let mut positions_absolutely = false;
+        let mut has_inset = false;
+        let mut has_full_dim = false;
+        let mut has_top = false;
+        let mut has_left = false;
+        for decl in body.split(';') {
+            let mut parts = decl.splitn(2, ':');
+            let prop = parts.next().map(str::trim).unwrap_or("");
+            let val = parts.next().map(strip_important).unwrap_or("");
+            match prop {
+                "position" if val == "absolute" || val == "fixed" => {
+                    positions_absolutely = true;
+                }
+                "inset" => has_inset = true,
+                "width" | "height" if matches!(val, "100%" | "100vw" | "100vh" | "100dvh") => {
+                    has_full_dim = true;
+                }
+                "top" => has_top = true,
+                "left" => has_left = true,
+                _ => {}
+            }
+        }
+        if !positions_absolutely {
+            continue;
+        }
+        let is_backdrop_sized = has_inset || has_full_dim || (has_top && has_left);
+
+        for raw_sel in selector_block.split(',') {
+            let sel = raw_sel.trim();
+            if sel == "svg" {
+                return true;
+            }
+            if is_backdrop_sized && sel.len() >= 4 && sel.ends_with("svg") {
+                let before_svg = &sel[..sel.len() - 3];
+                if before_svg.ends_with(char::is_whitespace) {
+                    let trimmed_parent = before_svg.trim_end();
+                    if !trimmed_parent.is_empty()
+                        && !trimmed_parent.ends_with('>')
+                        && !trimmed_parent.ends_with('+')
+                        && !trimmed_parent.ends_with('~')
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
     }
     false
 }
@@ -511,6 +633,7 @@ pub fn lint_gfx_html(html: &str) -> GfxLintReport {
 
     let mut has_css_import = false;
     let mut has_css_ext_url = false;
+    let mut has_descendant_svg_abs = false;
     for raw_css in css_snippets {
         let css = strip_css_comments(raw_css);
         if css_has_at_import(&css) {
@@ -518,6 +641,9 @@ pub fn lint_gfx_html(html: &str) -> GfxLintReport {
         }
         if css_has_external_url(&css) {
             has_css_ext_url = true;
+        }
+        if css_has_descendant_svg_absolute_trap(&css) {
+            has_descendant_svg_abs = true;
         }
     }
     if has_css_import {
@@ -625,7 +751,15 @@ pub fn lint_gfx_html(html: &str) -> GfxLintReport {
         );
     }
 
-    let has_svg_tag = scanned.tags.iter().any(|t| t.name == "svg");
+    let svg_tag_count = scanned.tags.iter().filter(|t| t.name == "svg").count();
+    let has_svg_tag = svg_tag_count > 0;
+    let descendant_svg_trap = svg_tag_count >= 2 && has_descendant_svg_abs;
+    if descendant_svg_trap {
+        warnings.push(
+            "Descendant CSS selector targeting 'svg' with position:absolute/fixed can capture nested icon <svg> elements; use a direct-child selector (e.g. '.funnel > svg') or an explicit class on the background <svg>."
+                .to_string(),
+        );
+    }
     let js_rotates_without_origin = has_svg_tag
         && js_snippets.iter().any(|js| {
             has_word_token(js, "rotation")
@@ -643,12 +777,51 @@ pub fn lint_gfx_html(html: &str) -> GfxLintReport {
         valid: errors.is_empty(),
         errors,
         warnings,
+        descendant_svg_trap,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warns_on_descendant_svg_absolute_trap_and_allows_direct_child_selector() {
+        let trapped = r##"<style>.funnel svg { position: absolute; inset: 0; width: 100%; height: 100%; }</style><div class="clip funnel" data-start="0" data-duration="4" style="color:var(--brand-ink)"><svg viewBox="0 0 100 100"></svg><div class="ic"><svg viewBox="0 0 24 24"></svg></div></div>"##;
+        let rep = lint_gfx_html(trapped);
+        assert!(rep.valid);
+        assert!(rep.descendant_svg_trap);
+        assert!(
+            rep.warnings
+                .iter()
+                .any(|w| w.contains("Descendant CSS selector")),
+            "expected descendant svg warning, got: {:?}",
+            rep.warnings
+        );
+
+        let bare_svg = r##"<style>svg { position: absolute; top: 0; }</style><div class="clip" data-start="0" data-duration="4" style="color:var(--brand-ink)"><svg viewBox="0 0 100 100"></svg><svg viewBox="0 0 24 24"></svg></div>"##;
+        let rep_bare = lint_gfx_html(bare_svg);
+        assert!(rep_bare.descendant_svg_trap);
+
+        let media_important = r##"<style>@media (min-width: 1px) { .funnel svg { position: absolute !important; inset: 0; } } .other { color: #fff; }</style><div class="clip funnel" data-start="0" data-duration="4" style="color:var(--brand-ink)"><svg viewBox="0 0 100 100"></svg><div class="ic"><svg viewBox="0 0 24 24"></svg></div></div>"##;
+        let rep_media = lint_gfx_html(media_important);
+        assert!(rep_media.descendant_svg_trap);
+
+        let small_icon = r##"<style>.badge svg { position: absolute; width: 14px; height: 14px; }</style><div class="clip" data-start="0" data-duration="4" style="color:var(--brand-ink)"><svg viewBox="0 0 100 100"></svg><div class="badge"><svg viewBox="0 0 24 24"></svg></div></div>"##;
+        let rep_small = lint_gfx_html(small_icon);
+        assert!(!rep_small.descendant_svg_trap);
+        assert!(
+            rep_small.warnings.is_empty(),
+            "got: {:?}",
+            rep_small.warnings
+        );
+
+        let scoped = r##"<style>.funnel > svg { position: absolute; inset: 0; width: 100%; height: 100%; }</style><div class="clip funnel" data-start="0" data-duration="4" style="color:var(--brand-ink)"><svg viewBox="0 0 100 100"></svg><div class="ic"><svg viewBox="0 0 24 24"></svg></div></div>"##;
+        let rep_ok = lint_gfx_html(scoped);
+        assert!(rep_ok.valid);
+        assert!(!rep_ok.descendant_svg_trap);
+        assert!(rep_ok.warnings.is_empty(), "got: {:?}", rep_ok.warnings);
+    }
 
     #[test]
     fn warns_on_svg_rotation_without_origin_and_accepts_svg_origin() {

@@ -1246,14 +1246,14 @@ export function StudioWorkspace({
 
     const isXl = studioGridSize.w >= 1280;
     const showScopes = isXl && scopesOpen;
-    const stageInnerH = Math.max(240, studioGridSize.h - 54);
-    const idealProgramPx = Math.round(stageInnerH * canvasAspect + 24);
+    const stageInnerH = Math.max(240, studioGridSize.h - 46);
+    const idealProgramPx = Math.round(stageInnerH * canvasAspect + 16);
     const minProgramPx = canvasAspect < 0.85 ? 280 : 360;
     const otherMin = showScopes
-      ? 268 + 200 + 260 + 56
+      ? 268 + 200 + 260 + 40
       : isXl
-        ? 290 + 272 + 44
-        : 260 + 252 + 44;
+        ? 290 + 272 + 32
+        : 260 + 252 + 32;
     const maxProgramPx = Math.max(minProgramPx, studioGridSize.w - otherMin);
     const programColPx = Math.round(
       Math.max(minProgramPx, Math.min(idealProgramPx, maxProgramPx)),
@@ -1407,12 +1407,12 @@ export function StudioWorkspace({
         </div>
       )}
 
-      {/* Top NLE Chrome — 3-Zone Pro Studio Header */}
-      <header className="relative z-30 flex h-13 shrink-0 items-center justify-between gap-3 border-b border-areia/10 bg-carbono/75 px-4 backdrop-blur-md">
+      {/* Top NLE Chrome — Sleek 3-Zone Pro Studio Header */}
+      <header className="relative z-30 flex h-11 shrink-0 items-center justify-between gap-2.5 border-b border-areia/[0.08] bg-carbono/80 px-3 backdrop-blur-md">
         {/* Left Zone: Brand + Project Manager */}
-        <div className="flex min-w-0 items-center gap-2.5">
+        <div className="flex min-w-0 items-center gap-2">
           <SolarisWordmark />
-          <div className="hidden h-4 w-px bg-areia/15 sm:block" />
+          <div className="hidden h-3.5 w-px bg-areia/15 sm:block" />
           <ProjectManagerPopover
             currentProject={project}
             projects={projects}
@@ -1428,33 +1428,33 @@ export function StudioWorkspace({
             type="button"
             onClick={onBackToChat}
             title="Start a new project with fresh media or prompt"
-            className="hidden h-8 items-center gap-1 rounded-full border border-areia/12 bg-void/65 px-2.5 text-xs text-areia/80 transition-colors hover:border-laranja-criacao/50 hover:bg-accent hover:text-areia md:flex motion-reduce:transition-none"
+            className="hidden h-7 items-center gap-1 rounded-full border border-areia/10 bg-void/70 px-2.5 text-[11px] text-areia/80 transition-colors hover:border-laranja-criacao/50 hover:bg-accent hover:text-areia md:flex motion-reduce:transition-none"
           >
-            <Plus className="h-3.5 w-3.5 text-laranja-criacao" />
+            <Plus className="h-3 w-3 text-laranja-criacao" />
             <span>New</span>
           </button>
         </div>
 
         {/* Center Zone: History & Swarm Presence */}
-        <div className="hidden items-center gap-2 lg:flex">
-          <div className="flex items-center rounded-full border border-areia/12 bg-void/65 p-0.5">
+        <div className="hidden items-center gap-1.5 lg:flex">
+          <div className="flex items-center rounded-full border border-areia/10 bg-void/70 p-0.5">
             <button
               type="button"
               onClick={() => void handleUndo()}
-              className="grid h-7 w-7 place-items-center rounded-full text-areia/80 hover:bg-accent hover:text-areia"
+              className="grid h-6 w-6 place-items-center rounded-full text-areia/80 hover:bg-accent hover:text-areia"
               title="Undo (⌘Z)"
               aria-label="Undo"
             >
-              <Undo2 className="h-3.5 w-3.5" />
+              <Undo2 className="h-3 w-3" />
             </button>
             <button
               type="button"
               onClick={() => void handleRedo()}
-              className="grid h-7 w-7 place-items-center rounded-full text-areia/80 hover:bg-accent hover:text-areia"
+              className="grid h-6 w-6 place-items-center rounded-full text-areia/80 hover:bg-accent hover:text-areia"
               title="Redo (⇧⌘Z)"
               aria-label="Redo"
             >
-              <Redo2 className="h-3.5 w-3.5" />
+              <Redo2 className="h-3 w-3" />
             </button>
           </div>
 
@@ -1466,10 +1466,10 @@ export function StudioWorkspace({
                 ? "Swarm WebSocket connected · Toggle agent cursors"
                 : "Reconnecting to Solaris Engine"
             }
-            className={`flex h-8 items-center gap-2 rounded-full border px-3 text-xs transition-colors motion-reduce:transition-none ${
+            className={`flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[11px] transition-colors motion-reduce:transition-none ${
               swarmCursorsEnabled
                 ? "border-laranja-criacao/55 bg-accent text-areia"
-                : "border-areia/12 bg-void/65 text-areia/75 hover:bg-accent hover:text-areia"
+                : "border-areia/10 bg-void/70 text-areia/75 hover:bg-accent hover:text-areia"
             }`}
           >
             <span
@@ -1477,7 +1477,7 @@ export function StudioWorkspace({
                 wsConnected ? "bg-amarelo-ideias solar-pulse-dot" : "bg-vermelho-foco"
               }`}
             />
-            <Users className="h-3.5 w-3.5 text-laranja-criacao" />
+            <Users className="h-3 w-3 text-laranja-criacao" />
             <span>{swarmCursorsEnabled ? "Swarm Live" : "Focus Mode"}</span>
           </button>
         </div>
@@ -1488,14 +1488,14 @@ export function StudioWorkspace({
             <button
               type="button"
               onClick={() => setLogsDrawerOpen(true)}
-              className="flex h-8 items-center gap-1.5 rounded-full border border-areia/12 bg-void/55 px-2.5 text-xs text-areia/85 hover:bg-accent xl:px-3"
+              className="flex h-7 items-center gap-1.5 rounded-full border border-areia/10 bg-void/60 px-2.5 text-[11px] text-areia/85 hover:bg-accent"
               title="Open Diagnostic Logs (OpenRouter, Swarm, QA & Export)"
               aria-label="Diagnostic Logs"
             >
-              <Terminal className="h-3.5 w-3.5 text-amarelo-ideias" />
+              <Terminal className="h-3 w-3 text-amarelo-ideias" />
               <span className="hidden xl:inline">Logs</span>
               {logs.some((l) => l.level === "error") && (
-                <span className="tabular-nums rounded-full bg-vermelho-foco px-1.5 text-[10px] font-semibold text-areia">
+                <span className="tabular-nums rounded-full bg-vermelho-foco px-1.5 text-[9px] font-semibold text-areia">
                   {logs.filter((l) => l.level === "error").length}
                 </span>
               )}
@@ -1504,11 +1504,11 @@ export function StudioWorkspace({
             <button
               type="button"
               onClick={onOpenAiSettings}
-              className="flex h-8 items-center gap-1.5 rounded-full border border-areia/12 bg-void/55 px-2.5 text-xs text-areia/85 hover:bg-accent xl:px-3"
+              className="flex h-7 items-center gap-1.5 rounded-full border border-areia/10 bg-void/60 px-2.5 text-[11px] text-areia/85 hover:bg-accent"
               title="OpenRouter API Key, Model Advisor & MCP Mode"
               aria-label="AI Settings"
             >
-              <Cpu className="h-3.5 w-3.5 text-amarelo-ideias" />
+              <Cpu className="h-3 w-3 text-amarelo-ideias" />
               <span className="hidden xl:inline">
                 {agentStatus?.openrouter_configured ? "AI Ready" : "AI Keys"}
               </span>
@@ -1518,23 +1518,23 @@ export function StudioWorkspace({
               type="button"
               data-cursor-anchor="brand.playbook"
               onClick={onOpenBrandDrawer}
-              className="flex h-8 items-center gap-1.5 rounded-full border border-areia/12 bg-void/55 px-2.5 text-xs text-areia/85 hover:bg-accent md:px-3"
+              className="flex h-7 items-center gap-1.5 rounded-full border border-areia/10 bg-void/60 px-2.5 text-[11px] text-areia/85 hover:bg-accent"
               title="Open Brand Playbook"
               aria-label="Brand Playbook"
             >
-              <Palette className="h-3.5 w-3.5 text-laranja-criacao" />
+              <Palette className="h-3 w-3 text-laranja-criacao" />
               <span className="hidden md:inline">Brand</span>
             </button>
           </div>
 
-          <div className="mx-1 hidden h-4 w-px bg-areia/14 sm:block" />
+          <div className="mx-0.5 hidden h-3.5 w-px bg-areia/14 sm:block" />
 
           <button
             type="button"
             onClick={() => setExportModalOpen(true)}
-            className="btn-solar-outline flex h-8 items-center gap-1.5 px-4 text-xs font-medium text-areia"
+            className="btn-solar-outline flex h-7 items-center gap-1.5 px-3.5 text-[11px] font-medium text-areia"
           >
-            <Download className="h-3.5 w-3.5 text-amarelo-ideias" />
+            <Download className="h-3 w-3 text-amarelo-ideias" />
             <span className="tabular-nums">
               {exportJob &&
               (exportJob.state === "queued" ||
@@ -1547,11 +1547,11 @@ export function StudioWorkspace({
         </div>
       </header>
 
-      {/* Main Studio Grid — Aspect-Aware Pro Layout (Director | Program Monitor | Optional Scopes | Inspector) */}
+      {/* Main Studio Grid — Precision Aspect-Aware NLE Layout */}
       <div
         ref={studioGridRef}
         style={studioGridStyle}
-        className={`grid min-h-0 flex-1 grid-cols-1 gap-3 p-3 ${
+        className={`grid min-h-0 flex-1 grid-cols-1 gap-2 p-2 ${
           scopesOpen
             ? "lg:grid-cols-[minmax(300px,340px)_minmax(340px,1fr)_minmax(276px,308px)] xl:grid-cols-[minmax(330px,375px)_minmax(400px,1fr)_212px_minmax(288px,320px)]"
             : "lg:grid-cols-[minmax(320px,360px)_minmax(420px,1fr)_minmax(290px,324px)] xl:grid-cols-[minmax(350px,390px)_minmax(500px,1fr)_minmax(310px,340px)]"
@@ -1575,8 +1575,6 @@ export function StudioWorkspace({
             qaError={qaError}
             swarmError={swarmError}
             activityLog={activityLog}
-            logs={logs}
-            onClearLogs={onClearLogs}
             onOpenLogsDrawer={() => setLogsDrawerOpen(true)}
             onStartSwarm={handleStartSwarm}
             onCancelSwarm={handleCancelSwarm}
@@ -1587,7 +1585,7 @@ export function StudioWorkspace({
         {/* Center Hero Stage: Program Monitor */}
         <div
           data-cursor-anchor="program.stage"
-          className="flex min-h-[320px] flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-2 lg:min-h-0"
+          className="flex min-h-[320px] flex-col rounded-xl border border-areia/[0.08] bg-carbono/65 p-1.5 shadow-[inset_0_1px_0_rgba(247,245,239,0.04)] lg:min-h-0"
         >
           <div className="mb-1.5 flex flex-wrap items-center justify-between gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em]">
             {project.media_pool.length > 0 ? (
@@ -1753,7 +1751,7 @@ export function StudioWorkspace({
       </div>
 
       {/* Bottom: Dynamic Timeline */}
-      <div className="shrink-0 px-2.5 pb-2.5">
+      <div className="shrink-0 px-2 pb-2">
         <TimelinePanel
           tracks={project.tracks}
           activeTrackIds={activeSwarmTrackIds}
