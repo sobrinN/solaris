@@ -625,6 +625,20 @@ pub fn lint_gfx_html(html: &str) -> GfxLintReport {
         );
     }
 
+    let has_svg_tag = scanned.tags.iter().any(|t| t.name == "svg");
+    let js_rotates_without_origin = has_svg_tag
+        && js_snippets.iter().any(|js| {
+            has_word_token(js, "rotation")
+                && !js.contains("svgOrigin")
+                && !js.contains("transformOrigin")
+        });
+    if js_rotates_without_origin {
+        warnings.push(
+            "SVG rotation animation without svgOrigin or transformOrigin may orbit off-center; set svgOrigin: \"<cx> <cy>\" matching the viewBox center."
+                .to_string(),
+        );
+    }
+
     GfxLintReport {
         valid: errors.is_empty(),
         errors,
@@ -635,6 +649,23 @@ pub fn lint_gfx_html(html: &str) -> GfxLintReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warns_on_svg_rotation_without_origin_and_accepts_svg_origin() {
+        let missing_origin = r##"<div class="clip" data-start="0" data-duration="4" style="color:var(--brand-ink)"><svg viewBox="0 0 540 540"><g id="globe"></g></svg><script>gsap.to("#globe", { rotation: 360, duration: 4 });</script></div>"##;
+        let rep = lint_gfx_html(missing_origin);
+        assert!(rep.valid);
+        assert!(
+            rep.warnings.iter().any(|w| w.contains("svgOrigin")),
+            "expected svgOrigin warning, got: {:?}",
+            rep.warnings
+        );
+
+        let with_origin = r##"<div class="clip" data-start="0" data-duration="4" style="color:var(--brand-ink)"><svg viewBox="0 0 540 540"><g id="globe"></g></svg><script>gsap.to("#globe", { rotation: 360, svgOrigin: "270 270", duration: 4 });</script></div>"##;
+        let rep_ok = lint_gfx_html(with_origin);
+        assert!(rep_ok.valid);
+        assert!(rep_ok.warnings.is_empty());
+    }
 
     #[test]
     fn accepts_clean_brand_gfx_and_inline_style_and_data_uri_img() {

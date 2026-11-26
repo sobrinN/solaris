@@ -214,7 +214,11 @@ export function InspectorPanel({
 
   const gfxLintIssues = useMemo(() => {
     if (!selectedGfx?.inline_html) return [];
-    return lintGfxHtml(selectedGfx.inline_html);
+    // Omit the advisory brand-token hint on bespoke inline scenes so custom-palette
+    // prompts don't show a false-positive warning in the Clip Inspector.
+    return lintGfxHtml(selectedGfx.inline_html).filter(
+      (issue) => issue.code !== "missing-brand-tokens",
+    );
   }, [selectedGfx?.inline_html]);
 
   const handlePropChange = (key: string, nextVal: unknown) => {

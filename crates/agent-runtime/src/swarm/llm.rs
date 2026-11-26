@@ -87,6 +87,7 @@ fn brand_context_json(brand: &BrandPlaybook) -> serde_json::Value {
         "id": brand.id,
         "name": brand.name,
         "tokens": brand.tokens,
+        "lock_brand_palette": brand.lock_brand_palette,
         "brand_md": brand.brand_md.chars().take(2400).collect::<String>(),
         "pacing_rules": brand.pacing_rules,
         "default_lut": brand.default_lut,
@@ -297,9 +298,10 @@ pub(crate) async fn build_openrouter_director_plan(
              Solaris will synthesize the ENTIRE {:.1}s video in PARALLEL using dedicated scene micro-agents on G1. \
              {captions_rule} \
              Do NOT invent fake media_ids or ask for imported footage, and NEVER put internal asset IDs (like `progress-bar-solar`) into visible text specs. \
-             In `art_direction`, define ONE unified visual world shared by all scenes (rich full-height layered radial glow + subtle architectural atmosphere across 100vh so lower regions are never pitch-black, bold editorial typography, bespoke full-stage SVG visuals, varied scene-to-scene layouts so consecutive scenes feel like a fluid motion-graphics video rather than repeated identical dashboard slides, crisp non-blurred elements, and consistent icons). NEVER specify scene counters (`01 / 06`, `1/5`) or bottom loading/progress bars unless the user explicitly requested them. \
+             Always plan layouts strictly for the active `canvas` aspect ratio set in the Studio UI (even if the user prompt text mentions another ratio). \
+             In `art_direction`, define ONE unified visual world shared by all scenes — explicitly locking ONE `header_alignment` (`center` or `left`, never mixing centered and left-aligned headers across scenes!), shared eyebrow/subtitle styling, palette rules (strictly enforcing `brand.tokens` when `brand.lock_brand_palette` is true; otherwise honoring explicit prompt hex colors), rich full-height layered radial glow + subtle architectural atmosphere across 100vh so lower regions are never pitch-black, bold editorial typography, symmetrically centered bespoke SVG visuals with clean HTML Flex/Grid labels, varied scene-to-scene layouts, crisp non-blurred elements, and consistent icons. NEVER specify scene/step counters (`01 / 06`, `1/5`, `ETAPA 02`, `STEP 2`) or bottom loading/progress bars unless the user explicitly requested them. \
              In `scenes`, output 5 to 7 contiguous scene objects covering 0.0s to {:.1}s with ZERO gaps: \
-             each object MUST have `scene_index` (1..N), `title`, `start_sec`, `duration_sec`, `visual_brief` (specific diagram/UI/visual focal point {portrait_band_note}), `motion_cue` (fast headline entrance <= 0.35s + living mid-scene motion, NO fade-to-black before scene end), and `narration` (natural punchy voiceover line that complements the on-screen graphic rather than repeating the headline verbatim). \
+             each object MUST have `scene_index` (1..N), `title`, `start_sec`, `duration_sec`, `visual_brief` (specific diagram/UI/visual focal point {portrait_band_note}), `motion_cue` (fast headline entrance <= 0.35s + continuous living mid-scene motion through scene end so no scene freezes for >2s, NO fade-to-black before scene end), and `narration` (natural punchy voiceover line that complements the on-screen graphic rather than repeating the headline verbatim). \
              Keep the brief summary in `gfx_notes`. \
              Set `spine_notes`, `broll_notes`, `grade_notes`, and `mix_notes` to brief 1-line notes (\"Programmatic G1/T1 mode\").",
             inferred_duration_sec, inferred_duration_sec
@@ -1349,20 +1351,21 @@ pub(crate) async fn run_programmatic_scene_worker(
             "VERTICAL 9:16 SAFE-BAND LAYOUT (CAPTIONS ACTIVE — ZERO OVERLAP): Keep ALL foreground content (top pill, headline, cards, diagrams, lower badges) cleanly between `top: 6vh` and `62vh` (`max-height: 56vh` container starting at `6vh`) so `64vh..76vh` stays clear for `T1` kinetic captions (`y=0.20`) and `78vh..100vh` stays clear for social UI. Extend layered radial glows, architectural grid lines, and bottom horizon glow across the FULL `100vh`. Stack cards/diagrams vertically (1–2 columns max, NEVER 4 horizontal columns) and keep all readable body/SVG label text >= 14px (SVG `font-size >= 18` in a `540`-wide `viewBox`)."
         }
         (true, false) => {
-            "VERTICAL 9:16 FULL-STAGE LAYOUT (NO T1 CAPTIONS — ZERO BOTTOM-HALF VOID): This video has NO T1 captions, so DO NOT cram everything into the top 55%! Build a full-height composition spanning `top: 7vh; bottom: 13vh` (`height: 80vh`, leaving only `0..7vh` top and `87vh..100vh` bottom social margins) with generous hero scale (bespoke full-bleed SVG visual or bold kinetic typography occupying ~50–65% of stage height) plus concise supporting copy or visual callouts anchored cleanly so the lower third feels intentional without repeating the exact same boxed slide template on every scene. Extend rich layered ambient glows and subtle atmosphere across the FULL `100vh`. Stack elements vertically (1–2 columns max, NEVER 4 horizontal columns) and keep all readable body/SVG label text >= 14px (SVG `font-size >= 18` in a `540`-wide `viewBox`) with generous horizontal padding so no text or badge ever clips."
+            "VERTICAL 9:16 FULL-STAGE LAYOUT (NO T1 CAPTIONS — ZERO BOTTOM-HALF VOID): This video has NO T1 captions, so DO NOT cram everything into the top 55%! Use a 3-zone CSS Grid (`display:grid;grid-template-rows:auto 1fr auto;align-items:center;padding:7vh 5vw 9vh;box-sizing:border-box;`) inside `position:fixed;inset:0;width:100vw;height:100vh;` so Header, Hero Visual (`1fr`, occupying ~50–65% of stage height), and Bottom Takeaway/Legend automatically fill `7vh..91vh` with ZERO bottom-half dead void. Extend rich layered ambient glows and subtle atmosphere across the FULL `100vh`. Stack elements vertically (1–2 columns max, NEVER 4 horizontal columns) and keep all readable body/SVG label text >= 14px (SVG `font-size >= 18` in a `540`-wide `viewBox`) with generous horizontal padding so no text or badge ever clips."
         }
         (false, true) => {
             "WIDESCREEN/SQUARE SAFE-BAND LAYOUT (CAPTIONS ACTIVE): Keep ALL foreground content cleanly inside `6vh..72vh` so `75vh..88vh` stays completely clear for `T1` kinetic captions. Keep all readable body/diagram text >= 15px."
         }
         (false, false) => {
-            "WIDESCREEN/SQUARE FULL-STAGE LAYOUT (NO T1 CAPTIONS): Fill the balanced `8vh..88vh` stage cleanly with zero dead voids. Keep all readable body/diagram text >= 15px."
+            "WIDESCREEN/SQUARE FULL-STAGE LAYOUT (NO T1 CAPTIONS): Use a 3-zone CSS Grid (`display:grid;grid-template-rows:auto 1fr auto;align-items:center;padding:6vh 5vw 8vh;box-sizing:border-box;`) inside `position:fixed;inset:0;width:100vw;height:100vh;` so Header, Hero Visual (`1fr`), and Bottom Callout balance cleanly across `6vh..92vh` with zero dead voids. Keep all readable body/diagram text >= 15px."
         }
     };
 
+    // Keep scene micro-agent context lean (omit the 21 KB move-playbook catalog meant for
+    // Director planning) so attention & reasoning focus on crisp HTML/SVG geometry.
     let craft_refs: String = [
         "skill://captions-and-gfx/references/gfx-contract.md",
         "skill://captions-and-gfx/references/motion-craft.md",
-        "skill://captions-and-gfx/references/move-playbook.md",
     ]
     .iter()
     .filter_map(|uri| get_skill_resource(uri))
@@ -1370,22 +1373,31 @@ pub(crate) async fn run_programmatic_scene_worker(
     .collect::<Vec<_>>()
     .join("\n\n");
 
+    let palette_rule = if brand.lock_brand_palette {
+        "BRAND PALETTE LOCKED (STRICT): `brand.lock_brand_palette` is TRUE — you MUST use the Brand Playbook CSS variables (`--brand-bg`, `--brand-surface`, `--brand-ink`, `--brand-accent`, `--brand-accent-secondary`, `--brand-font-display`, `--brand-font-body`) even if the user prompt mentions other hex colors. Only use semantic green (`#2BD67B`) or semantic red (`#FF5A5F`) for explicit success/alert states."
+    } else {
+        "BRAND VS. PROMPT PALETTE PRECEDENCE: Default to Brand CSS variables (`--brand-bg`, `--brand-surface`, `--brand-ink`, `--brand-accent`, `--brand-accent-secondary`, `--brand-font-display`, `--brand-font-body`). When the user prompt explicitly specifies custom hex colors (e.g., `#0A0F1C`, `#00E5FF`, `#FF4D4D`), honor those exact hex colors directly while still binding typography to `var(--brand-font-display, Sora)` and `var(--brand-font-body, Sora)`."
+    };
+
     // Keep the entire system prompt static across sibling scene workers so
     // prefix-based prompt caching hits across all parallel scenes in the run.
     let system_prompt = format!(
         "You are a Solaris motion-design micro-agent authoring a SINGLE programmatic full-canvas scene on track `g1` for the scene assignment provided in the user JSON.\n\
          ## STUDIO CRAFT & SANDBOX CONTRACT\n\
          - Call `gfx_place` DIRECTLY with `inline_html` on Turn 1 (do NOT call `gfx_lint_html` first; `gfx_place` lints automatically and returns exact errors if anything needs fixing).\n\
+         - Always design strictly for the active project `canvas` (`{}x{}`) set in the Studio UI, even if the user prompt text mentions a different aspect ratio.\n\
+         - CROSS-SCENE ALIGNMENT CONSISTENCY: Strictly obey the `header_alignment` (`center` or `left`) and eyebrow/subtitle hierarchy specified in `art_direction` (default to `text-align: center` if unspecified) so all parallel scenes share one unified visual spine.\n\
          - Fill the entire canvas (`position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;`) with a cohesive, broadcast-grade visual composition: extend rich layered ambient radial glows, subtle architectural grid/mesh lines, and subtle bottom horizon glow across the ENTIRE `100vh` (so the bottom 40% never looks like an empty pitch-black void), with bold editorial typography and bespoke inline `<svg viewBox=...>` visuals.\n\
          - {layout_zone_rule} Keep `transform` at default `(0,0)`.\n\
-         - BROADCAST HYGIENE & ANTI-SLIDE-CHROME: NEVER render scene counters/enumeration badges (`01 / 06`, `02/06`, `Scene 1/6`) and NEVER render bottom loading/progress bars or timeline scrub rails unless the user's prompt explicitly asks for them! Design a clean, cinematic motion-graphics frame—not a PowerPoint or dashboard card. Never place floating badges (`position: absolute`) where they can overlap headlines, captions, or SVG labels; keep at least `16px` (`3vw`) clearance from card/viewport edges so zero characters clip. NEVER render heavily blurred ghost/duplicate text cards (`filter: blur(...)` on secondary cards reads as a broken render; use crisp lower opacity `0.45–0.65` instead). Keep checklist/step iconography 100% consistent within a list (all checkmarks or all sequential numbers — never mix checkmarks with chevrons/arrows). Never repeat card/list item text verbatim in the scene subtitle. NEVER print internal Solaris asset/tool IDs (such as `progress-bar-solar`, `chapter-title-solar`, `stat-card-solar`, `lower-third-solar`) as visible text.\n\
+         - SVG & DIAGRAM ANTI-COLLISION & CENTERING (CRITICAL): Render multi-word labels, risk cards, callouts, and pills in HTML CSS Flex/Grid containers — NEVER hand-place `<text x y>` or `position:absolute` labels over dense SVG node graphs (especially in Portuguese/Spanish where phrases run longer). When a short label (`<= 2` words) sits near an SVG node, offset it cleanly outside the circle radius (`>= 16px` clearance, never touching the ring border or connecting strokes). NEVER place a dot/node on top of a text label or central panel title. Center hero SVG diagrams symmetrically at `(W/2, H/2)` inside their container/shield with `>= 32px` inner padding, and keep radial orbit radii compact enough that wide labels keep `>= 24px` margin from viewport edges. NEVER animate `rotation` or `scale` on an SVG `<g>`/`<path>` without explicit `svgOrigin: \"<cx> <cy>\"` matching the `viewBox` center (rotating around SVG `(0,0)` orbits elements off-center into pills and edges!). NEVER render empty hollow node circles with orphan labels — every node circle must contain a crisp linear icon or a solid glowing core dot.\n\
+         - BROADCAST HYGIENE & CONTRAST FLOOR: NEVER render scene or step counters/enumeration badges (`01 / 06`, `02/06`, `ETAPA 02`, `PASSO 1`, `STEP 2`, `Scene 1/6`) and NEVER render bottom loading/progress bars or timeline scrub rails unless the user's prompt explicitly asks for them! Keep at least `16px` (`3vw`) clearance from card/viewport edges, keep even secondary footers/disclaimers `>= 13px` at `>= 0.70` ink opacity (readable at `360px` phone width), never render heavily blurred ghost cards (`filter: blur(...)` on text cards), keep iconography 100% consistent, never repeat card/list item text verbatim in the scene subtitle, and never print internal Solaris asset/tool IDs as visible text.\n\
          - Use responsive viewport units (`vw`, `vh`, `vmin`, `clamp(...)`, `%`, `<svg viewBox>`) so the scene scales crisply across Studio preview and {}x{} export.\n\
-         - Use Brand CSS variables (`--brand-bg`, `--brand-surface`, `--brand-ink`, `--brand-accent`, `--brand-accent-secondary`, `--brand-font-display`, `--brand-font-body`) with clean fallbacks matching the brand tokens.\n\
-         - GSAP 3 (`window.gsap`) IS ALREADY INJECTED GLOBALLY OFFLINE — NEVER write `<script src=...>` or `<link>` tags! Write ONLY an inline `<script>...</script>` (`window.__timelines = window.__timelines || {{}}; const tl = gsap.timeline({{paused:true}}); ... window.__timelines['main'] = tl;`). Complete the primary headline entrance by `t <= 0.35s` (immediately readable hook!), stagger visuals cleanly by `0.75s` with living mid-scene motion, and keep all core elements at full opacity through the end of the clip (do NOT fade the scene out to black before exit).\n\
+         - {palette_rule}\n\
+         - GSAP 3 (`window.gsap`) IS ALREADY INJECTED GLOBALLY OFFLINE — NEVER write `<script src=...>` or `<link>` tags! Write ONLY an inline `<script>...</script>` (`window.__timelines = window.__timelines || {{}}; const tl = gsap.timeline({{paused:true}}); ... window.__timelines['main'] = tl;`). Complete the primary headline entrance by `t <= 0.35s` (immediately readable hook!), stagger visuals cleanly by `0.9s`, and ALWAYS add continuous subtle deterministic GSAP mid-scene motion through `data-duration` on every scene `> 3.0s` (e.g., centered `svgOrigin` orbital rotation, animated `stroke-dashoffset` data packets along graph edges, pulsing alert rings, or gentle `scale: 1.0 -> 1.03` push — NEVER leave a scene frozen motionless for 3–6 seconds!) while keeping landed headlines dead still and core elements at full opacity through the end of the clip (do NOT fade the scene out to black before exit).\n\
          - Strict sandbox rules: root `<div class=\"clip\" data-start=\"0\" data-duration=\"<scene.duration_sec>\">`, ZERO `<script src=...>`, ZERO external URLs/CDNs, ZERO `Math.random`, `Date.now`, `new Date`, `setInterval`, `setTimeout`, `requestAnimationFrame`, `fetch`, `XMLHttpRequest`, `WebSocket`, `import()`.\n\
          - Keep `inline_html` crisp and focused (~2.5–6 KB) so it renders fast and cleanly.\n\
          - Follow `scene.save_instruction` from the user JSON. Once placed, stop and reply concisely — Director runs Vision QA automatically.\n\n{craft_refs}",
-        project.canvas.width, project.canvas.height,
+        project.canvas.width, project.canvas.height, project.canvas.width, project.canvas.height,
     );
 
     let user_prompt = json!({

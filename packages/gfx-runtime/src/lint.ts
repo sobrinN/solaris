@@ -450,5 +450,23 @@ export function lintGfxHtml(html: string): GfxLintIssue[] {
     });
   }
 
+  const hasSvgTag = tags.some((t) => t.name === "svg");
+  if (
+    hasSvgTag &&
+    scriptSources.some(
+      (js) =>
+        /(?:^|[^A-Za-z0-9_$])rotation(?=$|[^A-Za-z0-9_$])/.test(js) &&
+        !js.includes("svgOrigin") &&
+        !js.includes("transformOrigin"),
+    )
+  ) {
+    issues.push({
+      code: "svg-rotation-origin",
+      severity: "warning",
+      message:
+        'SVG rotation animation without svgOrigin or transformOrigin may orbit off-center; set svgOrigin: "<cx> <cy>" matching the viewBox center.',
+    });
+  }
+
   return issues;
 }

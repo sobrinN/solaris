@@ -298,14 +298,14 @@ pub(super) async fn inspect_playback_frames(
             .unwrap_or(0);
 
         let is_programmatic_zero_asset = video_clips == 0 && gfx_clips > 0;
-        let clip_fixes_schema = "Also populate \"clip_fixes\": [{\"clip_id\": string (exact clip_id from frames), \"severity\": \"issue\" | \"warning\", \"defect\": string, \"fix_instruction\": string}] for EVERY G1 frame that has a visual defect, clipping/overlap, unsolicited scene counter (`01/06`), or useless bottom progress/loading bar so Solaris can auto-repair that clip's HTML.";
+        let clip_fixes_schema = "Also populate \"clip_fixes\": [{\"clip_id\": string (exact clip_id from frames), \"severity\": \"issue\" | \"warning\", \"defect\": string, \"fix_instruction\": string}] for EVERY G1 frame that has a visual defect, clipping/overlap, empty placeholder node rings, unsolicited scene/step counter (`01/06`, `ETAPA 02`, `STEP 2`), or useless bottom progress/loading bar so Solaris can auto-repair that clip's HTML.";
         let task_prompt = if is_programmatic_zero_asset {
             if caption_clips > 0 {
                 format!(
                     "Review these Solaris programmatic motion-graphics playback frames (each listed with its `clip_id` in `frames`). \
                      IMPORTANT: `programmatic_zero_asset` is TRUE — this project intentionally has 0 imported video_clips and is a pure HTML/CSS/SVG/GSAP motion-graphics video on G1 + captions on T1 (`caption_clips > 0`). \
                      Do NOT report '0 video clips' or 'no camera footage' as an issue, and do NOT penalize intentional vertical clearance in the `64vh..76vh` band reserved for T1 captions as long as the ambient backdrop extends across 100vh. \
-                     Evaluate as a harsh supervising motion director: put critical defects (blank/unrendered frame, unreadable/clipped text or labels, badge overlapping text, severe overlap where captions cover diagrams/headlines, broken layout, heavily blurred ghost cards, or unsolicited `01/06` scene counters / useless bottom loading/progress bars) in \"issues\", and minor polish notes (spacing, font sizing, copy redundancy, repetitive identical slide boxes) in \"warnings\". \
+                     Evaluate as a harsh supervising motion director: put critical defects (blank/unrendered frame, unreadable/clipped text or labels, badge or dot overlapping text, labels colliding with SVG strokes/shield outlines, severe overlap where captions cover diagrams/headlines, broken layout, heavily blurred ghost cards, or unsolicited `01/06`/`ETAPA 02` counters / useless bottom loading/progress bars) in \"issues\", and minor polish notes (spacing, font sizing, empty hollow node rings without icons, copy redundancy, repetitive identical slide boxes) in \"warnings\". \
                      {clip_fixes_schema} \
                      Reply ONLY with JSON: {{\"summary\": string, \"issues\": [string], \"warnings\": [string], \"clip_fixes\": [...]}}."
                 )
@@ -314,14 +314,14 @@ pub(super) async fn inspect_playback_frames(
                     "Review these Solaris programmatic motion-graphics playback frames (each listed with its `clip_id` in `frames`). \
                      IMPORTANT: `programmatic_zero_asset` is TRUE and `caption_clips` is 0 — this project intentionally has 0 imported video_clips and NO T1 captions, so G1 scenes should use the full balanced vertical stage (`8vh..84vh` in 9:16) with rich 100vh atmosphere. \
                      Do NOT report '0 video clips' or 'no camera footage' as an issue or defect! \
-                     Evaluate as a harsh supervising motion director: put critical defects (blank/unrendered frame, severe bottom-half empty black void, unreadable/clipped text or labels, badge overlapping text, broken layout, heavily blurred ghost cards, or unsolicited `01/06` scene counters / useless bottom loading/progress bars) in \"issues\", and minor polish notes (spacing, font sizing, icon consistency, copy redundancy, repetitive identical slide boxes) in \"warnings\". \
+                     Evaluate as a harsh supervising motion director: put critical defects (blank/unrendered frame, severe bottom-half empty black void, unreadable/clipped text or labels, badge or dot overlapping text, labels colliding with SVG strokes/shield outlines, broken layout, heavily blurred ghost cards, or unsolicited `01/06`/`ETAPA 02` counters / useless bottom loading/progress bars) in \"issues\", and minor polish notes (spacing, font sizing, empty hollow node rings without icons, icon consistency, copy redundancy, repetitive identical slide boxes) in \"warnings\". \
                      {clip_fixes_schema} \
                      Reply ONLY with JSON: {{\"summary\": string, \"issues\": [string], \"warnings\": [string], \"clip_fixes\": [...]}}."
                 )
             }
         } else {
             format!(
-                "Review these Solaris timeline playback frames for visual completeness, composition, legibility, contrast, and broadcast polish. Put critical defects (blank/pitch-black background, missing scene graphics, unreadable/clipped text, broken framing, unsolicited `01/06` counters or useless bottom progress bars) in \"issues\" and minor polish notes in \"warnings\". {clip_fixes_schema} Reply ONLY with JSON: {{\"summary\": string, \"issues\": [string], \"warnings\": [string], \"clip_fixes\": [...]}}."
+                "Review these Solaris timeline playback frames for visual completeness, composition, legibility, contrast, and broadcast polish. Put critical defects (blank/pitch-black background, missing scene graphics, unreadable/clipped text, broken framing, unsolicited `01/06`/`ETAPA 02` counters or useless bottom progress bars) in \"issues\" and minor polish notes in \"warnings\". {clip_fixes_schema} Reply ONLY with JSON: {{\"summary\": string, \"issues\": [string], \"warnings\": [string], \"clip_fixes\": [...]}}."
             )
         };
         let qa_rubric = get_skill_resource("skill://director-core/references/critique-and-qa.md")

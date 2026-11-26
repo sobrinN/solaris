@@ -146,7 +146,13 @@ tl.to(prog, { p: 1, duration: 1.2, ease: "power3.inOut", onUpdate: () => {
 // 7. Beat punch on the camera rig (NEVER on a title)
 tl.fromTo("#rig", { scale: 1.04 }, { scale: 1, duration: 0.32, ease: "expo.out", immediateRender: false }, beatTime);
 
-// 8. Text fitter (measures actual text Range width, never over-shrinks flex/block boxes)
+// 8. Centered SVG orbital rotation (ALWAYS pass svgOrigin matching viewBox center!)
+tl.to("#globe-rings", { rotation: 24, svgOrigin: "270 270", duration: 4.0, ease: "none" }, 0);
+
+// 9. Continuous SVG edge data-packet pulse (eliminates 3-6s dead holds on graph scenes)
+tl.fromTo(".edge-pulse", { strokeDashoffset: 180 }, { strokeDashoffset: 0, duration: 2.2, ease: "none", repeat: 2 }, 1.0);
+
+// 10. Text fitter (measures actual text Range width, never over-shrinks flex/block boxes)
 function fitText(el, maxW, minPx = 14) {
   let fs = parseFloat(getComputedStyle(el).fontSize);
   el.style.whiteSpace = "nowrap";

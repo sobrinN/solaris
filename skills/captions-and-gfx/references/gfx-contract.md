@@ -36,6 +36,8 @@ All 7 Brand Playbook design tokens are injected on `:root`:
 
 **Semantic state tokens**: Keep success/up/paid/check states in semantic green (`#2BD67B`) and error/down/alert states in semantic red (`#FF5A5F`) rather than reusing `--brand-accent`.
 
+**Prompt palette precedence**: Default to `--brand-*` color tokens when the user does not request specific colors. When `brand.lock_brand_palette` is `true`, strictly enforce the Brand Playbook's `--brand-*` palette even if the prompt mentions other colors. Otherwise (`lock_brand_palette: false`), when the user prompt explicitly specifies a custom color palette (e.g., `#0A0F1C` navy + `#00E5FF` cyan + `#FF4D4D` red), honor those exact hex colors directly while still binding typography to `var(--brand-font-display, Sora)` and `var(--brand-font-body, Sora)` so fonts stay brand-consistent and lint-clean.
+
 ### `{{prop}}` Auto-Escaped Interpolation
 Use `{{key}}` or `{{nested.key}}` anywhere in `html_source` when authoring reusable `SavedCodeAsset`s. Solaris automatically HTML-escapes interpolated values and deep-merges `gfx.place` `props` over `default_props`.
 
@@ -76,6 +78,14 @@ Enforced across `gfx.lint_html`, `assets.save`, `gfx.place`, and `gfx.update_cli
 6. **Never pre-print `$0` on counters**: Hide a counter until its count starts, then count and stamp (`scale: 1.12 -> 1`).
 7. **Deterministic randomness only**: Replace `Math.random()` with a 4-line `mulberry32` seeded PRNG (see `references/motion-craft.md`).
 8. **Responsive scaling**: Use `vw`, `vh`, `vmin`, `clamp(...)`, `<svg viewBox>`, or `u = Math.min(window.innerWidth, window.innerHeight) / 1080` so scenes render identically in compact Studio preview and full `1080×1920` / `1920×1080` export.
+
+### SVG, Diagram & Full-Stage Layout Contract (Zero Overlaps, Zero Bottom Voids)
+1. **HTML for text, SVG for geometry**: Render multi-word labels, risk cards, callouts, and pills in CSS Flex/Grid containers — NEVER hand-place `<text x y>` or `position: absolute` labels over dense SVG node graphs (especially in Portuguese/Spanish where phrases run ~25% longer than English).
+2. **Strict node, stroke & enclosure clearance**: When a short label (`<= 2` words) accompanies an SVG node, place it strictly outside the circle radius (`cy + r + 20` or `cy - r - 14`, never overlapping the ring border or connecting lines). Never place a cyan/accent dot on top of a text label or central panel title. Inside enclosing shapes (shields, frames, rings), keep `>= 32px` inner padding so labels never cross the outline.
+3. **SVG rotation origin & symmetric centering**: NEVER animate `rotation` or `scale` on an SVG `<g>`/`<path>` without explicit `svgOrigin: "<cx> <cy>"` matching the `viewBox` center (or CSS `transform-box: fill-box; transform-origin: center;`) — rotating around SVG `(0,0)` swings globes and orbits off-center into pills and edges. Center hero SVG diagrams symmetrically at `(W/2, H/2)` inside their frame/shield, and keep radial orbit radii compact enough that wide labels (e.g. `Domínio WHOIS`) keep `>= 24px` margin from viewport edges.
+4. **No empty placeholder nodes**: Every node circle must contain either a crisp linear SVG icon (`stroke-width: 1.8`) or a solid glowing core dot — never render empty hollow rings with floating orphan labels.
+5. **3-Zone Full-Stage CSS Grid Scaffold & Contrast Floor** (when no `T1` captions are active): Build full-canvas scenes with `display: grid; grid-template-rows: auto 1fr auto; align-items: center; padding: 7vh 5vw 9vh;` inside `position: fixed; inset: 0; width: 100vw; height: 100vh;` so Header, Hero Diagram (`1fr`), and Bottom Takeaway/Legend automatically balance across `8vh..84vh` with zero bottom-half void. Keep even secondary footers/disclaimers `>= 13px` at `>= 0.70` ink opacity so nothing drops below `360px` phone readability.
+6. **Continuous living motion (no dead holds `> 2.0s`)**: After the fast entrance (`<= 0.35s` headline, `<= 1.2s` hero settle), every scene `> 3.0s` MUST include subtle deterministic GSAP mid-scene motion through `data-duration` (e.g., centered `svgOrigin` orbital rotation, animated `stroke-dashoffset` data packets along graph edges, pulsing risk rings, or a `scale: 1.0 -> 1.03` push) while keeping landed headlines dead still.
 
 ---
 

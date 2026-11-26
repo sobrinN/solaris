@@ -22,7 +22,7 @@ use crate::swarm::llm::{route_models, strip_json_fence};
 use super::apply_locked_op;
 use super::vision::VisionClipFix;
 
-const MAX_REPAIR_CLIPS_PER_PASS: usize = 4;
+const MAX_REPAIR_CLIPS_PER_PASS: usize = 7;
 const REPAIR_MAX_TOKENS: u32 = 8192;
 
 #[derive(Debug, Deserialize)]
@@ -193,13 +193,21 @@ async fn request_repaired_html(
         }
     };
 
+    let brand_palette_note = if brand.is_some_and(|b| b.lock_brand_palette) {
+        "Keep strict Brand Playbook CSS variables (`--brand-bg`, `--brand-surface`, `--brand-ink`, `--brand-accent`, `--brand-accent-secondary`, `--brand-font-display`, `--brand-font-body`) because `lock_brand_palette` is enabled."
+    } else {
+        "Keep typography bound to `var(--brand-font-display, Sora)` / `var(--brand-font-body, Sora)` while preserving any custom scene colors."
+    };
+
     let system_prompt = format!(
         "You are Solaris Visual QA Repair Specialist. Fix ONLY the reported visual defects on this single G1 HTML/CSS/SVG/GSAP scene while preserving its language, core message, timing (`data-duration`), and visual cohesion.\n\
          RULES:\n\
-         - Fix every reported overlap, clipped label, edge cutoff, layout imbalance, or redundant copy.\n\
-         - {layout_band_rule}\n\
-         - REMOVE any unsolicited scene counter badges (`01 / 06`, `02/06`, `Scene 1/6`) and REMOVE any useless bottom loading/progress bars unless the defect explicitly asks to keep them.\n\
-         - Keep at least `16px` (`3vw`) padding inside cards/viewport so zero characters clip, and never let absolute-positioned badges overlap captions or headlines.\n\
+         - Fix every reported overlap, clipped label, edge cutoff, layout imbalance, bottom void, empty node ring, low-contrast disclaimer, or redundant copy.\n\
+         - {layout_band_rule} When fixing a bottom-half void without T1 captions, switch the stage container to a 3-zone CSS Grid (`display:grid;grid-template-rows:auto 1fr auto;align-items:center;padding:7vh 5vw 9vh;box-sizing:border-box;`) so Header, Hero (`1fr`), and Bottom Callout/Legend fill the frame evenly.\n\
+         - SVG & DIAGRAM ANTI-COLLISION & CENTERING: NEVER leave a cyan/accent dot or circle sitting on top of text (like a central panel title). Move multi-word labels, risk cards, or callouts into clean HTML CSS Flex/Grid containers rather than cramped `<text x y>` over dense SVG paths. Keep short SVG labels cleanly outside node radii (`>= 16px` clearance), center hero diagrams symmetrically at `(W/2, H/2)`, and keep `>= 32px` inner padding inside enclosing shields/rings so labels never cross outlines. Whenever GSAP animates `rotation` or `scale` on an SVG element, ALWAYS specify explicit `svgOrigin: \"<cx> <cy>\"` matching the `viewBox` center so rotating globes/rings never swing off-center. Populate any empty placeholder node circle with a crisp linear icon or solid glowing core dot.\n\
+         - REMOVE any unsolicited scene/step counter badges (`01 / 06`, `02/06`, `ETAPA 02`, `PASSO 1`, `STEP 2`, `Scene 1/6`) and REMOVE any useless bottom loading/progress bars unless the defect explicitly asks to keep them.\n\
+         - Keep at least `16px` (`3vw`) padding inside cards/viewport so zero characters clip, keep secondary footers/disclaimers `>= 13px` at `>= 0.70` ink opacity, and never let absolute-positioned badges overlap captions or headlines.\n\
+         - {brand_palette_note}\n\
          - Keep strict Solaris sandbox rules: root `<div class=\"clip\" data-start=\"0\" data-duration=\"{:.2}\">`, full-canvas `position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;`, inline GSAP (`window.gsap`) ONLY, ZERO `<script src=...>`, ZERO `<link>`, ZERO external URLs/CDNs, ZERO `Math.random`/`Date.now`/`setInterval`/`setTimeout`/`requestAnimationFrame`/`fetch`.\n\
          - Return ONLY a valid JSON object: {{\"inline_html\": \"<complete repaired HTML>\"}} (no markdown fences, no commentary).",
         plan.clip.duration_sec
@@ -252,7 +260,7 @@ async fn request_repaired_html(
             ..ProviderPreferences::default()
         }),
         reasoning: supports_reasoning.then(|| ReasoningConfig {
-            effort: Some("low".to_string()),
+            effort: Some("medium".to_string()),
             ..ReasoningConfig::default()
         }),
         max_tokens: Some(REPAIR_MAX_TOKENS),

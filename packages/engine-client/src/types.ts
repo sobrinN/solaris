@@ -199,6 +199,7 @@ export interface BrandPlaybook {
   name: string;
   brand_md: string;
   tokens: BrandTokens;
+  lock_brand_palette?: boolean;
   default_lut?: string | null;
   pacing_rules: string;
   reference_media: BrandReferenceAsset[];

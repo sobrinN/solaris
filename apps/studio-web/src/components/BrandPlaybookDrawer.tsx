@@ -430,6 +430,25 @@ export function BrandPlaybookDrawer({
               ))}
             </div>
 
+            <label className="mt-3 flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-areia/10 bg-void/60 px-3 py-2.5">
+              <div className="min-w-0">
+                <span className="block text-[11px] font-medium text-areia">
+                  Lock Brand Palette
+                </span>
+                <span className="block text-[10px] text-areia/55">
+                  Enforce these brand colors even when a prompt requests different hex colors.
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                checked={Boolean(draft.lock_brand_palette)}
+                onChange={(e) =>
+                  setDraft({ ...draft, lock_brand_palette: e.target.checked })
+                }
+                className="h-4 w-4 shrink-0 cursor-pointer accent-laranja-criacao"
+              />
+            </label>
+
             {/* Brand Typography Tokens (Display & Body) */}
             <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
               <label className="block space-y-1">

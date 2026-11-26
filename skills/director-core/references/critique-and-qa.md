@@ -79,8 +79,11 @@ When one of these real-world defects appears on a captured frame, stop tweaking 
 | **"Counter shows $0 before counting"** | Counter text pre-rendered at `t=0`. | Hide with `tl.set(el, { opacity: 0 }, 0)` until count start `t`, then count + stamp. |
 | **"Boxes move robotically"** | Uniform sequential stagger or per-item wobble loop. | Overlap entrances 30–50%, vary eases by role, freeze landed titles. |
 | **"GFX collides with T1 captions"** | Floating `G1` left at default `y: 0` or full-canvas content spilled below `61vh`. | Offset floating `G1` via `timeline.set_transform(y=-0.24)`; keep 9:16 full-canvas foreground inside `5vh..61vh`. |
-| **"Useless progress bars or `01/06` scene counters"** | Slide-deck chrome stamped onto video scenes. | Remove unrequested bottom loading/progress bars and `01/06` scene counters via `gfx.update_clip`; let the visual storytelling carry the frame. |
+| **"Useless progress bars or `01/06` / `ETAPA 02` counters"** | Slide-deck chrome stamped onto video scenes. | Remove unrequested bottom loading/progress bars and scene/step counters (`01/06`, `ETAPA 02`, `STEP 2`) via `gfx.update_clip`; let the visual storytelling carry the frame. |
 | **"Badge/label clipped or overlapping text"** | Absolute-positioned badge collides with caption or overflows card padding. | Reposition or remove overlapping badge and expand container padding/viewBox via `gfx.update_clip` so every character has clear breathing room. |
+| **"SVG node/dot covers text or labels collide with strokes/shield"** | Hand-placed `<text>` or dots overlap SVG geometry or enclosing outlines. | Move multi-word labels/cards to CSS Flex/Grid containers outside the SVG, offset short SVG labels outside circle radii (`>= 16px`), remove dots over text, and keep `>= 32px` padding inside enclosing shields/rings. |
+| **"Empty placeholder node rings with orphan labels"** | Hollow `<circle>` nodes drawn without icons or inner cores. | Populate every node circle with a crisp linear icon or solid glowing core dot and center-align its label cleanly below/above the ring. |
+| **"Scene freezes dead for > 3s after entrance"** | Timeline ends all tweens at `t=1.0s` on a `5–7s` clip. | Add continuous GSAP mid-scene motion (`stroke-dashoffset` edge pulses, slow orbital drift, or pulsing alert rings) spanning `t=0.8s..duration` while keeping headlines still. |
 
 ---
 

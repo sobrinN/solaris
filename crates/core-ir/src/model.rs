@@ -340,6 +340,8 @@ pub struct BrandPlaybook {
     pub brand_md: String,
     pub tokens: BrandTokens,
     #[serde(default)]
+    pub lock_brand_palette: bool,
+    #[serde(default)]
     pub default_lut: Option<String>,
     pub pacing_rules: String,
     #[serde(default)]
@@ -362,6 +364,7 @@ impl BrandPlaybook {
                 font_display: "Sora".to_string(),
                 font_body: "Sora".to_string(),
             },
+            lock_brand_palette: false,
             default_lut: None,
             pacing_rules: "Cut silences > 0.25s with 0.12s breath pad; B-roll cutaway every 3.5s.".to_string(),
             reference_media: Vec::new(),
