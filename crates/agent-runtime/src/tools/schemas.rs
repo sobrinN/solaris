@@ -513,7 +513,10 @@ pub fn all_tools() -> Vec<ToolSpec> {
                         "description": "Optional saved GFX template ID from assets_search; omit when providing inline_html."
                     },
                     "props": {"type": "object"},
-                    "inline_html": {"type": "string"}
+                    "inline_html": {
+                        "type": "string",
+                        "description": "Full seekable HTML/CSS/SVG/GSAP snippet (<div class=\"clip\" data-start=\"0\" data-duration=\"...\">...</div>). Required unless referencing a saved template via asset_id."
+                    }
                 },
                 "required": ["project_id", "clip_id", "label", "start_sec", "duration_sec"]
             }),

@@ -37,7 +37,7 @@ Before placing clips, lock in **one Storyline Device × Camera Form** (`skill://
    - **Mechanism / Steps**: `agent-pipeline`, `bento-reveal`, `explainer-build`, `terminal-run`, `code-diff`, or `progress-bar-solar` (top safe band `y: -0.30`).
    - **Comparison / Verdict**: `matrix-2x2`, `pros-cons`, `strike-correct`, or `verdict-card` stamped with semantic green `#2BD67B` / red `#FF5A5F`.
    - **End Card (`last 2.0–3.5s`)**: Mark/wordmark lands with weight, specular sweep runs once, holds cleanly to the end.
-2. **Safe-Band Hygiene**: For full-canvas `G1` scenes, keep `Transform2D` at `(0, 0)`, extend ambient glow/grid across the full `100vh`, and keep foreground cards/diagrams strictly inside `5vh..61vh` on `9:16` (`6vh..72vh` on `16:9`) so `T1` captions never overlap. For floating `G1` overlays, offset via `timeline.set_transform` (`|gfx.y - cap.y| >= 0.08`).
+2. **Safe-Band Hygiene**: For full-canvas `G1` scenes, keep `Transform2D` at `(0, 0)` and extend ambient glow/grid across the full `100vh`. When `T1` captions exist, keep foreground cards/diagrams inside `6vh..62vh` on `9:16` (`6vh..72vh` on `16:9`) so captions never overlap; when **no `T1` captions exist**, balance foreground cleanly across `8vh..84vh` on `9:16` (`8vh..88vh` on `16:9`) so there is never a bottom-half black void. For floating `G1` overlays, offset via `timeline.set_transform` (`|gfx.y - cap.y| >= 0.08`).
 3. **Captions Alignment**: Call `captions.generate_from_transcript` after `A1` is placed (never place fake captions when no narration transcript exists). For `16:9` explainers, prefer `minimal` or `mono_caps` at `3–4` words/burst unless high-energy `neon_glow`/`karaoke` is requested.
 
 ## 5. BANNED Faceless Explainer Defaults

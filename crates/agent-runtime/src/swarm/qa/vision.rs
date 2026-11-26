@@ -242,11 +242,19 @@ pub(super) async fn inspect_playback_frames(
 
         let is_programmatic_zero_asset = video_clips == 0 && gfx_clips > 0;
         let task_prompt = if is_programmatic_zero_asset {
-            "Review these Solaris programmatic motion-graphics playback frames (hook, mid, climax). \
-             IMPORTANT: `programmatic_zero_asset` is TRUE — this project intentionally has 0 imported video_clips and is a pure HTML/CSS/SVG/GSAP motion-graphics video on G1 + captions on T1. \
-             Do NOT report '0 video clips' or 'no camera footage' as an issue or defect! \
-             Evaluate the motion graphics as a studio explainer: put genuine critical defects (completely blank/unrendered frame, unreadable/clipped text, severe overlap where captions cover diagrams/headlines, broken layout) in \"issues\", and minor polish notes (spacing, font sizing, badge consistency, caption copy redundancy) in \"warnings\". \
-             Reply ONLY with JSON: {\"summary\": string, \"issues\": [string], \"warnings\": [string]}."
+            if caption_clips > 0 {
+                "Review these Solaris programmatic motion-graphics playback frames (hook, mid, climax). \
+                 IMPORTANT: `programmatic_zero_asset` is TRUE — this project intentionally has 0 imported video_clips and is a pure HTML/CSS/SVG/GSAP motion-graphics video on G1 + captions on T1 (`caption_clips > 0`). \
+                 Do NOT report '0 video clips' or 'no camera footage' as an issue, and do NOT penalize intentional vertical clearance in the `64vh..76vh` band reserved for T1 captions as long as the ambient backdrop extends across 100vh. \
+                 Evaluate the motion graphics as a studio explainer: put genuine critical defects (completely blank/unrendered frame, unreadable/clipped text, severe overlap where captions cover diagrams/headlines, broken layout or heavily blurred ghost cards) in \"issues\", and minor polish notes (spacing, font sizing, badge consistency, caption copy redundancy) in \"warnings\". \
+                 Reply ONLY with JSON: {\"summary\": string, \"issues\": [string], \"warnings\": [string]}."
+            } else {
+                "Review these Solaris programmatic motion-graphics playback frames (hook, mid, climax). \
+                 IMPORTANT: `programmatic_zero_asset` is TRUE and `caption_clips` is 0 — this project intentionally has 0 imported video_clips and NO T1 captions, so G1 scenes should use the full balanced vertical stage (`8vh..84vh` in 9:16) with rich 100vh atmosphere. \
+                 Do NOT report '0 video clips' or 'no camera footage' as an issue or defect! \
+                 Evaluate the motion graphics as a studio explainer: put genuine critical defects (completely blank/unrendered frame, severe bottom-half empty black void, unreadable/clipped text, broken layout or heavily blurred ghost cards) in \"issues\", and minor polish notes (spacing, font sizing, badge consistency, icon consistency, copy redundancy) in \"warnings\". \
+                 Reply ONLY with JSON: {\"summary\": string, \"issues\": [string], \"warnings\": [string]}."
+            }
         } else {
             "Review these Solaris timeline playback frames (hook, mid, climax) for visual completeness, composition, legibility, contrast, and broadcast polish. Put critical defects (blank/pitch-black background, missing scene graphics, unreadable/clipped text, broken framing) in \"issues\" and minor polish notes in \"warnings\". Reply ONLY with JSON: {\"summary\": string, \"issues\": [string], \"warnings\": [string]}."
         };

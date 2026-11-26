@@ -8,7 +8,7 @@ Use this playbook whenever choosing or authoring a `G1` motion-graphic move—ei
 2. **Instrument, Not a Sentence**: To show "fast", animate a counter or stopwatch stopping; "growth", a sparkline or bar race; "comparison", a 2×2 matrix or pros/cons split; "proof", a receipt, quote card, or KPI tile.
 3. **Overlay vs Full-Canvas Cutaway**:
    - **Floating Overlay (over `V1` talking head)**: Transparent background (no full-screen backdrop/vignette), give cards enough opaque/frosted body (`rgba(26,14,14,0.88)` + `1px` rim) to read over any footage, enter from empty at `t=0`, exit cleanly in the last `0.30–0.40s`, and call `timeline.set_transform(track_id="g1", y=-0.22)` so it stays clear of the face and `T1` captions (`y: 0.20`).
-   - **Full-Canvas Programmatic Scene (zero-asset or B-roll cutaway)**: Fill `100vw × 100vh` with layered ambient glow + subtle grid/grain, keep `Transform2D` at `(0, 0)`, keep all foreground cards/diagrams inside `5vh..61vh` on `9:16` (`6vh..72vh` on `16:9`) so `T1` captions never collide, and hold core visuals visible to the scene cut (no fade-to-black before exit).
+   - **Full-Canvas Programmatic Scene (zero-asset or B-roll cutaway)**: Fill `100vw × 100vh` with layered ambient glow + subtle grid/grain, keep `Transform2D` at `(0, 0)`, and hold core visuals visible to the scene cut (no fade-to-black before exit). On `9:16`, keep foreground inside `6vh..62vh` when `T1` captions are active, or distribute evenly across `8vh..84vh` when no `T1` captions exist (never leaving a bottom-half black void).
 
 ---
 

@@ -1484,7 +1484,6 @@ export function StudioWorkspace({
               setSelectedClipIds((prev) => prev.filter((id) => id !== clipId))
             }
             agentStatus={agentStatus}
-            mcpEndpoint={`${client.getBaseUrl()}${agentStatus?.mcp_http_path ?? "/mcp"}`}
             activeModelLabel={activeModelLabel}
             activeSwarmRun={activeSwarmRun}
             latestQaReport={latestQaReport}
@@ -1498,7 +1497,6 @@ export function StudioWorkspace({
             onStartSwarm={handleStartSwarm}
             onCancelSwarm={handleCancelSwarm}
             onRunQa={handleRunQa}
-            onOpenAiSettings={onOpenAiSettings}
           />
         </div>
 

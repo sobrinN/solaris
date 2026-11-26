@@ -277,10 +277,16 @@ pub(crate) async fn build_openrouter_director_plan(
         .map(|a| format!("{} ({})", a.id, a.name))
         .collect();
 
-    let captions_rule = if narration_expected(project) {
+    let has_captions = narration_expected(project);
+    let captions_rule = if has_captions {
         "Captions: transcribed narration is present, so plan captions from its transcript (captions_notes: caption style and timing only)."
     } else {
         "Captions: NO narration with a transcript was detected, so plan no captions and set `captions_notes` to \"No captions: no narration detected\"."
+    };
+    let portrait_band_note = if has_captions {
+        "contained cleanly inside `6vh..62vh` for 9:16 so `64vh..76vh` stays clear for T1 captions, with layered ambient glow/grid across 100vh"
+    } else {
+        "balanced across the full `8vh..84vh` safe stage for 9:16 (NO T1 captions are present, so fill upper, middle hero, and lower anchor zones evenly with zero bottom-half black void)"
     };
     let mode_guidance = if programmatic_visuals {
         format!(
@@ -288,9 +294,9 @@ pub(crate) async fn build_openrouter_director_plan(
              Solaris will synthesize the ENTIRE {:.1}s video in PARALLEL using dedicated scene micro-agents on G1. \
              {captions_rule} \
              Do NOT invent fake media_ids or ask for imported footage, and NEVER put internal asset IDs (like `progress-bar-solar`) into visible text specs. \
-             In `art_direction`, define ONE unified visual system shared by all scenes (rich full-height layered radial glow + subtle architectural grid backdrop across 100vh so lower regions are never pitch-black, consistent top scene badge format `01 / N`, bold editorial typography, vertical-friendly diagram geometry, crisp brand accent glow). \
+             In `art_direction`, define ONE unified visual system shared by all scenes (rich full-height layered radial glow + subtle architectural grid backdrop across 100vh so lower regions are never pitch-black, ONE exact uniform top badge format `01 / N · TAG` using a middle dot across every scene, bold editorial typography, vertical-friendly diagram geometry, crisp non-blurred cards, and consistent checklist/step icons). \
              In `scenes`, output 5 to 7 contiguous scene objects covering 0.0s to {:.1}s with ZERO gaps: \
-             each object MUST have `scene_index` (1..N), `title`, `start_sec`, `duration_sec`, `visual_brief` (specific diagram/UI/visual focal point contained cleanly inside `5vh..61vh` for 9:16 so `63vh..76vh` stays clear for T1 captions), `motion_cue` (fast headline entrance <= 0.35s + living mid-scene motion, NO fade-to-black before scene end), and `narration` (natural punchy voiceover line that complements the on-screen graphic rather than repeating the headline verbatim). \
+             each object MUST have `scene_index` (1..N), `title`, `start_sec`, `duration_sec`, `visual_brief` (specific diagram/UI/visual focal point {portrait_band_note}), `motion_cue` (fast headline entrance <= 0.35s + living mid-scene motion, NO fade-to-black before scene end), and `narration` (natural punchy voiceover line that complements the on-screen graphic rather than repeating the headline verbatim). \
              Keep the brief summary in `gfx_notes`. \
              Set `spine_notes`, `broll_notes`, `grade_notes`, and `mix_notes` to brief 1-line notes (\"Programmatic G1/T1 mode\").",
             inferred_duration_sec, inferred_duration_sec
@@ -888,11 +894,11 @@ pub(crate) async fn run_llm_worker_loop(
                  - Program 6 to 8 distinct, contiguous full-canvas HTML/CSS/SVG/GSAP scenes via `gfx_place` (`inline_html`), covering `0.0s` through `{:.1}s` with ZERO black gaps (each scene ~3.0–4.5s, contiguous `start_sec`).\n\
                  - **CRITICAL PACING & TOKEN RULE**: Place ONLY **1 or 2 scenes per turn**! NEVER batch 4+ full-canvas HTML tool calls into one response (that overflows output tokens and truncates JSON).\n\
                  - **Call `gfx_place` directly** — it ALREADY runs deterministic HTML linting automatically and returns exact errors if anything needs fixing. Do NOT waste tokens calling `gfx_lint_html` first.\n\
-                 - Keep each scene compact (~2–4 KB of crisp HTML/CSS/SVG/GSAP) yet visually rich: fill the full canvas (`position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;`), extend layered gradient/ambient-glow/grid atmosphere across the FULL `100vh` (so the bottom half never looks like a dead pitch-black void), and build bold editorial typography, bespoke inline `<svg viewBox=...>` diagrams, UI cards, and icons.\n\
+                 - Keep each scene compact (~2–4 KB of crisp HTML/CSS/SVG/GSAP) yet visually rich: fill the full canvas (`position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;`), extend layered gradient/ambient-glow/grid atmosphere across the FULL `100vh` (so the bottom half never looks like a dead pitch-black void), and build bold editorial typography, bespoke inline `<svg viewBox=...>` diagrams, crisp non-blurred UI cards, and consistent icons.\n\
                  - Use responsive viewport units (`vw`, `vh`, `vmin`, `clamp(...)`, `%`, `<svg viewBox>`) so every scene renders identically in both compact Studio preview and full {}x{} export. In vertical 9:16, stack diagrams vertically (1–2 columns max, NEVER 4 horizontal columns) and keep readable labels `>= 14px`.\n\
                  - `window.gsap` is ALREADY pre-loaded globally offline — NEVER write `<script src=...>` or `<link>` tags; write ONLY inline `<script>...</script>` (`window.__timelines = window.__timelines || {{}}; const tl = gsap.timeline({{paused:true}}); ... window.__timelines['main'] = tl;`) OR CSS `@keyframes`. Complete primary headline entrance by `t <= 0.35s` and keep elements visible (no fade-to-black before exit).\n\
                  - Use brand CSS variables (`--brand-bg`, `--brand-surface`, `--brand-ink`, `--brand-accent`, `--brand-accent-secondary`, `--brand-font-display`, `--brand-font-body`). Never print internal Solaris asset IDs (e.g. `progress-bar-solar`) as visible text.\n\
-                 - Non-overlapping vertical bands: in 9:16 portrait, keep ALL foreground G1 content (pill, headline, cards, diagrams) cleanly inside `5vh..61vh` so the `63vh..76vh` band stays 100% clear for `T1` captions (`y: 0.20`) and `78vh..100vh` stays clear for social UI (only ambient backdrop/glow extends full `100vh`). Leave `transform` at `(0,0)` for full-canvas scenes.\n\
+                 - Balanced vertical framing: in 9:16 portrait, if T1 captions exist keep foreground inside `6vh..62vh` (`64vh..76vh` clear for captions); when NO T1 captions exist, distribute foreground cleanly across the full `8vh..84vh` stage (top badge/headline, generous hero diagram/cards, lower anchor/progress rail) so the bottom half is never an empty black void. Never render heavily blurred ghost cards (`filter: blur(...)` on text cards), keep badge separators (`01 / N · TAG`) and checklist icons 100% consistent, and never repeat list items verbatim in subtitles. Leave `transform` at `(0,0)` for full-canvas scenes.\n\
                  - Follow strict sandbox rules: root `<div class=\"clip\" data-start=\"0\" data-duration=\"...\">`, ZERO `<script src=...>`, ZERO external URLs/CDNs, ZERO `Math.random`, `Date.now`, `setInterval`, `setTimeout`, `requestAnimationFrame`, `fetch`.\n\
                  - After all scenes cover `0.0s..{:.1}s`, save 1 reusable custom scene template via `assets_save`. Director runs final Vision QA automatically after specialists finish.",
                 target_duration_sec,
@@ -1327,10 +1333,24 @@ pub(crate) async fn run_programmatic_scene_worker(
     };
 
     let is_portrait = project.canvas.height > project.canvas.width;
-    let layout_zone_rule = if is_portrait {
-        "VERTICAL 9:16 SAFE-BAND LAYOUT (CRITICAL — ZERO CAPTION OVERLAP): Keep ALL foreground content (top pill, headline, cards, diagrams, lower badges) strictly between `top: 5vh` and `61vh` (`max-height: 56vh` container starting at `5vh`). NEVER place cards, diagrams, or lower-third bars below `62vh` — `63vh..76vh` is reserved for `T1` kinetic captions (`y=0.20`) and `78vh..100vh` is the bottom social UI safe zone. Stack cards/diagrams vertically (1–2 columns max, NEVER 4 side-by-side horizontal columns in 9:16) and keep all readable body/SVG label text >= 14px (SVG `font-size >= 18` in a `540`-wide `viewBox`)."
-    } else {
-        "WIDESCREEN/SQUARE SAFE-BAND LAYOUT: Keep ALL foreground content cleanly inside `6vh..72vh` so `75vh..88vh` stays completely clear for `T1` kinetic captions. Keep all readable body/diagram text >= 15px."
+    let has_captions = narration_expected(project)
+        || project
+            .tracks
+            .iter()
+            .any(|t| t.id == "t1" && !t.muted && !t.clips.is_empty());
+    let layout_zone_rule = match (is_portrait, has_captions) {
+        (true, true) => {
+            "VERTICAL 9:16 SAFE-BAND LAYOUT (CAPTIONS ACTIVE — ZERO OVERLAP): Keep ALL foreground content (top pill, headline, cards, diagrams, lower badges) cleanly between `top: 6vh` and `62vh` (`max-height: 56vh` container starting at `6vh`) so `64vh..76vh` stays clear for `T1` kinetic captions (`y=0.20`) and `78vh..100vh` stays clear for social UI. Extend layered radial glows, architectural grid lines, and bottom horizon glow across the FULL `100vh`. Stack cards/diagrams vertically (1–2 columns max, NEVER 4 horizontal columns) and keep all readable body/SVG label text >= 14px (SVG `font-size >= 18` in a `540`-wide `viewBox`)."
+        }
+        (true, false) => {
+            "VERTICAL 9:16 FULL-STAGE LAYOUT (NO T1 CAPTIONS — ZERO BOTTOM-HALF VOID): This video has NO T1 captions, so DO NOT cram everything into the top 55%! Build a full-height flex/grid stage spanning `top: 7vh; bottom: 13vh` (`height: 80vh`, leaving only `0..7vh` top and `87vh..100vh` bottom social margins) using balanced 3-zone vertical rhythm (`justify-content: space-between`): (1) top badge + bold headline, (2) generous centered hero diagram/cards occupying ~45–55% of frame height, and (3) a crisp lower takeaway strip, metric bar, or scene progress rail anchored near `76vh..85vh`. Extend rich layered ambient glows and subtle grid across the FULL `100vh`. Stack cards/diagrams vertically (1–2 columns max, NEVER 4 horizontal columns) and keep all readable body/SVG label text >= 14px (SVG `font-size >= 18` in a `540`-wide `viewBox`)."
+        }
+        (false, true) => {
+            "WIDESCREEN/SQUARE SAFE-BAND LAYOUT (CAPTIONS ACTIVE): Keep ALL foreground content cleanly inside `6vh..72vh` so `75vh..88vh` stays completely clear for `T1` kinetic captions. Keep all readable body/diagram text >= 15px."
+        }
+        (false, false) => {
+            "WIDESCREEN/SQUARE FULL-STAGE LAYOUT (NO T1 CAPTIONS): Fill the balanced `8vh..88vh` stage cleanly with zero dead voids. Keep all readable body/diagram text >= 15px."
+        }
     };
     let canonical_badge = format!("{:02} / {:02}", scene.scene_index, total_scenes);
 
@@ -1353,7 +1373,7 @@ pub(crate) async fn run_programmatic_scene_worker(
          - Call `gfx_place` DIRECTLY with `inline_html` on Turn 1 (do NOT call `gfx_lint_html` first; `gfx_place` lints automatically and returns exact errors if anything needs fixing).\n\
          - Fill the entire canvas (`position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;`) with a cohesive, broadcast-grade visual composition: extend rich layered ambient radial glows, subtle architectural grid/mesh lines, and subtle bottom horizon glow across the ENTIRE `100vh` (so the bottom 40% never looks like an empty pitch-black void), with bold editorial typography and bespoke inline `<svg viewBox=...>` diagrams/cards/icons.\n\
          - {layout_zone_rule} Keep `transform` at default `(0,0)`.\n\
-         - CONSISTENT SCENE CHROME: Use the EXACT `scene.canonical_badge` from the user JSON (never invent a different denominator like `01/03`). NEVER print internal Solaris asset/tool IDs (such as `progress-bar-solar`, `chapter-title-solar`, `stat-card-solar`, `lower-third-solar`) as visible text.\n\
+         - CONSISTENT SCENE CHROME & VISUAL HYGIENE: Use the EXACT `scene.canonical_badge` from the user JSON with a uniform middle-dot separator whenever adding a short topic tag (e.g. `01 / 06 · FOCO` on EVERY scene — never omit `·` on scene 1). NEVER render heavily blurred ghost/duplicate text cards (`filter: blur(...)` on secondary cards reads as a broken render; use crisp lower opacity `0.45–0.65` instead). Keep checklist/step iconography 100% consistent within a list (all checkmarks or all sequential numbers — never mix checkmarks with chevrons/arrows). Never repeat card/list item text verbatim in the scene subtitle. NEVER print internal Solaris asset/tool IDs (such as `progress-bar-solar`, `chapter-title-solar`, `stat-card-solar`, `lower-third-solar`) as visible text.\n\
          - Use responsive viewport units (`vw`, `vh`, `vmin`, `clamp(...)`, `%`, `<svg viewBox>`) so the scene scales crisply across Studio preview and {}x{} export.\n\
          - Use Brand CSS variables (`--brand-bg`, `--brand-surface`, `--brand-ink`, `--brand-accent`, `--brand-accent-secondary`, `--brand-font-display`, `--brand-font-body`) with clean fallbacks matching the brand tokens.\n\
          - GSAP 3 (`window.gsap`) IS ALREADY INJECTED GLOBALLY OFFLINE — NEVER write `<script src=...>` or `<link>` tags! Write ONLY an inline `<script>...</script>` (`window.__timelines = window.__timelines || {{}}; const tl = gsap.timeline({{paused:true}}); ... window.__timelines['main'] = tl;`). Complete the primary headline entrance by `t <= 0.35s` (immediately readable hook!), stagger diagrams/cards cleanly by `0.75s` with living mid-scene motion, and keep all core elements at full opacity through the end of the clip (do NOT fade the scene out to black before exit).\n\
@@ -1771,6 +1791,24 @@ pub(crate) fn normalize_programmatic_gfx_place_args(
         .is_none_or(|s| s.trim().is_empty())
     {
         obj.insert("label".to_string(), json!(scene.title));
+    }
+    // Normalize common HTML field aliases (`html_source` / `html`) into `inline_html`
+    // so scene workers never fail with missing inline_html.
+    let has_inline_html = obj
+        .get("inline_html")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.trim().is_empty());
+    if !has_inline_html {
+        let alias_html = ["html_source", "html"].into_iter().find_map(|key| {
+            obj.get(key)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
+        if let Some(html) = alias_html {
+            obj.insert("inline_html".to_string(), json!(html));
+        }
     }
     // Programmatic scene workers author bespoke inline_html; stripping any hallucinated
     // asset_id (such as echoing clip_id) prevents unnecessary unknown-asset retries.

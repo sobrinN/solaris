@@ -50,6 +50,18 @@ fn req_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, AgentError> {
         .ok_or_else(|| AgentError::ToolError(format!("missing required string argument '{key}'")))
 }
 
+fn extract_inline_html(args: &Value) -> Option<String> {
+    ["inline_html", "html_source", "html"]
+        .into_iter()
+        .find_map(|key| {
+            args.get(key)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+}
+
 fn req_f64(args: &Value, key: &str) -> Result<f64, AgentError> {
     args.get(key)
         .and_then(|v| v.as_f64())
@@ -1505,12 +1517,7 @@ pub async fn execute_tool(
             let start_sec = opt_num("start_sec").unwrap_or(existing.start_sec);
             let duration_sec = opt_num("duration_sec").unwrap_or(existing.duration_sec);
             let mut next_gfx = gfx.clone();
-            let mut inline_html = args
-                .get("inline_html")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
+            let mut inline_html = extract_inline_html(&args);
             if let Some(aid) = args
                 .get("asset_id")
                 .and_then(|v| v.as_str())
@@ -1658,12 +1665,7 @@ pub async fn execute_tool(
                     ));
                 }
             };
-            let mut inline_html = args
-                .get("inline_html")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
+            let mut inline_html = extract_inline_html(&args);
 
             if let Some(ref aid) = asset_id {
                 let assets = backend.list_assets().await?;
@@ -2538,6 +2540,23 @@ mod tests {
             }
         }
 
+        // Alias keys (`html` / `html_source`) are accepted when `inline_html` is omitted
+        execute_tool(
+            &backend,
+            "gfx.place",
+            json!({
+                "project_id": pid,
+                "clip_id": "g1-html-alias",
+                "label": "Alias HTML Card",
+                "start_sec": 2.0,
+                "duration_sec": 2.0,
+                "html_source": "<div class=\"clip\" data-start=\"0\" data-duration=\"2\" style=\"color:var(--brand-ink)\">Alias</div>"
+            }),
+            meta.clone(),
+        )
+        .await
+        .unwrap();
+
         // Non-object props (string/array) must fail with ToolError
         let err = execute_tool(
             &backend,
@@ -2546,7 +2565,7 @@ mod tests {
                 "project_id": pid,
                 "clip_id": "g1-bad-props",
                 "label": "Bad Props Card",
-                "start_sec": 2.0,
+                "start_sec": 4.0,
                 "duration_sec": 2.0,
                 "asset_id": "card-1",
                 "props": "not-an-object"

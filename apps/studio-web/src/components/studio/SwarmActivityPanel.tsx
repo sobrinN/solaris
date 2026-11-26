@@ -1,9 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
-  Clock,
   Copy,
-  Cpu,
   Maximize2,
   Play,
   ShieldCheck,
@@ -57,7 +55,6 @@ interface SwarmActivityPanelProps {
   playheadSec: number;
   onRemoveSelectedClip?: (clipId: string) => void;
   agentStatus: AgentStatusResponse | null;
-  mcpEndpoint: string;
   activeModelLabel?: string;
   activeSwarmRun: SwarmRunStatus | null;
   latestQaReport: QaReport | null;
@@ -71,7 +68,6 @@ interface SwarmActivityPanelProps {
   onStartSwarm: (options: StartSwarmOptions) => Promise<void>;
   onCancelSwarm: () => Promise<void>;
   onRunQa: () => Promise<void>;
-  onOpenAiSettings?: () => void;
 }
 
 function getSessionStorage(): Storage | null {
@@ -89,7 +85,6 @@ export function SwarmActivityPanel({
   playheadSec,
   onRemoveSelectedClip,
   agentStatus,
-  mcpEndpoint,
   activeModelLabel,
   activeSwarmRun,
   latestQaReport,
@@ -103,11 +98,9 @@ export function SwarmActivityPanel({
   onStartSwarm,
   onCancelSwarm,
   onRunQa,
-  onOpenAiSettings,
 }: SwarmActivityPanelProps) {
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
-  const [copiedMcp, setCopiedMcp] = useState(false);
   const [copiedLogs, setCopiedLogs] = useState(false);
   const [clearingLogs, setClearingLogs] = useState(false);
   const [activeTab, setActiveTab] = useState<"prompt" | "activity" | "logs">("prompt");
@@ -115,20 +108,17 @@ export function SwarmActivityPanel({
   const [cutMode, setCutMode] = useState<"refine" | "generate">(() =>
     hasTimelineClips ? "refine" : "generate",
   );
-  const [includePlayhead, setIncludePlayhead] = useState(true);
   const [omittedClipIds, setOmittedClipIds] = useState<string[]>([]);
   const [history, setHistory] = useState<DirectorTurn[]>(() =>
     loadDirectorHistory(getSessionStorage(), projectId),
   );
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copyLogsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const recordedRunIdRef = useRef<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     return () => {
-      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
       if (copyLogsTimerRef.current) clearTimeout(copyLogsTimerRef.current);
     };
   }, []);
@@ -137,7 +127,6 @@ export function SwarmActivityPanel({
   useEffect(() => {
     setHistory(loadDirectorHistory(getSessionStorage(), projectId));
     setOmittedClipIds([]);
-    setIncludePlayhead(true);
     setCutMode(hasTimelineClips ? "refine" : "generate");
     recordedRunIdRef.current = null;
   }, [projectId]);
@@ -217,7 +206,7 @@ export function SwarmActivityPanel({
         prompt: trimmed,
         mode: effectiveMode,
         selectedClipIds: activeContextClips.map((entry) => entry.clip.id),
-        playheadSec: includePlayhead ? Number(playheadSec.toFixed(2)) : undefined,
+        playheadSec: Number(playheadSec.toFixed(2)),
         conversationHistory: historyToSend,
       });
       setPrompt("");
@@ -258,22 +247,6 @@ export function SwarmActivityPanel({
     }
   };
 
-  const handleCopyMcp = () => {
-    const markCopied = () => {
-      setCopiedMcp(true);
-      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
-      copyTimerRef.current = setTimeout(() => setCopiedMcp(false), 1600);
-    };
-    if (navigator.clipboard?.writeText) {
-      navigator.clipboard
-        .writeText(mcpEndpoint)
-        .then(markCopied)
-        .catch(() => setErrorMsg(`Copy blocked. MCP endpoint: ${mcpEndpoint}`));
-    } else {
-      setErrorMsg(`Clipboard unavailable. MCP endpoint: ${mcpEndpoint}`);
-    }
-  };
-
   return (
     <div className="flex min-h-0 flex-1 flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-3">
       {/* Header */}
@@ -283,43 +256,15 @@ export function SwarmActivityPanel({
           <span>Director &amp; Swarm</span>
         </div>
         <div className="flex flex-wrap items-center gap-1">
-          {onOpenAiSettings && (
-            <button
-              type="button"
-              onClick={onOpenAiSettings}
-              title={
-                activeModelLabel
-                  ? `AI Settings (${activeModelLabel})`
-                  : "OpenRouter & Model Advisor Settings"
-              }
-              className="flex items-center gap-1 rounded-full border border-areia/12 bg-void/65 px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal text-areia/80 hover:border-amarelo-ideias/50 hover:bg-accent"
-            >
-              <Cpu className="h-2.5 w-2.5 text-amarelo-ideias" />
-              <span>AI</span>
-            </button>
-          )}
           <button
             type="button"
             disabled={qaRunning}
             onClick={() => void onRunQa()}
-            title="Run Stage-3 Playback QA (frames, -14 LUFS & safe zones)"
+            title="Run quality control and auto-fix issues (frames, -14 LUFS & safe zones)"
             className="flex items-center gap-1 rounded-full border border-areia/12 bg-void/65 px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal text-areia/80 hover:border-amarelo-ideias/50 hover:bg-accent disabled:opacity-45"
           >
             <ShieldCheck className="h-2.5 w-2.5 text-amarelo-ideias" />
-            <span>{qaRunning ? "QA..." : "QA"}</span>
-          </button>
-          <button
-            type="button"
-            onClick={handleCopyMcp}
-            title="Copy Streamable HTTP MCP endpoint (/mcp)"
-            className="flex items-center gap-1 rounded-full border border-areia/12 bg-void/65 px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal text-areia/75 hover:border-laranja-criacao/50 hover:bg-accent"
-          >
-            {copiedMcp ? (
-              <Check className="h-2.5 w-2.5 text-amarelo-ideias" />
-            ) : (
-              <Copy className="h-2.5 w-2.5 text-laranja-criacao" />
-            )}
-            <span>MCP</span>
+            <span>{qaRunning ? "Enhancing..." : "Enhance"}</span>
           </button>
         </div>
       </div>
@@ -490,52 +435,32 @@ export function SwarmActivityPanel({
             </span>
           </div>
 
-          {/* Context Pills (selected clips + playhead) */}
-          <div className="flex flex-wrap items-center gap-1">
-            {activeContextClips.map(({ clip }) => (
-              <span
-                key={clip.id}
-                className="inline-flex max-w-[140px] items-center gap-1 rounded-full border border-amarelo-ideias/35 bg-amarelo-ideias/10 px-2 py-0.5 text-[10px] text-areia"
-              >
-                <span className="truncate" title={clip.label}>
-                  {clip.label}
+          {/* Context Pills (selected clips) */}
+          {activeContextClips.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1">
+              {activeContextClips.map(({ clip }) => (
+                <span
+                  key={clip.id}
+                  className="inline-flex max-w-[140px] items-center gap-1 rounded-full border border-amarelo-ideias/35 bg-amarelo-ideias/10 px-2 py-0.5 text-[10px] text-areia"
+                >
+                  <span className="truncate" title={clip.label}>
+                    {clip.label}
+                  </span>
+                  <button
+                    type="button"
+                    aria-label={`Remove ${clip.label} from prompt context`}
+                    onClick={() => {
+                      setOmittedClipIds((prev) => [...prev, clip.id]);
+                      onRemoveSelectedClip?.(clip.id);
+                    }}
+                    className="text-areia/65 hover:text-areia"
+                  >
+                    <X className="h-2.5 w-2.5" />
+                  </button>
                 </span>
-                <button
-                  type="button"
-                  aria-label={`Remove ${clip.label} from prompt context`}
-                  onClick={() => {
-                    setOmittedClipIds((prev) => [...prev, clip.id]);
-                    onRemoveSelectedClip?.(clip.id);
-                  }}
-                  className="text-areia/65 hover:text-areia"
-                >
-                  <X className="h-2.5 w-2.5" />
-                </button>
-              </span>
-            ))}
-            {includePlayhead ? (
-              <span className="tabular-nums inline-flex items-center gap-1 rounded-full border border-areia/15 bg-void/70 px-2 py-0.5 text-[10px] text-areia/80">
-                <Clock className="h-2.5 w-2.5 text-laranja-criacao" />
-                <span>@ {playheadSec.toFixed(1)} s</span>
-                <button
-                  type="button"
-                  aria-label="Remove playhead from prompt context"
-                  onClick={() => setIncludePlayhead(false)}
-                  className="text-areia/55 hover:text-areia"
-                >
-                  <X className="h-2.5 w-2.5" />
-                </button>
-              </span>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setIncludePlayhead(true)}
-                className="tabular-nums rounded-full border border-dashed border-areia/15 px-2 py-0.5 text-[10px] text-areia/50 hover:border-areia/35 hover:text-areia/80"
-              >
-                + @ {playheadSec.toFixed(1)} s
-              </button>
-            )}
-          </div>
+              ))}
+            </div>
+          )}
 
           {/* Multi-line Composer */}
           <div className="rounded-xl border border-areia/12 bg-void/75 p-2 focus-within:border-laranja-criacao">
@@ -603,31 +528,7 @@ export function SwarmActivityPanel({
             ))}
           </div>
 
-          {/* Per-Project Refinement Conversation History */}
-          <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto border-t border-areia/10 pt-2 pr-1 text-[11px]">
-            {history.length === 0 ? (
-              <div className="text-[10px] text-areia/40">
-                Select clips or place the playhead, then ask the Director to refine pacing, GFX,
-                captions, audio, or grade.
-              </div>
-            ) : (
-              [...history].reverse().map((turn, idx) => (
-                <div
-                  key={`${turn.role}-${history.length - idx}`}
-                  className={`rounded-lg border px-2 py-1.5 text-[10px] leading-snug ${
-                    turn.role === "user"
-                      ? "border-areia/10 bg-void/65 text-areia/90"
-                      : "border-amarelo-ideias/25 bg-amarelo-ideias/10 text-areia"
-                  }`}
-                >
-                  <span className="mr-1.5 font-semibold uppercase tracking-[0.08em] text-amarelo-ideias">
-                    {turn.role === "user" ? "You" : "Director"}
-                  </span>
-                  <span className="break-words">{turn.text}</span>
-                </div>
-              ))
-            )}
-          </div>
+
         </div>
       )}
 
