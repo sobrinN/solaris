@@ -1317,10 +1317,13 @@ pub(crate) async fn run_programmatic_scene_worker(
         .await;
 
     let clip_id = format!("gfx-s{:02}-{run_tag}", scene.scene_index);
+    let reusable_asset_id = build_reusable_asset_id(&project.name, run_tag);
     let save_note = if save_reusable_asset {
-        "After placing this scene with `gfx_place`, also save it as a reusable template via `assets_save` (id: `explainer-scene-solar`)."
+        format!(
+            "After placing this scene with `gfx_place`, also save it as a reusable template via `assets_save` (id: `{reusable_asset_id}`)."
+        )
     } else {
-        "Do NOT call `assets_save` (scene 1 handles saving the template)."
+        "Do NOT call `assets_save` (scene 1 handles saving the template).".to_string()
     };
 
     let is_portrait = project.canvas.height > project.canvas.width;
@@ -1612,19 +1615,8 @@ pub(crate) async fn run_programmatic_scene_worker(
                         })
                         .to_string()
                     } else {
-                        if norm_name == "gfx.place"
-                            && let Some(obj) = args.as_object_mut()
-                        {
-                            obj.insert("clip_id".to_string(), json!(clip_id));
-                            obj.insert("start_sec".to_string(), json!(scene.start_sec));
-                            obj.insert("duration_sec".to_string(), json!(scene.duration_sec));
-                            if obj
-                                .get("label")
-                                .and_then(|v| v.as_str())
-                                .is_none_or(|s| s.trim().is_empty())
-                            {
-                                obj.insert("label".to_string(), json!(scene.title));
-                            }
+                        if norm_name == "gfx.place" {
+                            normalize_programmatic_gfx_place_args(&mut args, &clip_id, scene);
                         }
 
                         if let Err(scope_err) = validate_worker_tool_scope(
@@ -1727,6 +1719,68 @@ pub(crate) async fn run_programmatic_scene_worker(
         )));
     }
     Ok(mutating_ops_succeeded)
+}
+
+pub(crate) fn build_reusable_asset_id(project_name: &str, run_tag: &str) -> String {
+    let mut slug = String::new();
+    let mut prev_dash = false;
+    for ch in project_name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !slug.is_empty() && !prev_dash {
+            slug.push('-');
+            prev_dash = true;
+        }
+        if slug.len() >= 36 {
+            break;
+        }
+    }
+    let clean_slug = slug.trim_matches('-');
+    let clean_tag: String = run_tag
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(12)
+        .collect();
+    let suffix = if clean_tag.is_empty() {
+        "template"
+    } else {
+        clean_tag.as_str()
+    };
+    if clean_slug.is_empty() {
+        format!("explainer-scene-{suffix}")
+    } else {
+        format!("scene-{clean_slug}-{suffix}")
+    }
+}
+
+pub(crate) fn normalize_programmatic_gfx_place_args(
+    args: &mut serde_json::Value,
+    clip_id: &str,
+    scene: &SceneSpec,
+) {
+    let Some(obj) = args.as_object_mut() else {
+        return;
+    };
+    obj.insert("clip_id".to_string(), json!(clip_id));
+    obj.insert("start_sec".to_string(), json!(scene.start_sec));
+    obj.insert("duration_sec".to_string(), json!(scene.duration_sec));
+    if obj
+        .get("label")
+        .and_then(|v| v.as_str())
+        .is_none_or(|s| s.trim().is_empty())
+    {
+        obj.insert("label".to_string(), json!(scene.title));
+    }
+    // Programmatic scene workers author bespoke inline_html; stripping any hallucinated
+    // asset_id (such as echoing clip_id) prevents unnecessary unknown-asset retries.
+    if obj
+        .get("inline_html")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        obj.remove("asset_id");
+    }
 }
 
 pub(crate) fn measure_track_coverage(
@@ -1984,5 +2038,50 @@ mod tests {
         let (count, covered) = measure_track_coverage(&proj, "g1", f64::NAN);
         assert_eq!(count, 0);
         assert_eq!(covered, 0.0);
+    }
+
+    #[test]
+    fn build_reusable_asset_id_generates_unique_safe_slugs() {
+        let id = build_reusable_asset_id("Create a 30s Video (PT-BR)!", "7a637b");
+        assert!(id.starts_with("scene-create-a-30s-video-pt-br-"));
+        assert!(id.ends_with("-7a637b"));
+        assert!(id.len() <= 64);
+        assert!(
+            id.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        );
+
+        let fallback = build_reusable_asset_id("!!!", "ab12cd");
+        assert_eq!(fallback, "explainer-scene-ab12cd");
+    }
+
+    #[test]
+    fn normalize_programmatic_gfx_place_args_strips_hallucinated_asset_id_when_inline_html_present()
+    {
+        let scene = SceneSpec {
+            scene_index: 3,
+            title: "FOMO Orbit".into(),
+            start_sec: 10.0,
+            duration_sec: 5.0,
+            ..SceneSpec::default()
+        };
+        let mut args = json!({
+            "project_id": "p1",
+            "clip_id": "wrong-id",
+            "asset_id": "gfx-s03-3eb5d8",
+            "label": "",
+            "start_sec": 0.0,
+            "duration_sec": 1.0,
+            "inline_html": "<div class=\"clip\">Scene 3</div>"
+        });
+        normalize_programmatic_gfx_place_args(&mut args, "gfx-s03-3eb5d8", &scene);
+        assert_eq!(args["clip_id"], "gfx-s03-3eb5d8");
+        assert_eq!(args["start_sec"], 10.0);
+        assert_eq!(args["duration_sec"], 5.0);
+        assert_eq!(args["label"], "FOMO Orbit");
+        assert!(
+            args.get("asset_id").is_none(),
+            "hallucinated asset_id must be stripped when inline_html is present"
+        );
     }
 }

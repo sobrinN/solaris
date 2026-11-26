@@ -93,6 +93,7 @@ export function InspectorPanel({
   const [captionPreset, setCaptionPreset] = useState<CaptionPreset>(
     activeCaptionPreset ?? "neon_glow",
   );
+  const [inspectorTab, setInspectorTab] = useState<"color" | "captions" | "clip">("color");
   const [savingAsset, setSavingAsset] = useState(false);
   const [localProps, setLocalProps] = useState<Record<string, unknown>>({});
   const [captionTextDraft, setCaptionTextDraft] = useState("");
@@ -302,6 +303,27 @@ export function InspectorPanel({
     onUpdateClipAudio !== undefined &&
     selectedClip.clip.payload.kind === "media";
 
+  const hasClipControls = Boolean(
+    selectedClip &&
+      (selectedGfx ||
+        (selectedCaption && onUpdateCaptionClip) ||
+        showTransformControls ||
+        showAudioControls),
+  );
+
+  const prevSelectedClipIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const cid = selectedClip?.clip.id ?? null;
+    if (cid !== prevSelectedClipIdRef.current) {
+      prevSelectedClipIdRef.current = cid;
+      if (cid && hasClipControls) {
+        setInspectorTab("clip");
+      } else if (!cid && inspectorTab === "clip") {
+        setInspectorTab("color");
+      }
+    }
+  }, [selectedClip?.clip.id, hasClipControls, inspectorTab]);
+
   if (selectedClips && selectedClips.length > 1 && onApplyBatchCommand) {
     return (
       <BatchInspector
@@ -312,8 +334,71 @@ export function InspectorPanel({
     );
   }
 
+  const activeTab = inspectorTab === "clip" && !hasClipControls ? "color" : inspectorTab;
+
   return (
     <aside className="flex h-full flex-col gap-3 overflow-y-auto rounded-2xl border border-areia/10 bg-carbono/70 p-3 text-xs">
+      {/* Pro Segmented Inspector Tabs */}
+      <div className="flex items-center justify-between gap-2 border-b border-areia/10 pb-2">
+        <div
+          role="tablist"
+          aria-label="Inspector sections"
+          className="flex items-center gap-0.5 rounded-full border border-areia/10 bg-void/70 p-0.5 text-[10px]"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "color"}
+            onClick={() => setInspectorTab("color")}
+            className={`rounded-full px-2.5 py-0.5 font-medium transition-colors motion-reduce:transition-none ${
+              activeTab === "color"
+                ? "bg-laranja-criacao/25 text-areia"
+                : "text-areia/55 hover:text-areia"
+            }`}
+          >
+            Color
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "captions"}
+            onClick={() => setInspectorTab("captions")}
+            className={`rounded-full px-2.5 py-0.5 font-medium transition-colors motion-reduce:transition-none ${
+              activeTab === "captions"
+                ? "bg-laranja-criacao/25 text-areia"
+                : "text-areia/55 hover:text-areia"
+            }`}
+          >
+            Captions
+          </button>
+          {hasClipControls && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "clip"}
+              onClick={() => setInspectorTab("clip")}
+              className={`flex items-center gap-1 rounded-full px-2.5 py-0.5 font-medium transition-colors motion-reduce:transition-none ${
+                activeTab === "clip"
+                  ? "bg-amarelo-ideias/20 text-amarelo-ideias"
+                  : "text-areia/65 hover:text-areia"
+              }`}
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-amarelo-ideias" />
+              <span>Clip</span>
+            </button>
+          )}
+        </div>
+        <span className="truncate text-[10px] font-medium text-areia/45">
+          {activeTab === "color"
+            ? gradeTargetLabel
+            : activeTab === "clip" && selectedClip
+              ? selectedClip.clip.label
+              : "Word-sync"}
+        </span>
+      </div>
+
+      {activeTab === "clip" && (
+        <>
       {/* Contextual Selected GFX Prop Editor */}
       {selectedClip && selectedGfx && (
         <div className="space-y-2.5 rounded-xl border border-track-g1/35 bg-void/70 p-2.5">
@@ -601,10 +686,16 @@ export function InspectorPanel({
         </div>
       )}
 
+        </>
+      )}
+
       {/* Interactive 3-Way Color Wheels + Sliders */}
-      <div data-cursor-anchor="color.inspector" className="space-y-3">
+      <div
+        data-cursor-anchor="color.inspector"
+        className={activeTab === "color" ? "space-y-3" : "hidden"}
+      >
         <div className="flex items-center justify-between gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
-          <span>Color</span>
+          <span>Master Wheels</span>
           <span
             className={`truncate rounded-full px-2 py-0.5 text-[10px] font-semibold normal-case tracking-normal ${
               gradeTargetLabel.startsWith("FX")
@@ -724,10 +815,10 @@ export function InspectorPanel({
       {/* Captions */}
       <div
         data-cursor-anchor="captions.inspector"
-        className="space-y-2 border-t border-areia/10 pt-3"
+        className={activeTab === "captions" ? "space-y-3" : "hidden"}
       >
         <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
-          <span>Captions</span>
+          <span>Caption Style</span>
           <span className="text-areia/45">word-by-word</span>
         </div>
         <div className="grid grid-cols-2 gap-1.5">

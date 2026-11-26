@@ -306,22 +306,6 @@ pub(super) async fn inspect_playback_frames(
 
         match client.chat_stream(&req, Some(cancel), |_| {}).await {
             Ok(resp) => {
-                backend.emit_log(LogEntry {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    timestamp: Utc::now(),
-                    level: LogLevel::Debug,
-                    source: "qa".to_string(),
-                    project_id: Some(project.id.clone()),
-                    run_id: None,
-                    agent_id: Some("director-qa".to_string()),
-                    message: format!(
-                        "Vision QA completed ({}, finish={:?}, {})",
-                        resp.model.as_deref().unwrap_or(model),
-                        resp.finish_reason(),
-                        resp.usage_summary()
-                    ),
-                    details: None,
-                });
                 let text = resp
                     .choices
                     .first()
@@ -329,6 +313,37 @@ pub(super) async fn inspect_playback_frames(
                     .map(|c| c.as_text())
                     .unwrap_or_default();
                 let (summary_opt, parsed_checks) = parse_vision_qa_output(&text);
+                let issue_count = parsed_checks
+                    .iter()
+                    .filter(|c| c.severity == QaSeverity::Issue)
+                    .count();
+                let warn_count = parsed_checks
+                    .iter()
+                    .filter(|c| c.severity == QaSeverity::Warning)
+                    .count();
+                let log_level = if issue_count > 0 {
+                    LogLevel::Warn
+                } else if warn_count > 0 {
+                    LogLevel::Info
+                } else {
+                    LogLevel::Debug
+                };
+                backend.emit_log(LogEntry {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    timestamp: Utc::now(),
+                    level: log_level,
+                    source: "qa".to_string(),
+                    project_id: Some(project.id.clone()),
+                    run_id: None,
+                    agent_id: Some("director-qa".to_string()),
+                    message: format!(
+                        "Vision QA completed ({}, finish={:?}, {}, issues={issue_count}, warnings={warn_count})",
+                        resp.model.as_deref().unwrap_or(model),
+                        resp.finish_reason(),
+                        resp.usage_summary()
+                    ),
+                    details: summary_opt.clone(),
+                });
                 if summary_opt.is_some() {
                     multimodal_summary = summary_opt;
                 }

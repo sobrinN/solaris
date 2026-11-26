@@ -1,11 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft,
+  Activity,
   Cpu,
   Download,
-  Film,
-  Image as ImageIcon,
-  Music,
   Palette,
   Plus,
   Redo2,
@@ -17,6 +14,7 @@ import {
 import type {
   AgentRole,
   AgentStatusResponse,
+  AspectPreset,
   AudioSettings,
   BrandPlaybook,
   CaptionBlock,
@@ -29,6 +27,7 @@ import type {
   MediaAsset,
   ParsedCubeLut,
   Project,
+  ProjectSummary,
   QaReport,
   SavedCodeAsset,
   SolarisEngineClient,
@@ -52,9 +51,9 @@ import {
   type SampledPixelFrame,
 } from "./BroadcastScopes";
 import { ExportModal } from "./ExportModal";
-import { GfxBinPanel } from "./GfxBinPanel";
 import { InspectorPanel } from "./InspectorPanel";
 import { LogsDrawer } from "./LogsDrawer";
+import { ProjectManagerPopover } from "./ProjectManagerPopover";
 import { SourceMonitor } from "./SourceMonitor";
 import {
   SwarmActivityPanel,
@@ -72,6 +71,7 @@ interface StudioWorkspaceProps {
   client: SolarisEngineClient;
   ticketVersion?: number;
   project: Project;
+  projects: ProjectSummary[];
   activeBrand: BrandPlaybook | null;
   assets: SavedCodeAsset[];
   events: EngineEventEnvelope[];
@@ -94,6 +94,9 @@ interface StudioWorkspaceProps {
   onAssetCreated: (asset: SavedCodeAsset) => void;
   onAssetsReplaced: (assets: SavedCodeAsset[]) => void;
   onProjectUpdate: (project: Project) => void;
+  onSelectProject: (projectId: string) => Promise<void>;
+  onCreateBlankProject: (name: string, aspect: AspectPreset) => Promise<void>;
+  onRenameProject: (name: string) => Promise<void>;
   onBackToChat: () => void;
   onOpenBrandDrawer: () => void;
   onOpenAiSettings: () => void;
@@ -113,6 +116,7 @@ export function StudioWorkspace({
   client,
   ticketVersion = 0,
   project,
+  projects,
   activeBrand,
   assets,
   events,
@@ -135,6 +139,9 @@ export function StudioWorkspace({
   onAssetCreated,
   onAssetsReplaced,
   onProjectUpdate,
+  onSelectProject,
+  onCreateBlankProject,
+  onRenameProject,
   onBackToChat,
   onOpenBrandDrawer,
   onOpenAiSettings,
@@ -151,22 +158,20 @@ export function StudioWorkspace({
         activeSwarmRun.state === "running_qa"),
   );
   const wasSwarmActiveRef = useRef(false);
-  const [selectedMediaId, setSelectedMediaId] = useState<string | null>(
-    project.media_pool[0]?.id ?? null,
-  );
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
+  const [projectManagerOpen, setProjectManagerOpen] = useState(false);
+  const [scopesOpen, setScopesOpen] = useState(true);
 
   useEffect(() => {
     setSelectedClipIds([]);
     setSelectionAnchorId(null);
+    setViewerMode("program");
   }, [project.id]);
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [logsDrawerOpen, setLogsDrawerOpen] = useState(false);
   const [brandLut, setBrandLut] = useState<ParsedCubeLut | null>(null);
   const [brandFontCss, setBrandFontCss] = useState<string>("");
-  const [transcribingMediaId, setTranscribingMediaId] = useState<string | null>(null);
-  const [mediaErrorMsg, setMediaErrorMsg] = useState<string | null>(null);
   const [opErrorToast, setOpErrorToast] = useState<string | null>(null);
   const [statusToast, setStatusToast] = useState<string | null>(null);
   const [qaRunning, setQaRunning] = useState(false);
@@ -179,7 +184,6 @@ export function StudioWorkspace({
   }>({ voicePct: 0, musicPct: 0, momentaryLufs: null });
 
   const scopesRef = useRef<BroadcastScopesHandle | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const audioEngineRef = useRef<SolarisAudioEngine | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const statusToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -400,11 +404,8 @@ export function StudioWorkspace({
   }, [activityLog]);
 
   const selectedMedia = useMemo(
-    () =>
-      project.media_pool.find((m) => m.id === selectedMediaId) ??
-      project.media_pool[0] ??
-      null,
-    [project.media_pool, selectedMediaId],
+    () => project.media_pool[0] ?? null,
+    [project.media_pool],
   );
 
   const selectedClips = useMemo(
@@ -985,7 +986,7 @@ export function StudioWorkspace({
   // Global keyboard shortcuts (disabled when modals/drawers are open or interactive elements are focused)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (exportModalOpen || logsDrawerOpen || modalsOpen) return;
+      if (exportModalOpen || logsDrawerOpen || projectManagerOpen || modalsOpen) return;
       const target = e.target as HTMLElement | null;
       if (
         target &&
@@ -1041,6 +1042,7 @@ export function StudioWorkspace({
   }, [
     exportModalOpen,
     logsDrawerOpen,
+    projectManagerOpen,
     modalsOpen,
     project.tracks,
     selectedClipIds,
@@ -1174,18 +1176,6 @@ export function StudioWorkspace({
     }
   };
 
-  const handleUploadMedia = async (files: FileList | null) => {
-    if (!files || files.length === 0) return;
-    setMediaErrorMsg(null);
-    try {
-      await client.importMediaFiles(project.id, Array.from(files));
-      const refreshed = await client.getProject(project.id);
-      onProjectUpdate(refreshed);
-    } catch (err) {
-      setMediaErrorMsg(err instanceof Error ? err.message : "Failed to upload media");
-    }
-  };
-
   const handleStartSwarm = async (options: StartSwarmOptions) => {
     onClearSwarmError?.();
     const run = await client.startSwarmRun(project.id, {
@@ -1203,21 +1193,6 @@ export function StudioWorkspace({
   const handleCancelSwarm = async () => {
     if (!activeSwarmRun) return;
     await client.cancelSwarmRun(project.id, activeSwarmRun.run_id);
-  };
-
-  const handleTranscribeMedia = async (mediaId: string) => {
-    if (transcribingMediaId) return;
-    setTranscribingMediaId(mediaId);
-    setMediaErrorMsg(null);
-    try {
-      await client.transcribeMedia(project.id, mediaId);
-      const refreshed = await client.getProject(project.id);
-      onProjectUpdate(refreshed);
-    } catch (err) {
-      setMediaErrorMsg(err instanceof Error ? err.message : "Transcription failed");
-    } finally {
-      setTranscribingMediaId(null);
-    }
   };
 
   const fallbackTokens = useMemo(
@@ -1351,112 +1326,126 @@ export function StudioWorkspace({
         </div>
       )}
 
-      {/* Top NLE Chrome */}
-      <header className="flex h-12 shrink-0 items-center justify-between border-b border-areia/10 bg-carbono/70 px-4 backdrop-blur-md">
-        <div className="flex items-center gap-3">
+      {/* Top NLE Chrome — 3-Zone Pro Studio Header */}
+      <header className="relative z-30 flex h-13 shrink-0 items-center justify-between gap-3 border-b border-areia/10 bg-carbono/75 px-4 backdrop-blur-md">
+        {/* Left Zone: Brand + Project Manager */}
+        <div className="flex min-w-0 items-center gap-2.5">
+          <SolarisWordmark />
+          <div className="hidden h-4 w-px bg-areia/15 sm:block" />
+          <ProjectManagerPopover
+            currentProject={project}
+            projects={projects}
+            open={projectManagerOpen}
+            onOpenChange={setProjectManagerOpen}
+            onSelectProject={onSelectProject}
+            onCreateBlankProject={onCreateBlankProject}
+            onRenameProject={onRenameProject}
+            onNewProjectInChat={onBackToChat}
+          />
           <button
             type="button"
             onClick={onBackToChat}
-            className="flex h-8 items-center gap-1.5 rounded-full border border-areia/12 px-3 text-xs text-areia/80 hover:bg-accent hover:text-areia"
+            title="Start a new project with fresh media or prompt"
+            className="hidden h-8 items-center gap-1 rounded-full border border-areia/12 bg-void/65 px-2.5 text-xs text-areia/80 transition-colors hover:border-laranja-criacao/50 hover:bg-accent hover:text-areia md:flex motion-reduce:transition-none"
           >
-            <ArrowLeft className="h-3.5 w-3.5" />
-            <span>Chat</span>
+            <Plus className="h-3.5 w-3.5 text-laranja-criacao" />
+            <span>New</span>
           </button>
-          <SolarisWordmark />
-          <div className="hidden h-4 w-px bg-areia/15 sm:block" />
-          <span
-            title={project.name}
-            className="hidden max-w-[180px] truncate text-xs font-medium text-areia sm:inline"
-          >
-            {project.name}
-          </span>
-          <span className="tabular-nums shrink-0 rounded-full border border-areia/12 bg-void/70 px-2 py-0.5 text-[10px] text-areia/65">
-            rev {project.revision}
-          </span>
         </div>
 
-        <div className="flex items-center gap-2">
-          <div className="flex items-center gap-1 rounded-full border border-areia/12 bg-void/65 px-2.5 py-1 text-[11px]">
-            <span
-              className={`h-1.5 w-1.5 rounded-full ${
-                wsConnected ? "bg-amarelo-ideias solar-pulse-dot" : "bg-vermelho-foco"
-              }`}
-            />
-            <span className="text-areia/75">
-              {wsConnected ? "Swarm Live" : "Reconnecting"}
-            </span>
+        {/* Center Zone: History & Swarm Presence */}
+        <div className="hidden items-center gap-2 lg:flex">
+          <div className="flex items-center rounded-full border border-areia/12 bg-void/65 p-0.5">
+            <button
+              type="button"
+              onClick={() => void handleUndo()}
+              className="grid h-7 w-7 place-items-center rounded-full text-areia/80 hover:bg-accent hover:text-areia"
+              title="Undo (⌘Z)"
+              aria-label="Undo"
+            >
+              <Undo2 className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleRedo()}
+              className="grid h-7 w-7 place-items-center rounded-full text-areia/80 hover:bg-accent hover:text-areia"
+              title="Redo (⇧⌘Z)"
+              aria-label="Redo"
+            >
+              <Redo2 className="h-3.5 w-3.5" />
+            </button>
           </div>
 
           <button
             type="button"
             onClick={() => setSwarmCursorsEnabled((v) => !v)}
-            className={`flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs ${
+            title={
+              wsConnected
+                ? "Swarm WebSocket connected · Toggle agent cursors"
+                : "Reconnecting to Solaris Engine"
+            }
+            className={`flex h-8 items-center gap-2 rounded-full border px-3 text-xs transition-colors motion-reduce:transition-none ${
               swarmCursorsEnabled
-                ? "border-laranja-criacao/60 bg-accent text-areia"
-                : "border-areia/12 bg-void/60 text-areia/70"
+                ? "border-laranja-criacao/55 bg-accent text-areia"
+                : "border-areia/12 bg-void/65 text-areia/75 hover:bg-accent hover:text-areia"
             }`}
           >
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${
+                wsConnected ? "bg-amarelo-ideias solar-pulse-dot" : "bg-vermelho-foco"
+              }`}
+            />
             <Users className="h-3.5 w-3.5 text-laranja-criacao" />
-            <span>{swarmCursorsEnabled ? "Swarm On" : "Focus"}</span>
+            <span>{swarmCursorsEnabled ? "Swarm Live" : "Focus Mode"}</span>
           </button>
+        </div>
 
-          <button
-            type="button"
-            onClick={() => void handleUndo()}
-            className="grid h-8 w-8 place-items-center rounded-full border border-areia/12 text-areia/80 hover:bg-accent"
-            aria-label="Undo"
-          >
-            <Undo2 className="h-3.5 w-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={() => void handleRedo()}
-            className="grid h-8 w-8 place-items-center rounded-full border border-areia/12 text-areia/80 hover:bg-accent"
-            aria-label="Redo"
-          >
-            <Redo2 className="h-3.5 w-3.5" />
-          </button>
+        {/* Right Zone: Studio Utilities + Primary Export CTA */}
+        <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setLogsDrawerOpen(true)}
+              className="flex h-8 items-center gap-1.5 rounded-full border border-areia/12 bg-void/55 px-2.5 text-xs text-areia/85 hover:bg-accent xl:px-3"
+              title="Open Diagnostic Logs (OpenRouter, Swarm, QA & Export)"
+              aria-label="Diagnostic Logs"
+            >
+              <Terminal className="h-3.5 w-3.5 text-amarelo-ideias" />
+              <span className="hidden xl:inline">Logs</span>
+              {logs.some((l) => l.level === "error") && (
+                <span className="tabular-nums rounded-full bg-vermelho-foco px-1.5 text-[10px] font-semibold text-areia">
+                  {logs.filter((l) => l.level === "error").length}
+                </span>
+              )}
+            </button>
 
-          <button
-            type="button"
-            onClick={() => setLogsDrawerOpen(true)}
-            className="flex h-8 items-center gap-1.5 rounded-full border border-areia/12 px-2.5 text-xs text-areia/85 hover:bg-accent lg:px-3"
-            title="Open Diagnostic Logs (OpenRouter, Swarm, QA & Export)"
-            aria-label="Diagnostic Logs"
-          >
-            <Terminal className="h-3.5 w-3.5 text-amarelo-ideias" />
-            <span className="hidden lg:inline">Logs</span>
-            {logs.some((l) => l.level === "error") && (
-              <span className="tabular-nums rounded-full bg-vermelho-foco px-1.5 text-[10px] font-semibold text-areia">
-                {logs.filter((l) => l.level === "error").length}
+            <button
+              type="button"
+              onClick={onOpenAiSettings}
+              className="flex h-8 items-center gap-1.5 rounded-full border border-areia/12 bg-void/55 px-2.5 text-xs text-areia/85 hover:bg-accent xl:px-3"
+              title="OpenRouter API Key, Model Advisor & MCP Mode"
+              aria-label="AI Settings"
+            >
+              <Cpu className="h-3.5 w-3.5 text-amarelo-ideias" />
+              <span className="hidden xl:inline">
+                {agentStatus?.openrouter_configured ? "AI Ready" : "AI Keys"}
               </span>
-            )}
-          </button>
+            </button>
 
-          <button
-            type="button"
-            onClick={onOpenAiSettings}
-            className="flex h-8 items-center gap-1.5 rounded-full border border-areia/12 px-2.5 text-xs text-areia/85 hover:bg-accent lg:px-3"
-            title="OpenRouter API Key, Model Advisor & MCP Mode"
-            aria-label="AI Settings"
-          >
-            <Cpu className="h-3.5 w-3.5 text-amarelo-ideias" />
-            <span className="hidden lg:inline">
-              {agentStatus?.openrouter_configured ? "AI Ready" : "AI Keys"}
-            </span>
-          </button>
+            <button
+              type="button"
+              data-cursor-anchor="brand.playbook"
+              onClick={onOpenBrandDrawer}
+              className="flex h-8 items-center gap-1.5 rounded-full border border-areia/12 bg-void/55 px-2.5 text-xs text-areia/85 hover:bg-accent md:px-3"
+              title="Open Brand Playbook"
+              aria-label="Brand Playbook"
+            >
+              <Palette className="h-3.5 w-3.5 text-laranja-criacao" />
+              <span className="hidden md:inline">Brand</span>
+            </button>
+          </div>
 
-          <button
-            type="button"
-            data-cursor-anchor="brand.playbook"
-            onClick={onOpenBrandDrawer}
-            className="flex h-8 items-center gap-1.5 rounded-full border border-areia/12 px-2.5 text-xs text-areia/85 hover:bg-accent md:px-3"
-            title="Open Brand Playbook"
-            aria-label="Brand Playbook"
-          >
-            <Palette className="h-3.5 w-3.5 text-laranja-criacao" />
-            <span className="hidden md:inline">Brand</span>
-          </button>
+          <div className="mx-1 hidden h-4 w-px bg-areia/14 sm:block" />
 
           <button
             type="button"
@@ -1476,152 +1465,15 @@ export function StudioWorkspace({
         </div>
       </header>
 
-      {/* Main 6-Panel Grid (Media-First proportions) */}
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-2.5 p-2.5 lg:grid-cols-[minmax(240px,280px)_minmax(190px,0.8fr)_minmax(280px,1.5fr)_minmax(170px,196px)_minmax(214px,236px)] xl:grid-cols-[320px_minmax(220px,0.8fr)_minmax(360px,1.6fr)_212px_256px]">
-        {/* Left Column: Media Pool + Effects/GFX */}
-        <div className="flex min-h-0 flex-col gap-2.5">
-          <div
-            data-cursor-anchor="media.pool"
-            className="flex min-h-0 flex-1 flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-3"
-          >
-            <div className="mb-2 flex items-center justify-between">
-              <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
-                Media ({project.media_pool.length})
-              </span>
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                accept="video/*,image/*,audio/*,.md,.txt,.pdf"
-                onChange={(e) => {
-                  void handleUploadMedia(e.target.files);
-                  e.currentTarget.value = "";
-                }}
-                className="hidden"
-              />
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="flex items-center gap-1 rounded-full border border-areia/12 px-2 py-0.5 text-[10px] text-areia/80 hover:bg-accent"
-              >
-                <Plus className="h-3 w-3 text-laranja-criacao" />
-                <span>Add</span>
-              </button>
-            </div>
-
-            <div className="grid min-h-0 grid-cols-1 content-start gap-1.5 overflow-y-auto pr-1">
-              {mediaErrorMsg && (
-                <div className="rounded-lg border border-vermelho-foco/40 bg-vermelho-foco/15 px-2 py-1 text-[10px] text-areia">
-                  {mediaErrorMsg}
-                </div>
-              )}
-              {project.media_pool.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-areia/12 p-4 text-center text-[11px] text-areia/45">
-                  No media imported yet.
-                </div>
-              ) : (
-                project.media_pool.map((item) => (
-                  <div
-                    key={item.id}
-                    draggable={item.kind !== "document"}
-                    onDragStart={(e) => {
-                      e.dataTransfer.setData("application/x-solaris-media-id", item.id);
-                      e.dataTransfer.effectAllowed = "copy";
-                    }}
-                    className={`flex flex-col items-start gap-1 rounded-xl border p-2 transition-colors motion-reduce:transition-none ${
-                      selectedMedia?.id === item.id
-                        ? "border-laranja-criacao/65 bg-accent"
-                        : "border-areia/10 bg-void/65 hover:bg-accent"
-                    }`}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedMediaId(item.id);
-                        setViewerMode("source");
-                      }}
-                      onDoubleClick={() => void handleAddMediaToTimeline(item)}
-                      title="Click to preview in Source · Double-click or drag onto a timeline track"
-                      className="flex w-full flex-col items-start gap-1 text-left"
-                    >
-                      <div className="flex w-full items-center justify-between text-[10px] text-areia/65">
-                        {item.kind === "video" ? (
-                          <Film className="h-3 w-3 text-track-v1" />
-                        ) : item.kind === "audio" ? (
-                          <Music className="h-3 w-3 text-track-a1" />
-                        ) : (
-                          <ImageIcon className="h-3 w-3 text-track-v2" />
-                        )}
-                        <span className="tabular-nums">
-                          {item.intelligence.duration_sec > 0
-                            ? `${item.intelligence.duration_sec.toFixed(1)}s`
-                            : item.role_hint}
-                        </span>
-                      </div>
-                      <span className="w-full truncate text-[11px] font-medium text-areia">
-                        {item.name}
-                      </span>
-                    </button>
-                    <div className="flex w-full items-center justify-between gap-1">
-                      <div className="flex items-center gap-1">
-                        {item.intelligence.is_log_footage && (
-                          <span className="rounded bg-laranja-criacao/20 px-1 py-0.5 text-[10px] text-amarelo-ideias">
-                            LOG
-                          </span>
-                        )}
-                        {item.intelligence.transcript.length > 0 ? (
-                          <span className="tabular-nums rounded bg-grafite px-1 py-0.5 text-[10px] text-areia/75">
-                            {item.intelligence.transcript.length}w
-                          </span>
-                        ) : (
-                          (item.kind === "video" || item.kind === "audio") &&
-                          item.path && (
-                            <button
-                              type="button"
-                              disabled={transcribingMediaId !== null}
-                              onClick={() => void handleTranscribeMedia(item.id)}
-                              className="rounded border border-areia/15 px-1.5 py-0.5 text-[10px] text-areia/75 hover:border-laranja-criacao/50 hover:text-areia disabled:opacity-45"
-                            >
-                              {transcribingMediaId === item.id ? "..." : "Transcribe"}
-                            </button>
-                          )
-                        )}
-                      </div>
-                      {item.kind !== "document" && (
-                        <button
-                          type="button"
-                          onClick={() => void handleAddMediaToTimeline(item)}
-                          title="Add to Timeline at playhead"
-                          className="flex items-center gap-0.5 rounded border border-areia/15 bg-carbono/80 px-1.5 py-0.5 text-[10px] text-amarelo-ideias hover:border-amarelo-ideias/50"
-                        >
-                          <Plus className="h-2.5 w-2.5" />
-                          <span>Timeline</span>
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-
-          <GfxBinPanel
-            client={client}
-            projectId={project.id}
-            ticketVersion={ticketVersion}
-            assets={assets}
-            aspect={aspectBadge}
-            brandTokens={fallbackTokens}
-            brandFontCss={brandFontCss}
-            playheadSec={playheadSec}
-            onAddAtPlayhead={(asset) => void handlePlaceSavedAsset(asset)}
-            onAssetsChanged={onAssetsReplaced}
-            onNotice={showStatusToast}
-            onError={(message) => showErrorToast(message, "GFX library request failed")}
-          />
-        </div>
-
-        {/* Center-Left: Director & Swarm */}
+      {/* Main Studio Grid — Media-First Pro Layout (Director | Hero Monitor | Optional Scopes | Inspector) */}
+      <div
+        className={`grid min-h-0 flex-1 grid-cols-1 gap-3 p-3 ${
+          scopesOpen
+            ? "lg:grid-cols-[minmax(300px,340px)_minmax(340px,1fr)_minmax(276px,308px)] xl:grid-cols-[minmax(330px,375px)_minmax(400px,1fr)_212px_minmax(288px,320px)]"
+            : "lg:grid-cols-[minmax(320px,360px)_minmax(420px,1fr)_minmax(290px,324px)] xl:grid-cols-[minmax(350px,390px)_minmax(500px,1fr)_minmax(310px,340px)]"
+        }`}
+      >
+        {/* Left Column: AI Director & Swarm Co-Pilot */}
         <div className="flex min-h-0 flex-col">
           <SwarmActivityPanel
             projectId={project.id}
@@ -1650,54 +1502,78 @@ export function StudioWorkspace({
           />
         </div>
 
-        {/* Center: Viewer — Program (timeline output) / Source (raw clip trim) tabs */}
+        {/* Center Hero Stage: Program Monitor */}
         <div
           data-cursor-anchor="program.stage"
-          className="flex min-h-[260px] flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-3 lg:min-h-0"
+          className="flex min-h-[280px] flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-3 lg:min-h-0"
         >
-          <div className="mb-2 flex items-center justify-between gap-2 text-[10px] font-semibold uppercase tracking-[0.14em]">
-            <div
-              role="tablist"
-              aria-label="Viewer"
-              className="flex items-center gap-0.5 rounded-full border border-areia/10 bg-void/65 p-0.5"
-            >
+          <div className="mb-2.5 flex items-center justify-between gap-2 text-[10px] font-semibold uppercase tracking-[0.14em]">
+            {project.media_pool.length > 0 ? (
+              <div
+                role="tablist"
+                aria-label="Viewer"
+                className="flex items-center gap-0.5 rounded-full border border-areia/10 bg-void/65 p-0.5"
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={viewerMode === "program"}
+                  onClick={() => setViewerMode("program")}
+                  className={`rounded-full px-2.5 py-0.5 transition-colors motion-reduce:transition-none ${
+                    viewerMode === "program"
+                      ? "bg-laranja-criacao/20 text-areia"
+                      : "text-areia/55 hover:text-areia"
+                  }`}
+                >
+                  Program
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={viewerMode === "source"}
+                  data-cursor-anchor="source.monitor"
+                  onClick={() => setViewerMode("source")}
+                  className={`rounded-full px-2.5 py-0.5 transition-colors motion-reduce:transition-none ${
+                    viewerMode === "source"
+                      ? "bg-laranja-criacao/20 text-areia"
+                      : "text-areia/55 hover:text-areia"
+                  }`}
+                >
+                  Source
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 text-areia/80">
+                <span className="h-1.5 w-1.5 rounded-full bg-laranja-criacao" />
+                <span>Program</span>
+              </div>
+            )}
+
+            <div className="flex items-center gap-2">
+              <span className="truncate rounded-full border border-areia/10 bg-void/70 px-2.5 py-0.5 tabular-nums text-amarelo-ideias">
+                {viewerMode === "program"
+                  ? `${aspectBadge} · ${project.canvas.width}×${project.canvas.height}`
+                  : (selectedMedia?.name ?? "No clip")}
+              </span>
               <button
                 type="button"
-                role="tab"
-                aria-selected={viewerMode === "program"}
-                onClick={() => setViewerMode("program")}
-                className={`rounded-full px-2.5 py-0.5 transition-colors motion-reduce:transition-none ${
-                  viewerMode === "program"
-                    ? "bg-laranja-criacao/20 text-areia"
-                    : "text-areia/55 hover:text-areia"
+                onClick={() => setScopesOpen((v) => !v)}
+                title={scopesOpen ? "Hide Broadcast Scopes" : "Show Broadcast Scopes"}
+                aria-pressed={scopesOpen}
+                className={`hidden items-center gap-1 rounded-full border px-2.5 py-0.5 text-[10px] font-medium normal-case tracking-normal transition-colors xl:flex motion-reduce:transition-none ${
+                  scopesOpen
+                    ? "border-amarelo-ideias/45 bg-amarelo-ideias/12 text-amarelo-ideias"
+                    : "border-areia/12 bg-void/65 text-areia/65 hover:bg-accent hover:text-areia"
                 }`}
               >
-                Program
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={viewerMode === "source"}
-                data-cursor-anchor="source.monitor"
-                onClick={() => setViewerMode("source")}
-                className={`rounded-full px-2.5 py-0.5 transition-colors motion-reduce:transition-none ${
-                  viewerMode === "source"
-                    ? "bg-laranja-criacao/20 text-areia"
-                    : "text-areia/55 hover:text-areia"
-                }`}
-              >
-                Source
+                <Activity className="h-3 w-3" />
+                <span>Scopes</span>
               </button>
             </div>
-            <span className="truncate tabular-nums text-amarelo-ideias">
-              {viewerMode === "program"
-                ? `${project.canvas.width}×${project.canvas.height}`
-                : (selectedMedia?.name ?? "No clip")}
-            </span>
           </div>
 
           <div
-            className={`relative min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-areia/12 bg-void p-2 ${
+            className={`relative min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-areia/12 bg-void p-2.5 ${
               viewerMode === "program" ? "flex" : "hidden"
             }`}
           >
@@ -1718,7 +1594,7 @@ export function StudioWorkspace({
               onPixelFrame={handlePixelFrame}
             />
           </div>
-          {viewerMode === "source" && (
+          {viewerMode === "source" && project.media_pool.length > 0 && (
             <SourceMonitor
               key={selectedMedia?.id ?? "none"}
               media={selectedMedia}
@@ -1733,17 +1609,19 @@ export function StudioWorkspace({
           )}
         </div>
 
-        {/* Center-Right: Broadcast Scopes */}
-        <div className="min-h-0">
-          <BroadcastScopes
-            scopesRef={scopesRef}
-            grade={effectiveStageGrade}
-            playheadSec={playheadSec}
-            integratedLufs={integratedLufs}
-            voiceLevelPct={voiceLevelPct}
-            musicLevelPct={musicLevelPct}
-          />
-        </div>
+        {/* Optional Broadcast Scopes Column (toggleable on xl+) */}
+        {scopesOpen && (
+          <div className="hidden min-h-0 xl:block">
+            <BroadcastScopes
+              scopesRef={scopesRef}
+              grade={effectiveStageGrade}
+              playheadSec={playheadSec}
+              integratedLufs={integratedLufs}
+              voiceLevelPct={voiceLevelPct}
+              musicLevelPct={musicLevelPct}
+            />
+          </div>
+        )}
 
         {/* Right: Inspector */}
         <div className="min-h-0">

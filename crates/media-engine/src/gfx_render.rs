@@ -1,9 +1,11 @@
+use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{OnceLock, mpsc};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -1641,6 +1643,278 @@ pub fn render_project_overlays_via_chromium_with_assets(
     )
 }
 
+const DEFAULT_MAX_OVERLAY_WORKERS: usize = 4;
+const MAX_CONFIGURED_OVERLAY_WORKERS: usize = 8;
+
+fn resolve_overlay_worker_count(
+    clip_count: usize,
+    total_frames: usize,
+    env_override: Option<usize>,
+) -> usize {
+    if clip_count <= 1 || total_frames <= 4 {
+        return 1;
+    }
+    let desired = env_override
+        .filter(|&n| n > 0)
+        .map(|n| n.clamp(1, MAX_CONFIGURED_OVERLAY_WORKERS))
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(2)
+                .clamp(1, DEFAULT_MAX_OVERLAY_WORKERS)
+        });
+    desired.min(clip_count).max(1)
+}
+
+struct OverlayRenderContext<'a> {
+    chrome: &'a Path,
+    brand_tokens: &'a BrandTokens,
+    assets: &'a [SavedCodeAsset],
+    brand_fonts: &'a [BrandFontData],
+    temp_dir: &'a Path,
+    canvas_w: u32,
+    canvas_h: u32,
+    gfx_w: u32,
+    gfx_h: u32,
+    gfx_dpr: f64,
+    overlay_fps: f64,
+    max_anim_frames: usize,
+}
+
+fn render_single_overlay_clip<F>(
+    ctx: &OverlayRenderContext<'_>,
+    cdp: &mut Option<ChromiumCdpSession>,
+    clip_slot: usize,
+    clip: &Clip,
+    mut on_frame_done: F,
+) -> Result<Vec<OverlayImageSpec>, MediaError>
+where
+    F: FnMut(),
+{
+    if !clip.start_sec.is_finite() || !clip.duration_sec.is_finite() || clip.duration_sec <= 0.0 {
+        return Ok(Vec::new());
+    }
+    let clip_end = clip.start_sec + clip.duration_sec;
+    if !clip_end.is_finite() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::new();
+    match &clip.payload {
+        ClipKind::Gfx { .. } => {
+            let Some(body_html) = resolve_gfx_body_html(clip, ctx.assets) else {
+                return Ok(Vec::new());
+            };
+            if has_dynamic_gfx_animation(&body_html) && clip.duration_sec > 0.1 {
+                let raw_frames = (clip.duration_sec * ctx.overlay_fps).ceil() as usize;
+                let frame_count = raw_frames.clamp(2, ctx.max_anim_frames);
+                // Never clamp effective_fps upward to 1.0 on long animated clips (> max_anim_frames sec)
+                let effective_fps = (frame_count as f64 / clip.duration_sec).clamp(0.001, 30.0);
+                let seq_dir = ctx.temp_dir.join(format!("gfx_seq_{clip_slot}"));
+                fs::create_dir_all(&seq_dir)?;
+
+                if let Some(session) = cdp.as_mut() {
+                    // Navigate ONCE, then seek + screenshot in-process over CDP
+                    session.set_viewport(ctx.gfx_w, ctx.gfx_h, ctx.gfx_dpr)?;
+                    let html_path = seq_dir.join("scene.html");
+                    let doc = build_overlay_html(
+                        &body_html,
+                        ctx.brand_tokens,
+                        ctx.brand_fonts,
+                        clip.duration_sec,
+                        0.0,
+                    );
+                    fs::write(&html_path, doc)?;
+                    session.navigate_and_wait(&html_path)?;
+                    for f in 0..frame_count {
+                        let t = if frame_count <= 1 {
+                            0.0
+                        } else {
+                            (f as f64 / (frame_count - 1) as f64) * clip.duration_sec
+                        };
+                        let png_path = seq_dir.join(format!("frame_{:06}.png", f + 1));
+                        session.evaluate_js(&format!(
+                            "window.__solarisSeek({t:.6}); void document.body.offsetHeight;"
+                        ))?;
+                        session.capture_png(&png_path)?;
+                        on_frame_done();
+                    }
+                } else {
+                    for f in 0..frame_count {
+                        let t = if frame_count <= 1 {
+                            0.0
+                        } else {
+                            (f as f64 / (frame_count - 1) as f64) * clip.duration_sec
+                        };
+                        let html_path = seq_dir.join(format!("frame_{:06}.html", f + 1));
+                        let png_path = seq_dir.join(format!("frame_{:06}.png", f + 1));
+                        let doc = build_overlay_html(
+                            &body_html,
+                            ctx.brand_tokens,
+                            ctx.brand_fonts,
+                            clip.duration_sec,
+                            t,
+                        );
+                        fs::write(&html_path, doc)?;
+                        run_chromium_screenshot(
+                            ctx.chrome,
+                            &html_path,
+                            &png_path,
+                            ctx.gfx_w,
+                            ctx.gfx_h,
+                            ctx.gfx_dpr,
+                            ctx.temp_dir,
+                        )?;
+                        on_frame_done();
+                    }
+                }
+
+                out.push(OverlayImageSpec::sequence(
+                    seq_dir.join("frame_%06d.png"),
+                    clip.start_sec,
+                    clip_end,
+                    effective_fps,
+                ));
+            } else {
+                let html_path = ctx.temp_dir.join(format!("overlay_{clip_slot}.html"));
+                let png_path = ctx.temp_dir.join(format!("overlay_{clip_slot}.png"));
+                let mid_sec = (clip.duration_sec * 0.5).max(0.0);
+                let doc = build_overlay_html(
+                    &body_html,
+                    ctx.brand_tokens,
+                    ctx.brand_fonts,
+                    clip.duration_sec,
+                    mid_sec,
+                );
+                fs::write(&html_path, doc)?;
+                if let Some(session) = cdp.as_mut() {
+                    session.set_viewport(ctx.gfx_w, ctx.gfx_h, ctx.gfx_dpr)?;
+                    session.navigate_and_wait(&html_path)?;
+                    session.capture_png(&png_path)?;
+                } else {
+                    run_chromium_screenshot(
+                        ctx.chrome,
+                        &html_path,
+                        &png_path,
+                        ctx.gfx_w,
+                        ctx.gfx_h,
+                        ctx.gfx_dpr,
+                        ctx.temp_dir,
+                    )?;
+                }
+                on_frame_done();
+                out.push(OverlayImageSpec::single(png_path, clip.start_sec, clip_end));
+            }
+        }
+        ClipKind::Caption { caption } => {
+            if caption.words.len() > 1 {
+                let slices = compute_caption_word_slices(clip, caption);
+                if slices.is_empty() {
+                    return Ok(Vec::new());
+                }
+                if let Some(session) = cdp.as_mut() {
+                    // Navigate ONCE to caption HTML, then update active word per slice via CDP
+                    session.set_viewport(ctx.canvas_w, ctx.canvas_h, 1.0)?;
+                    let html_path = ctx.temp_dir.join(format!("caption_clip_{clip_slot}.html"));
+                    let body_html = build_caption_overlay_html(
+                        clip,
+                        caption,
+                        Some(slices[0].0),
+                        ctx.canvas_w,
+                        ctx.canvas_h,
+                    );
+                    let doc = build_overlay_html(
+                        &body_html,
+                        ctx.brand_tokens,
+                        ctx.brand_fonts,
+                        clip.duration_sec,
+                        0.0,
+                    );
+                    fs::write(&html_path, doc)?;
+                    session.navigate_and_wait(&html_path)?;
+                    for (slice_idx, (wi, w_start, w_end)) in slices.into_iter().enumerate() {
+                        let png_path = ctx
+                            .temp_dir
+                            .join(format!("caption_{clip_slot}_{slice_idx}.png"));
+                        session.evaluate_js(&format!("window.__solarisSetCaptionWord({wi});"))?;
+                        session.capture_png(&png_path)?;
+                        on_frame_done();
+                        out.push(OverlayImageSpec::single(png_path, w_start, w_end));
+                    }
+                } else {
+                    for (slice_idx, (wi, w_start, w_end)) in slices.into_iter().enumerate() {
+                        let body_html = build_caption_overlay_html(
+                            clip,
+                            caption,
+                            Some(wi),
+                            ctx.canvas_w,
+                            ctx.canvas_h,
+                        );
+                        let html_path = ctx
+                            .temp_dir
+                            .join(format!("caption_{clip_slot}_{slice_idx}.html"));
+                        let png_path = ctx
+                            .temp_dir
+                            .join(format!("caption_{clip_slot}_{slice_idx}.png"));
+                        let doc = build_overlay_html(
+                            &body_html,
+                            ctx.brand_tokens,
+                            ctx.brand_fonts,
+                            w_end - w_start,
+                            0.0,
+                        );
+                        fs::write(&html_path, doc)?;
+                        run_chromium_screenshot(
+                            ctx.chrome,
+                            &html_path,
+                            &png_path,
+                            ctx.canvas_w,
+                            ctx.canvas_h,
+                            1.0,
+                            ctx.temp_dir,
+                        )?;
+                        on_frame_done();
+                        out.push(OverlayImageSpec::single(png_path, w_start, w_end));
+                    }
+                }
+            } else {
+                let active = (!caption.words.is_empty()).then_some(0);
+                let body_html =
+                    build_caption_overlay_html(clip, caption, active, ctx.canvas_w, ctx.canvas_h);
+                let html_path = ctx.temp_dir.join(format!("caption_{clip_slot}.html"));
+                let png_path = ctx.temp_dir.join(format!("caption_{clip_slot}.png"));
+                let doc = build_overlay_html(
+                    &body_html,
+                    ctx.brand_tokens,
+                    ctx.brand_fonts,
+                    clip.duration_sec,
+                    0.0,
+                );
+                fs::write(&html_path, doc)?;
+                if let Some(session) = cdp.as_mut() {
+                    session.set_viewport(ctx.canvas_w, ctx.canvas_h, 1.0)?;
+                    session.navigate_and_wait(&html_path)?;
+                    session.capture_png(&png_path)?;
+                } else {
+                    run_chromium_screenshot(
+                        ctx.chrome,
+                        &html_path,
+                        &png_path,
+                        ctx.canvas_w,
+                        ctx.canvas_h,
+                        1.0,
+                        ctx.temp_dir,
+                    )?;
+                }
+                on_frame_done();
+                out.push(OverlayImageSpec::single(png_path, clip.start_sec, clip_end));
+            }
+        }
+        _ => {}
+    }
+    Ok(out)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_project_overlays_via_chromium_with_progress<F>(
     toolchain: &MediaToolchain,
@@ -1708,258 +1982,155 @@ where
         .sum::<usize>()
         .max(1);
 
-    let mut completed_frames = 0usize;
+    let env_workers = std::env::var("SOLARIS_GFX_WORKERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    let worker_count = resolve_overlay_worker_count(overlay_clips.len(), total_frames, env_workers);
+
     on_progress(OverlayRenderProgress {
         completed_frames: 0,
         total_frames,
-        stage_label: format!("Launching Chromium for {total_frames} overlay frame(s)"),
+        stage_label: if worker_count > 1 {
+            format!("Launching {worker_count} Chromium workers for {total_frames} overlay frame(s)")
+        } else {
+            format!("Launching Chromium for {total_frames} overlay frame(s)")
+        },
     });
 
-    let mut cdp = match ChromiumCdpSession::launch(chrome, w, h, temp_dir) {
-        Ok(session) => Some(session),
-        Err(err) => {
-            tracing::warn!(
-                error = %err,
-                "persistent CDP Chromium session unavailable; falling back to single-shot CLI screenshots"
-            );
-            None
-        }
+    let ctx = OverlayRenderContext {
+        chrome,
+        brand_tokens,
+        assets,
+        brand_fonts,
+        temp_dir,
+        canvas_w: w,
+        canvas_h: h,
+        gfx_w,
+        gfx_h,
+        gfx_dpr,
+        overlay_fps,
+        max_anim_frames,
     };
 
-    let mut specs = Vec::new();
-    let mut idx = 0usize;
-
-    for clip in overlay_clips {
-        if !clip.start_sec.is_finite() || !clip.duration_sec.is_finite() || clip.duration_sec <= 0.0
-        {
-            continue;
-        }
-        let clip_end = clip.start_sec + clip.duration_sec;
-        if !clip_end.is_finite() {
-            continue;
-        }
-
-        match &clip.payload {
-            ClipKind::Gfx { .. } => {
-                let Some(body_html) = resolve_gfx_body_html(clip, assets) else {
-                    continue;
-                };
-                idx += 1;
-                if has_dynamic_gfx_animation(&body_html) && clip.duration_sec > 0.1 {
-                    let raw_frames = (clip.duration_sec * overlay_fps).ceil() as usize;
-                    let frame_count = raw_frames.clamp(2, max_anim_frames);
-                    // Never clamp effective_fps upward to 1.0 on long animated clips (> max_anim_frames sec)
-                    let effective_fps = (frame_count as f64 / clip.duration_sec).clamp(0.001, 30.0);
-                    let seq_dir = temp_dir.join(format!("gfx_seq_{idx}"));
-                    fs::create_dir_all(&seq_dir)?;
-
-                    if let Some(session) = cdp.as_mut() {
-                        // Navigate ONCE, then seek + screenshot in-process over CDP
-                        session.set_viewport(gfx_w, gfx_h, gfx_dpr)?;
-                        let html_path = seq_dir.join("scene.html");
-                        let doc = build_overlay_html(
-                            &body_html,
-                            brand_tokens,
-                            brand_fonts,
-                            clip.duration_sec,
-                            0.0,
-                        );
-                        fs::write(&html_path, doc)?;
-                        session.navigate_and_wait(&html_path)?;
-                        for f in 0..frame_count {
-                            let t = if frame_count <= 1 {
-                                0.0
-                            } else {
-                                (f as f64 / (frame_count - 1) as f64) * clip.duration_sec
-                            };
-                            let png_path = seq_dir.join(format!("frame_{:06}.png", f + 1));
-                            session.evaluate_js(&format!(
-                                "window.__solarisSeek({t:.6}); void document.body.offsetHeight;"
-                            ))?;
-                            session.capture_png(&png_path)?;
-                            completed_frames += 1;
-                            on_progress(OverlayRenderProgress {
-                                completed_frames,
-                                total_frames,
-                                stage_label: format!(
-                                    "Rendering GFX & captions ({completed_frames}/{total_frames} frames)"
-                                ),
-                            });
-                        }
-                    } else {
-                        for f in 0..frame_count {
-                            let t = if frame_count <= 1 {
-                                0.0
-                            } else {
-                                (f as f64 / (frame_count - 1) as f64) * clip.duration_sec
-                            };
-                            let html_path = seq_dir.join(format!("frame_{:06}.html", f + 1));
-                            let png_path = seq_dir.join(format!("frame_{:06}.png", f + 1));
-                            let doc = build_overlay_html(
-                                &body_html,
-                                brand_tokens,
-                                brand_fonts,
-                                clip.duration_sec,
-                                t,
-                            );
-                            fs::write(&html_path, doc)?;
-                            run_chromium_screenshot(
-                                chrome, &html_path, &png_path, gfx_w, gfx_h, gfx_dpr, temp_dir,
-                            )?;
-                            completed_frames += 1;
-                            on_progress(OverlayRenderProgress {
-                                completed_frames,
-                                total_frames,
-                                stage_label: format!(
-                                    "Rendering GFX & captions ({completed_frames}/{total_frames} frames)"
-                                ),
-                            });
-                        }
-                    }
-
-                    specs.push(OverlayImageSpec::sequence(
-                        seq_dir.join("frame_%06d.png"),
-                        clip.start_sec,
-                        clip_end,
-                        effective_fps,
-                    ));
-                } else {
-                    let html_path = temp_dir.join(format!("overlay_{idx}.html"));
-                    let png_path = temp_dir.join(format!("overlay_{idx}.png"));
-                    let mid_sec = (clip.duration_sec * 0.5).max(0.0);
-                    let doc = build_overlay_html(
-                        &body_html,
-                        brand_tokens,
-                        brand_fonts,
-                        clip.duration_sec,
-                        mid_sec,
-                    );
-                    fs::write(&html_path, doc)?;
-                    if let Some(session) = cdp.as_mut() {
-                        session.set_viewport(gfx_w, gfx_h, gfx_dpr)?;
-                        session.navigate_and_wait(&html_path)?;
-                        session.capture_png(&png_path)?;
-                    } else {
-                        run_chromium_screenshot(
-                            chrome, &html_path, &png_path, gfx_w, gfx_h, gfx_dpr, temp_dir,
-                        )?;
-                    }
-                    completed_frames += 1;
-                    on_progress(OverlayRenderProgress {
-                        completed_frames,
-                        total_frames,
-                        stage_label: format!(
-                            "Rendering GFX & captions ({completed_frames}/{total_frames} frames)"
-                        ),
-                    });
-                    specs.push(OverlayImageSpec::single(png_path, clip.start_sec, clip_end));
-                }
+    if worker_count <= 1 {
+        let mut cdp = match ChromiumCdpSession::launch(chrome, w, h, temp_dir) {
+            Ok(session) => Some(session),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "persistent CDP Chromium session unavailable; falling back to single-shot CLI screenshots"
+                );
+                None
             }
-            ClipKind::Caption { caption } => {
-                if caption.words.len() > 1 {
-                    let slices = compute_caption_word_slices(clip, caption);
-                    if slices.is_empty() {
-                        continue;
-                    }
-                    if let Some(session) = cdp.as_mut() {
-                        // Navigate ONCE to caption HTML, then update active word per slice via CDP
-                        session.set_viewport(w, h, 1.0)?;
-                        idx += 1;
-                        let html_path = temp_dir.join(format!("caption_clip_{idx}.html"));
-                        let body_html =
-                            build_caption_overlay_html(clip, caption, Some(slices[0].0), w, h);
-                        let doc = build_overlay_html(
-                            &body_html,
-                            brand_tokens,
-                            brand_fonts,
-                            clip.duration_sec,
-                            0.0,
-                        );
-                        fs::write(&html_path, doc)?;
-                        session.navigate_and_wait(&html_path)?;
-                        for (wi, w_start, w_end) in slices {
-                            idx += 1;
-                            let png_path = temp_dir.join(format!("caption_{idx}.png"));
-                            session
-                                .evaluate_js(&format!("window.__solarisSetCaptionWord({wi});"))?;
-                            session.capture_png(&png_path)?;
-                            completed_frames += 1;
-                            on_progress(OverlayRenderProgress {
-                                completed_frames,
-                                total_frames,
-                                stage_label: format!(
-                                    "Rendering GFX & captions ({completed_frames}/{total_frames} frames)"
-                                ),
-                            });
-                            specs.push(OverlayImageSpec::single(png_path, w_start, w_end));
-                        }
-                    } else {
-                        for (wi, w_start, w_end) in slices {
-                            idx += 1;
-                            let body_html =
-                                build_caption_overlay_html(clip, caption, Some(wi), w, h);
-                            let html_path = temp_dir.join(format!("caption_{idx}.html"));
-                            let png_path = temp_dir.join(format!("caption_{idx}.png"));
-                            let doc = build_overlay_html(
-                                &body_html,
-                                brand_tokens,
-                                brand_fonts,
-                                w_end - w_start,
-                                0.0,
-                            );
-                            fs::write(&html_path, doc)?;
-                            run_chromium_screenshot(
-                                chrome, &html_path, &png_path, w, h, 1.0, temp_dir,
-                            )?;
-                            completed_frames += 1;
-                            on_progress(OverlayRenderProgress {
-                                completed_frames,
-                                total_frames,
-                                stage_label: format!(
-                                    "Rendering GFX & captions ({completed_frames}/{total_frames} frames)"
-                                ),
-                            });
-                            specs.push(OverlayImageSpec::single(png_path, w_start, w_end));
-                        }
-                    }
-                } else {
-                    idx += 1;
-                    let active = (!caption.words.is_empty()).then_some(0);
-                    let body_html = build_caption_overlay_html(clip, caption, active, w, h);
-                    let html_path = temp_dir.join(format!("caption_{idx}.html"));
-                    let png_path = temp_dir.join(format!("caption_{idx}.png"));
-                    let doc = build_overlay_html(
-                        &body_html,
-                        brand_tokens,
-                        brand_fonts,
-                        clip.duration_sec,
-                        0.0,
-                    );
-                    fs::write(&html_path, doc)?;
-                    if let Some(session) = cdp.as_mut() {
-                        session.set_viewport(w, h, 1.0)?;
-                        session.navigate_and_wait(&html_path)?;
-                        session.capture_png(&png_path)?;
-                    } else {
-                        run_chromium_screenshot(
-                            chrome, &html_path, &png_path, w, h, 1.0, temp_dir,
-                        )?;
-                    }
-                    completed_frames += 1;
-                    on_progress(OverlayRenderProgress {
-                        completed_frames,
-                        total_frames,
-                        stage_label: format!(
-                            "Rendering GFX & captions ({completed_frames}/{total_frames} frames)"
-                        ),
-                    });
-                    specs.push(OverlayImageSpec::single(png_path, clip.start_sec, clip_end));
-                }
-            }
-            _ => {}
+        };
+        let mut completed_frames = 0usize;
+        let mut specs = Vec::new();
+        for (clip_slot, clip) in overlay_clips.into_iter().enumerate() {
+            let clip_specs = render_single_overlay_clip(&ctx, &mut cdp, clip_slot + 1, clip, || {
+                completed_frames += 1;
+                on_progress(OverlayRenderProgress {
+                    completed_frames,
+                    total_frames,
+                    stage_label: format!(
+                        "Rendering GFX & captions ({completed_frames}/{total_frames} frames)"
+                    ),
+                });
+            })?;
+            specs.extend(clip_specs);
         }
+        return Ok(specs);
     }
 
+    // Multi-worker parallel Chromium pool: each worker owns an isolated CDP session and pulls
+    // clips from a shared queue; results are sorted by original clip index to preserve Z-order.
+    let queue: Mutex<VecDeque<(usize, &Clip)>> = Mutex::new(
+        overlay_clips
+            .into_iter()
+            .enumerate()
+            .map(|(i, c)| (i + 1, c))
+            .collect(),
+    );
+    let results: Mutex<Vec<(usize, Vec<OverlayImageSpec>)>> = Mutex::new(Vec::new());
+    let first_error: Mutex<Option<MediaError>> = Mutex::new(None);
+    let abort_flag = AtomicBool::new(false);
+    let completed_counter = AtomicUsize::new(0);
+    let (prog_tx, prog_rx) = mpsc::channel::<OverlayRenderProgress>();
+
+    std::thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let ctx_ref = &ctx;
+            let queue_ref = &queue;
+            let results_ref = &results;
+            let err_ref = &first_error;
+            let abort_ref = &abort_flag;
+            let counter_ref = &completed_counter;
+            let tx = prog_tx.clone();
+            scope.spawn(move || {
+                let mut cdp = match ChromiumCdpSession::launch(
+                    ctx_ref.chrome,
+                    ctx_ref.canvas_w,
+                    ctx_ref.canvas_h,
+                    ctx_ref.temp_dir,
+                ) {
+                    Ok(session) => Some(session),
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "persistent CDP Chromium worker unavailable; falling back to single-shot CLI screenshots"
+                        );
+                        None
+                    }
+                };
+                loop {
+                    if abort_ref.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let next_item = queue_ref.lock().ok().and_then(|mut q| q.pop_front());
+                    let Some((clip_slot, clip)) = next_item else {
+                        break;
+                    };
+                    match render_single_overlay_clip(ctx_ref, &mut cdp, clip_slot, clip, || {
+                        let done = counter_ref.fetch_add(1, Ordering::Relaxed) + 1;
+                        let _ = tx.send(OverlayRenderProgress {
+                            completed_frames: done,
+                            total_frames,
+                            stage_label: format!(
+                                "Rendering GFX & captions ({done}/{total_frames} frames)"
+                            ),
+                        });
+                    }) {
+                        Ok(clip_specs) => {
+                            if let Ok(mut guard) = results_ref.lock() {
+                                guard.push((clip_slot, clip_specs));
+                            }
+                        }
+                        Err(err) => {
+                            abort_ref.store(true, Ordering::Relaxed);
+                            if let Ok(mut guard) = err_ref.lock() && guard.is_none() {
+                                *guard = Some(err);
+                            }
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+        drop(prog_tx);
+        let mut max_completed = 0usize;
+        for prog in prog_rx {
+            if prog.completed_frames > max_completed {
+                max_completed = prog.completed_frames;
+                on_progress(prog);
+            }
+        }
+    });
+
+    if let Some(err) = first_error.into_inner().ok().flatten() {
+        return Err(err);
+    }
+    let mut ordered = results.into_inner().unwrap_or_default();
+    ordered.sort_by_key(|(slot, _)| *slot);
+    let specs = ordered.into_iter().flat_map(|(_, v)| v).collect();
     Ok(specs)
 }
 
@@ -2423,5 +2594,15 @@ mod tests {
         session.capture_png(&png_path).unwrap();
         let meta = fs::metadata(&png_path).unwrap();
         assert!(meta.len() > 200, "expected non-empty PNG from CDP");
+    }
+
+    #[test]
+    fn resolve_overlay_worker_count_bounds_parallelism_cleanly() {
+        assert_eq!(resolve_overlay_worker_count(1, 100, None), 1);
+        assert_eq!(resolve_overlay_worker_count(6, 4, None), 1);
+        assert_eq!(resolve_overlay_worker_count(6, 180, Some(3)), 3);
+        assert_eq!(resolve_overlay_worker_count(2, 180, Some(6)), 2);
+        assert_eq!(resolve_overlay_worker_count(12, 900, Some(99)), 8);
+        assert_eq!(resolve_overlay_worker_count(6, 180, Some(1)), 1);
     }
 }

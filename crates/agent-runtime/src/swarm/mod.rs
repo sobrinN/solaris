@@ -18,7 +18,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use solaris_core_ir::{
-    AgentRole, BrandPlaybook, LogLevel, MediaKind, SavedCodeAsset, SwarmRunState, SwarmRunStatus,
+    AgentRole, BrandPlaybook, CommandMeta, LogLevel, MediaKind, QaReport, QaSeverity,
+    SavedCodeAsset, SwarmRunState, SwarmRunStatus, TimelineCommand,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -1542,6 +1543,26 @@ where
             },
         )
         .await;
+        if let Some(diag) = format_qa_diagnostics(&qa) {
+            emit_swarm_log(
+                backend.as_ref(),
+                if qa.passed {
+                    LogLevel::Info
+                } else {
+                    LogLevel::Warn
+                },
+                "qa",
+                &project_id,
+                &run_id,
+                Some("director-qa"),
+                format!(
+                    "QA {}/100 ({}): {diag}",
+                    qa.score,
+                    if qa.passed { "passed" } else { "failed" }
+                ),
+                qa.multimodal_summary.clone(),
+            );
+        }
         status.qa_report = Some(qa);
     }
 
@@ -1579,22 +1600,131 @@ where
         status.error = Some(specialist_errors.join("; "));
     }
     status.updated_at = Utc::now();
+    let final_log_details = match (
+        status.error.clone(),
+        status.qa_report.as_ref().and_then(format_qa_diagnostics),
+    ) {
+        (Some(err), Some(qa_diag)) => Some(format!("{err} | {qa_diag}")),
+        (Some(err), None) => Some(err),
+        (None, Some(qa_diag)) => Some(qa_diag),
+        (None, None) => None,
+    };
     emit_swarm_log(
         backend.as_ref(),
-        if specialist_errors.is_empty() {
-            LogLevel::Info
-        } else {
+        if has_issues {
             LogLevel::Warn
+        } else {
+            LogLevel::Info
         },
         "swarm",
         &project_id,
         &run_id,
         Some("director-01"),
         status.phase_label.clone(),
-        status.error.clone(),
+        final_log_details,
     );
     on_status(status.clone());
     status
+}
+
+pub(crate) fn format_qa_diagnostics(qa: &QaReport) -> Option<String> {
+    let findings: Vec<String> = qa
+        .checks
+        .iter()
+        .filter(|c| matches!(c.severity, QaSeverity::Issue | QaSeverity::Warning))
+        .map(|c| {
+            let tag = match c.severity {
+                QaSeverity::Issue => "ISSUE",
+                QaSeverity::Warning => "WARN",
+                _ => "INFO",
+            };
+            format!("[{tag}] {}: {}", c.id, c.message)
+        })
+        .collect();
+    if findings.is_empty() {
+        None
+    } else {
+        Some(findings.join(" | "))
+    }
+}
+
+async fn clear_track_clips_if_non_empty(
+    backend: &dyn SolarisBackend,
+    project: &solaris_core_ir::Project,
+    track_id: &str,
+    agent_id: &str,
+    role: AgentRole,
+    run_id: &str,
+    ops_counter: &AtomicU32,
+) -> solaris_core_ir::Project {
+    let existing_ids: Vec<String> = project
+        .tracks
+        .iter()
+        .find(|t| t.id == track_id)
+        .map(|t| t.clips.iter().map(|c| c.id.clone()).collect())
+        .unwrap_or_default();
+    if existing_ids.is_empty() {
+        return project.clone();
+    }
+    let count = existing_ids.len();
+    let commands: Vec<TimelineCommand> = existing_ids
+        .into_iter()
+        .map(|clip_id| TimelineCommand::DeleteClip {
+            track_id: track_id.to_string(),
+            clip_id,
+        })
+        .collect();
+    let meta = CommandMeta {
+        agent_id: agent_id.to_string(),
+        role,
+        reason: Some(format!(
+            "clear {count} existing {track_id} clip(s) before regeneration"
+        )),
+    };
+    match backend
+        .apply_op(
+            &project.id,
+            TimelineCommand::Batch {
+                commands,
+                summary: Some(format!(
+                    "cleared {count} existing clip(s) on {track_id} before regeneration"
+                )),
+            },
+            meta,
+        )
+        .await
+    {
+        Ok((_, updated)) => {
+            ops_counter.fetch_add(1, Ordering::Relaxed);
+            emit_swarm_log(
+                backend,
+                LogLevel::Info,
+                "swarm",
+                &project.id,
+                run_id,
+                Some(agent_id),
+                format!(
+                    "Cleared {count} existing {} clip(s) before regenerating programmatic scenes",
+                    track_id.to_ascii_uppercase()
+                ),
+                None,
+            );
+            updated
+        }
+        Err(err) => {
+            emit_swarm_log(
+                backend,
+                LogLevel::Warn,
+                "swarm",
+                &project.id,
+                run_id,
+                Some(agent_id),
+                format!("Failed to clear existing {track_id} clips before regeneration: {err}"),
+                None,
+            );
+            project.clone()
+        }
+    }
 }
 
 fn wave2_label(
@@ -1860,9 +1990,19 @@ async fn run_programmatic_gfx_scene_fanout(
                 return (false, false, Some(format!("gfx-fanout: skipped ({err})")));
             }
         };
+        let cleared_project = clear_track_clips_if_non_empty(
+            backend.as_ref(),
+            &fresh_project,
+            "g1",
+            "gfx-01",
+            AgentRole::Gfx,
+            &run_id,
+            &ops_counter,
+        )
+        .await;
         let _ = execute_deterministic_specialist(
             &backend,
-            &fresh_project,
+            &cleared_project,
             &brand,
             &assets,
             &plan,
@@ -1891,6 +2031,16 @@ async fn run_programmatic_gfx_scene_fanout(
             return (false, false, Some(format!("gfx-fanout: skipped ({err})")));
         }
     };
+    let fresh_project = clear_track_clips_if_non_empty(
+        backend.as_ref(),
+        &fresh_project,
+        "g1",
+        GFX_SWARM_LOCK_OWNER,
+        AgentRole::Gfx,
+        &run_id,
+        &ops_counter,
+    )
+    .await;
 
     let run_tag: String = uuid::Uuid::new_v4().simple().to_string()[..6].to_string();
     let total_scenes = scenes.len();
@@ -2670,5 +2820,130 @@ mod tests {
         assert_eq!(capped.len(), MAX_PARALLEL_SCENE_AGENTS);
         let cap_last = capped.last().unwrap();
         assert!(((cap_last.start_sec + cap_last.duration_sec) - 24.0).abs() < 0.05);
+    }
+
+    #[tokio::test]
+    async fn programmatic_generate_clears_existing_g1_clips_instead_of_stacking() {
+        let proj = Project::new_default("regen_test", AspectPreset::Vertical9x16);
+        let pid = proj.id.clone();
+
+        let backend = InMemBackend::new(proj, Vec::new());
+        let client = OpenRouterClient::new(OpenRouterConfig::default());
+        let advisor = Arc::new(ModelAdvisor::new(client.clone()));
+
+        // Run 1: populates 6 clips on G1
+        let status1 = run_swarm(
+            backend.clone(),
+            client.clone(),
+            advisor.clone(),
+            pid.clone(),
+            "run-regen-1".into(),
+            SwarmRunRequest {
+                prompt: "Create a 30s explainer".into(),
+                model_override: None,
+                allow_local_fallback: true,
+                max_turns_per_worker: Some(4),
+                skip_qa: true,
+                approved_plan: None,
+                mode: SwarmRunMode::Generate,
+                selected_clip_ids: Vec::new(),
+                playhead_sec: None,
+                conversation_history: Vec::new(),
+            },
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await;
+        assert_eq!(status1.state, SwarmRunState::Completed);
+
+        let first_ids: Vec<String> = {
+            let guard = backend.engine.read().await;
+            guard
+                .project()
+                .tracks
+                .iter()
+                .find(|t| t.id == "g1")
+                .unwrap()
+                .clips
+                .iter()
+                .map(|c| c.id.clone())
+                .collect()
+        };
+        assert_eq!(first_ids.len(), 6);
+
+        // Run 2 in explicit Generate mode: must clear the previous 6 clips instead of stacking 12
+        let status2 = run_swarm(
+            backend.clone(),
+            client,
+            advisor,
+            pid,
+            "run-regen-2".into(),
+            SwarmRunRequest {
+                prompt: "Create a 24s explainer".into(),
+                model_override: None,
+                allow_local_fallback: true,
+                max_turns_per_worker: Some(4),
+                skip_qa: true,
+                approved_plan: None,
+                mode: SwarmRunMode::Generate,
+                selected_clip_ids: Vec::new(),
+                playhead_sec: None,
+                conversation_history: Vec::new(),
+            },
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await;
+        assert_eq!(status2.state, SwarmRunState::Completed);
+
+        let guard = backend.engine.read().await;
+        let g1 = guard.project().tracks.iter().find(|t| t.id == "g1").unwrap();
+        assert_eq!(
+            g1.clips.len(),
+            6,
+            "regenerate must clear old G1 clips instead of stacking duplicates"
+        );
+    }
+
+    #[test]
+    fn format_qa_diagnostics_reports_issues_and_warnings_only() {
+        let report = QaReport {
+            passed: false,
+            score: 35,
+            frames_inspected: 3,
+            auto_fixes_applied: 0,
+            checks: vec![
+                solaris_core_ir::QaCheckItem {
+                    id: "gfx-lint-clean".into(),
+                    category: "gfx".into(),
+                    severity: QaSeverity::Pass,
+                    message: "All clean".into(),
+                    time_sec: None,
+                    auto_fixed: false,
+                },
+                solaris_core_ir::QaCheckItem {
+                    id: "vision-issue-0".into(),
+                    category: "visual".into(),
+                    severity: QaSeverity::Issue,
+                    message: "Headline overlaps card".into(),
+                    time_sec: None,
+                    auto_fixed: false,
+                },
+                solaris_core_ir::QaCheckItem {
+                    id: "vision-warn-0".into(),
+                    category: "visual".into(),
+                    severity: QaSeverity::Warning,
+                    message: "Tight margin".into(),
+                    time_sec: None,
+                    auto_fixed: false,
+                },
+            ],
+            multimodal_summary: Some("Layout overlap on scene 2".into()),
+            checked_at: Utc::now(),
+        };
+        let diag = format_qa_diagnostics(&report).expect("diagnostics");
+        assert!(!diag.contains("gfx-lint-clean"));
+        assert!(diag.contains("[ISSUE] vision-issue-0: Headline overlaps card"));
+        assert!(diag.contains("[WARN] vision-warn-0: Tight margin"));
     }
 }

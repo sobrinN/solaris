@@ -452,6 +452,33 @@ export function App() {
     setActiveProject(proj);
   };
 
+  const handleCreateBlankProject = async (name: string, aspect: AspectPreset) => {
+    const created = await client.createProject(name.trim(), aspect, selectedBrandId);
+    setEvents([]);
+    setLogs([]);
+    setExportJob(null);
+    setActiveSwarmRun(null);
+    setSwarmStartError(null);
+    setQaReport(null);
+    setExternalPlayheadSeek(null);
+    setDraftProject(null);
+    draftProjectRef.current = null;
+    draftCreatePromiseRef.current = null;
+    draftFileMediaMapRef.current.clear();
+    activeProjectIdRef.current = created.id;
+    setActiveProject(created);
+    void client.listProjects().then(setRecentProjects).catch(() => {});
+  };
+
+  const handleRenameActiveProject = async (name: string) => {
+    if (!activeProject) return;
+    const updated = await client.updateProjectMetadata(activeProject.id, {
+      name: name.trim(),
+    });
+    applyProjectIfNewer(updated);
+    void client.listProjects().then(setRecentProjects).catch(() => {});
+  };
+
   const handleSelectBrand = async (brandId: string) => {
     setSelectedBrandId(brandId);
     if (activeProject && activeProject.brand_playbook_id !== brandId) {
@@ -695,6 +722,7 @@ export function App() {
             client={client}
             ticketVersion={ticketVersion}
             project={activeProject}
+            projects={recentProjects}
             activeBrand={activeBrand}
             assets={assets}
             events={events}
@@ -729,6 +757,9 @@ export function App() {
             }
             onAssetsReplaced={setAssets}
             onProjectUpdate={applyProjectIfNewer}
+            onSelectProject={handleOpenExistingProject}
+            onCreateBlankProject={handleCreateBlankProject}
+            onRenameProject={handleRenameActiveProject}
             onBackToChat={() => {
               setActiveProject(null);
               setSwarmStartError(null);

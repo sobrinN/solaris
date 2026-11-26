@@ -508,7 +508,10 @@ pub fn all_tools() -> Vec<ToolSpec> {
                     "label": {"type": "string"},
                     "start_sec": {"type": "number"},
                     "duration_sec": {"type": "number"},
-                    "asset_id": {"type": "string"},
+                    "asset_id": {
+                        "type": "string",
+                        "description": "Optional saved GFX template ID from assets_search; omit when providing inline_html."
+                    },
                     "props": {"type": "object"},
                     "inline_html": {"type": "string"}
                 },

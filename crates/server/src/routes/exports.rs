@@ -186,8 +186,29 @@ pub async fn enqueue_export_job(
             return;
         };
 
+        let export_started = Instant::now();
         let has_overlays = project.tracks.iter().any(|t| {
             !t.muted && matches!(t.kind, TrackKind::Gfx | TrackKind::Text) && !t.clips.is_empty()
+        });
+        let output_file_name = output_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("export")
+            .to_string();
+
+        state_bg.push_log(LogEntry {
+            id: Uuid::new_v4().to_string(),
+            timestamp: Utc::now(),
+            level: LogLevel::Info,
+            source: "export".to_string(),
+            project_id: Some(id.clone()),
+            run_id: Some(job_id_bg.clone()),
+            agent_id: None,
+            message: format!(
+                "Export started ({:?}, {:?}, overlays={}, output={output_file_name})",
+                req.format, req.quality, has_overlays
+            ),
+            details: None,
         });
 
         let overlay_tmp_dir = state_bg
@@ -256,7 +277,19 @@ pub async fn enqueue_export_job(
                 project_id: id.clone(),
                 job: rendering_gfx,
             });
+            state_bg.push_log(LogEntry {
+                id: Uuid::new_v4().to_string(),
+                timestamp: Utc::now(),
+                level: LogLevel::Info,
+                source: "export".to_string(),
+                project_id: Some(id.clone()),
+                run_id: Some(job_id_bg.clone()),
+                agent_id: None,
+                message: "Rendering GFX & caption overlays via Chromium".to_string(),
+                details: None,
+            });
 
+            let overlay_started = Instant::now();
             let tc = state_bg.inner.toolchain.clone();
             let proj_clone = project.clone();
             let tokens_clone = brand_tokens.clone();
@@ -268,6 +301,7 @@ pub async fn enqueue_export_job(
             let proj_id_ov = id.clone();
             let render_res = tokio::task::spawn_blocking(move || {
                 let mut last_emit = Instant::now() - Duration::from_millis(500);
+                let mut next_log_milestone = 25u32;
                 render_project_overlays_via_chromium_with_progress(
                     &tc,
                     &proj_clone,
@@ -276,11 +310,33 @@ pub async fn enqueue_export_job(
                     &fonts_clone,
                     &tmp_clone,
                     |ov_prog| {
+                        let total = ov_prog.total_frames.max(1);
+                        let pct = ((ov_prog.completed_frames * 100) / total) as u32;
+                        if pct >= next_log_milestone && next_log_milestone < 100 {
+                            while pct >= next_log_milestone && next_log_milestone < 100 {
+                                next_log_milestone += 25;
+                            }
+                            state_ov.push_log(LogEntry {
+                                id: Uuid::new_v4().to_string(),
+                                timestamp: Utc::now(),
+                                level: LogLevel::Info,
+                                source: "export".to_string(),
+                                project_id: Some(proj_id_ov.clone()),
+                                run_id: Some(job_ov.clone()),
+                                agent_id: None,
+                                message: format!(
+                                    "Overlay render progress: {}/{} frames ({pct}%, {:.1}s elapsed)",
+                                    ov_prog.completed_frames,
+                                    total,
+                                    overlay_started.elapsed().as_secs_f64()
+                                ),
+                                details: None,
+                            });
+                        }
                         let is_final = ov_prog.completed_frames >= ov_prog.total_frames;
                         if is_final || last_emit.elapsed() >= Duration::from_millis(250) {
                             last_emit = Instant::now();
-                            let frac = (ov_prog.completed_frames as f32
-                                / ov_prog.total_frames.max(1) as f32)
+                            let frac = (ov_prog.completed_frames as f32 / total as f32)
                                 .clamp(0.0, 1.0);
                             let scaled = 0.15 + frac * 0.45;
                             let prog_job = ExportJobStatus {
@@ -307,7 +363,24 @@ pub async fn enqueue_export_job(
             .await;
 
             match render_res {
-                Ok(Ok(specs)) => specs,
+                Ok(Ok(specs)) => {
+                    state_bg.push_log(LogEntry {
+                        id: Uuid::new_v4().to_string(),
+                        timestamp: Utc::now(),
+                        level: LogLevel::Info,
+                        source: "export".to_string(),
+                        project_id: Some(id.clone()),
+                        run_id: Some(job_id_bg.clone()),
+                        agent_id: None,
+                        message: format!(
+                            "Chromium overlay render complete ({} layer(s) in {:.1}s)",
+                            specs.len(),
+                            overlay_started.elapsed().as_secs_f64()
+                        ),
+                        details: None,
+                    });
+                    specs
+                }
                 Ok(Err(err)) => {
                     let failed = ExportJobStatus {
                         id: job_id_bg.clone(),
@@ -337,7 +410,10 @@ pub async fn enqueue_export_job(
                         project_id: Some(id),
                         run_id: Some(failed.id),
                         agent_id: None,
-                        message: "Export failed during Chromium overlay rendering".to_string(),
+                        message: format!(
+                            "Export failed during Chromium overlay rendering after {:.1}s",
+                            export_started.elapsed().as_secs_f64()
+                        ),
                         details: failed.error,
                     });
                     return;
@@ -371,7 +447,10 @@ pub async fn enqueue_export_job(
                         project_id: Some(id),
                         run_id: Some(failed.id),
                         agent_id: None,
-                        message: "Export failed during Chromium overlay rendering".to_string(),
+                        message: format!(
+                            "Export failed during Chromium overlay rendering after {:.1}s",
+                            export_started.elapsed().as_secs_f64()
+                        ),
                         details: failed.error,
                     });
                     return;
@@ -402,6 +481,17 @@ pub async fn enqueue_export_job(
         state_bg.emit(EngineEvent::ExportProgress {
             project_id: id.clone(),
             job: compositing.clone(),
+        });
+        state_bg.push_log(LogEntry {
+            id: Uuid::new_v4().to_string(),
+            timestamp: Utc::now(),
+            level: LogLevel::Info,
+            source: "export".to_string(),
+            project_id: Some(id.clone()),
+            run_id: Some(job_id_bg.clone()),
+            agent_id: None,
+            message: "Compositing timeline & -14 LUFS audio master via FFmpeg".to_string(),
+            details: None,
         });
 
         let toolchain = state_bg.inner.toolchain.clone();
@@ -500,6 +590,7 @@ pub async fn enqueue_export_job(
             project_id: id.clone(),
             job: compositing.clone(),
         });
+        let total_elapsed = export_started.elapsed().as_secs_f64();
         if compositing.state == ExportState::Failed {
             state_bg.push_log(LogEntry {
                 id: Uuid::new_v4().to_string(),
@@ -509,7 +600,7 @@ pub async fn enqueue_export_job(
                 project_id: Some(id),
                 run_id: Some(compositing.id),
                 agent_id: None,
-                message: compositing.stage_label,
+                message: format!("{} ({total_elapsed:.1}s)", compositing.stage_label),
                 details: compositing.error,
             });
         } else if compositing.state == ExportState::Completed {
@@ -521,7 +612,7 @@ pub async fn enqueue_export_job(
                 project_id: Some(id),
                 run_id: Some(compositing.id),
                 agent_id: None,
-                message: "Export completed successfully".to_string(),
+                message: format!("Export completed successfully in {total_elapsed:.1}s"),
                 details: compositing.output_path,
             });
         }
