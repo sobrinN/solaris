@@ -137,6 +137,82 @@ pub async fn update_project_metadata(
     Ok(Json(project))
 }
 
+pub async fn delete_project(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    validate_safe_id(&id)?;
+    let existed = {
+        let mut guard = state.inner.projects.write().await;
+        guard.remove(&id).is_some()
+    };
+    if !existed {
+        return Err((StatusCode::NOT_FOUND, format!("project '{id}' not found")));
+    }
+
+    // Cancel and remove any swarm runs associated with this project
+    let run_ids: Vec<String> = {
+        let mut runs = state.inner.swarm_runs.write().await;
+        let matching: Vec<String> = runs
+            .iter()
+            .filter(|(_, run)| run.project_id == id)
+            .map(|(rid, _)| rid.clone())
+            .collect();
+        for rid in &matching {
+            runs.remove(rid);
+        }
+        matching
+    };
+    if !run_ids.is_empty() {
+        let mut cancels = state.inner.swarm_cancels.write().await;
+        for rid in run_ids {
+            if let Some(token) = cancels.remove(&rid) {
+                token.cancel();
+            }
+        }
+    }
+
+    state
+        .inner
+        .export_jobs
+        .write()
+        .await
+        .retain(|_, job| job.project_id != id);
+    state.clear_logs(Some(&id));
+
+    let project_file = state.project_file_path(&id);
+    let uploads_dir = state.inner.workspace_dir.join("uploads").join(&id);
+    // Serialize project JSON removal against any in-flight persist_project_locked
+    {
+        let mut revs = state.inner.persist_revisions.lock().await;
+        revs.remove(&id);
+        let project_id = id.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Err(err) = std::fs::remove_file(&project_file)
+                && err.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(
+                    project_id = %project_id,
+                    path = %project_file.display(),
+                    "failed to remove project file on delete: {err}"
+                );
+            }
+            if uploads_dir.is_dir()
+                && let Err(err) = std::fs::remove_dir_all(&uploads_dir)
+            {
+                tracing::warn!(
+                    project_id = %project_id,
+                    path = %uploads_dir.display(),
+                    "failed to remove project uploads directory on delete: {err}"
+                );
+            }
+        })
+        .await;
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Deserialize)]
 pub struct ApplyOpRequest {
     command: TimelineCommand,

@@ -105,9 +105,6 @@ export function SwarmActivityPanel({
   const [clearingLogs, setClearingLogs] = useState(false);
   const [activeTab, setActiveTab] = useState<"prompt" | "activity" | "logs">("prompt");
   const [logFilter, setLogFilter] = useState<"all" | "error" | "warn">("all");
-  const [cutMode, setCutMode] = useState<"refine" | "generate">(() =>
-    hasTimelineClips ? "refine" : "generate",
-  );
   const [omittedClipIds, setOmittedClipIds] = useState<string[]>([]);
   const [history, setHistory] = useState<DirectorTurn[]>(() =>
     loadDirectorHistory(getSessionStorage(), projectId),
@@ -127,16 +124,8 @@ export function SwarmActivityPanel({
   useEffect(() => {
     setHistory(loadDirectorHistory(getSessionStorage(), projectId));
     setOmittedClipIds([]);
-    setCutMode(hasTimelineClips ? "refine" : "generate");
     recordedRunIdRef.current = null;
   }, [projectId]);
-
-  // Switch to refine automatically once clips exist if user hasn't forced generate on an empty cut
-  useEffect(() => {
-    if (!hasTimelineClips && cutMode === "refine") {
-      setCutMode("generate");
-    }
-  }, [hasTimelineClips, cutMode]);
 
   // Prune omitted clip ids that are no longer in selection
   useEffect(() => {
@@ -190,7 +179,7 @@ export function SwarmActivityPanel({
       activeSwarmRun.state === "executing_specialists" ||
       activeSwarmRun.state === "running_qa");
 
-  const effectiveMode: SwarmRunMode = hasTimelineClips ? cutMode : "generate";
+  const effectiveMode: SwarmRunMode = hasTimelineClips ? "refine" : "generate";
 
   const handleRun = async () => {
     const trimmed = prompt.trim();
@@ -393,47 +382,6 @@ export function SwarmActivityPanel({
       {/* TAB 1: PROMPT & REFINEMENT COMPOSER */}
       {activeTab === "prompt" && (
         <div className="flex min-h-0 flex-1 flex-col gap-2">
-          {/* Cut Mode Toggle */}
-          <div className="flex items-center justify-between gap-1.5">
-            <div
-              role="group"
-              aria-label="Cut mode"
-              className="flex items-center gap-0.5 rounded-full border border-areia/10 bg-void/70 p-0.5 text-[10px]"
-            >
-              <button
-                type="button"
-                disabled={!hasTimelineClips}
-                onClick={() => setCutMode("refine")}
-                title={
-                  hasTimelineClips
-                    ? "Targeted edits to existing clips without regenerating the whole cut"
-                    : "Generate a cut first to enable Refine mode"
-                }
-                className={`rounded-full px-2 py-0.5 font-medium transition-colors disabled:opacity-35 motion-reduce:transition-none ${
-                  effectiveMode === "refine"
-                    ? "bg-laranja-criacao/25 text-areia"
-                    : "text-areia/55 hover:text-areia"
-                }`}
-              >
-                Refine cut
-              </button>
-              <button
-                type="button"
-                onClick={() => setCutMode("generate")}
-                title="Runs the full generation swarm and appends new clips to the timeline"
-                className={`rounded-full px-2 py-0.5 font-medium transition-colors motion-reduce:transition-none ${
-                  effectiveMode === "generate"
-                    ? "bg-amarelo-ideias/25 text-amarelo-ideias"
-                    : "text-areia/55 hover:text-areia"
-                }`}
-              >
-                Fresh cut
-              </button>
-            </div>
-            <span className="truncate text-[10px] text-areia/45">
-              {effectiveMode === "refine" ? "Edits in place" : "Adds new cut"}
-            </span>
-          </div>
 
           {/* Context Pills (selected clips) */}
           {activeContextClips.length > 0 && (

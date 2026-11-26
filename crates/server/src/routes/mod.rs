@@ -40,7 +40,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/templates", get(projects::list_templates))
         .route(
             "/api/v1/projects/{id}",
-            get(projects::get_project).patch(projects::update_project_metadata),
+            get(projects::get_project)
+                .patch(projects::update_project_metadata)
+                .delete(projects::delete_project),
         )
         .route("/api/v1/projects/{id}/ops", post(projects::apply_op))
         .route("/api/v1/projects/{id}/undo", post(projects::undo_project))
@@ -2536,5 +2538,77 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(legacy_body.as_ref(), payload);
+    }
+
+    #[tokio::test]
+    async fn delete_project_removes_state_file_and_uploads() {
+        let (app, dir) = test_app("delete_project", None);
+
+        let create_res = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"name":"temp_project"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_res.status(), StatusCode::CREATED);
+        let created: Project = serde_json::from_slice(
+            &axum::body::to_bytes(create_res.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        let project_json = dir.join("projects").join(format!("{}.json", created.id));
+        assert!(project_json.exists());
+        let uploads_dir = dir.join("uploads").join(&created.id);
+        std::fs::create_dir_all(&uploads_dir).unwrap();
+        std::fs::write(uploads_dir.join("clip.mp4"), b"dummy").unwrap();
+
+        let del_res = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/projects/{}", created.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_res.status(), StatusCode::NO_CONTENT);
+        assert!(!project_json.exists());
+        assert!(!uploads_dir.exists());
+
+        let get_after = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri(format!("/api/v1/projects/{}", created.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_after.status(), StatusCode::NOT_FOUND);
+
+        let del_again = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/projects/{}", created.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_again.status(), StatusCode::NOT_FOUND);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

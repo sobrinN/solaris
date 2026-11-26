@@ -2897,7 +2897,12 @@ mod tests {
         assert_eq!(status2.state, SwarmRunState::Completed);
 
         let guard = backend.engine.read().await;
-        let g1 = guard.project().tracks.iter().find(|t| t.id == "g1").unwrap();
+        let g1 = guard
+            .project()
+            .tracks
+            .iter()
+            .find(|t| t.id == "g1")
+            .unwrap();
         assert_eq!(
             g1.clips.len(),
             6,

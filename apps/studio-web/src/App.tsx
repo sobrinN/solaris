@@ -479,6 +479,34 @@ export function App() {
     void client.listProjects().then(setRecentProjects).catch(() => {});
   };
 
+  const handleDeleteProject = async (projectId: string) => {
+    await client.deleteProject(projectId);
+    try {
+      window.sessionStorage.removeItem(`solaris.director.history.${projectId}`);
+    } catch {
+      // Ignore storage access errors
+    }
+    if (draftProjectRef.current?.id === projectId) {
+      setDraftProject(null);
+      draftProjectRef.current = null;
+      draftCreatePromiseRef.current = null;
+      draftFileMediaMapRef.current.clear();
+    }
+    if (activeProjectIdRef.current === projectId) {
+      activeProjectIdRef.current = null;
+      setActiveProject(null);
+      setEvents([]);
+      setLogs([]);
+      setExportJob(null);
+      setActiveSwarmRun(null);
+      setSwarmStartError(null);
+      setQaReport(null);
+      setExternalPlayheadSeek(null);
+    }
+    setRecentProjects((prev) => prev.filter((p) => p.id !== projectId));
+    void client.listProjects().then(setRecentProjects).catch(() => {});
+  };
+
   const handleSelectBrand = async (brandId: string) => {
     setSelectedBrandId(brandId);
     if (activeProject && activeProject.brand_playbook_id !== brandId) {
@@ -760,6 +788,7 @@ export function App() {
             onSelectProject={handleOpenExistingProject}
             onCreateBlankProject={handleCreateBlankProject}
             onRenameProject={handleRenameActiveProject}
+            onDeleteProject={handleDeleteProject}
             onBackToChat={() => {
               setActiveProject(null);
               setSwarmStartError(null);
@@ -795,6 +824,7 @@ export function App() {
           onFilesDropped={handlePreEditorFilesDrop}
           onRemoveFile={handleRemovePreEditorFile}
           onOpenExistingProject={handleOpenExistingProject}
+          onDeleteProject={handleDeleteProject}
           onLaunchStudio={handleLaunchStudio}
         />
       )}

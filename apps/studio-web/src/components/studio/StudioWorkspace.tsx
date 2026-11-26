@@ -97,6 +97,7 @@ interface StudioWorkspaceProps {
   onSelectProject: (projectId: string) => Promise<void>;
   onCreateBlankProject: (name: string, aspect: AspectPreset) => Promise<void>;
   onRenameProject: (name: string) => Promise<void>;
+  onDeleteProject: (projectId: string) => Promise<void>;
   onBackToChat: () => void;
   onOpenBrandDrawer: () => void;
   onOpenAiSettings: () => void;
@@ -142,6 +143,7 @@ export function StudioWorkspace({
   onSelectProject,
   onCreateBlankProject,
   onRenameProject,
+  onDeleteProject,
   onBackToChat,
   onOpenBrandDrawer,
   onOpenAiSettings,
@@ -183,6 +185,8 @@ export function StudioWorkspace({
     momentaryLufs: number | null;
   }>({ voicePct: 0, musicPct: 0, momentaryLufs: null });
 
+  const studioGridRef = useRef<HTMLDivElement | null>(null);
+  const [studioGridSize, setStudioGridSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
   const scopesRef = useRef<BroadcastScopesHandle | null>(null);
   const audioEngineRef = useRef<SolarisAudioEngine | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -222,6 +226,22 @@ export function StudioWorkspace({
     return () => {
       if (statusToastTimerRef.current) clearTimeout(statusToastTimerRef.current);
     };
+  }, []);
+
+  useEffect(() => {
+    const el = studioGridRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const measure = () => {
+      const rect = el.getBoundingClientRect();
+      const w = Math.floor(rect.width);
+      const h = Math.floor(rect.height);
+      if (w <= 0 || h <= 0) return;
+      setStudioGridSize((prev) => (prev.w === w && prev.h === h ? prev : { w, h }));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
   }, []);
 
   useGfxAssetSync({
@@ -1216,6 +1236,44 @@ export function StudioWorkspace({
         ? "16:9"
         : "1:1";
 
+  const canvasAspect = project.canvas.width / Math.max(1, project.canvas.height);
+
+  // Adapt the center Program Monitor column width to the project's actual aspect ratio
+  // (9:16, 1:1, or 16:9) so portrait/square canvases don't leave huge empty black sidebars.
+  const studioGridStyle = useMemo(() => {
+    if (studioGridSize.w < 1024 || studioGridSize.h <= 0) return undefined;
+    if (viewerMode === "source" || canvasAspect > 1.2) return undefined;
+
+    const isXl = studioGridSize.w >= 1280;
+    const showScopes = isXl && scopesOpen;
+    const stageInnerH = Math.max(200, studioGridSize.h - 94);
+    const idealProgramPx = Math.round(stageInnerH * canvasAspect + 44);
+    const minProgramPx = canvasAspect < 0.85 ? 250 : 320;
+    const otherMin = showScopes
+      ? 300 + 212 + 280 + 60
+      : isXl
+        ? 320 + 296 + 48
+        : 276 + 268 + 48;
+    const maxProgramPx = Math.max(minProgramPx, studioGridSize.w - otherMin);
+    const programColPx = Math.round(
+      Math.max(minProgramPx, Math.min(idealProgramPx, maxProgramPx)),
+    );
+
+    if (showScopes) {
+      return {
+        gridTemplateColumns: `minmax(300px, 1.2fr) ${programColPx}px minmax(212px, 0.72fr) minmax(280px, 1fr)`,
+      };
+    }
+    if (isXl) {
+      return {
+        gridTemplateColumns: `minmax(320px, 1.15fr) ${programColPx}px minmax(296px, 1fr)`,
+      };
+    }
+    return {
+      gridTemplateColumns: `minmax(276px, 1.1fr) ${programColPx}px minmax(268px, 1fr)`,
+    };
+  }, [studioGridSize.w, studioGridSize.h, viewerMode, canvasAspect, scopesOpen]);
+
   const reframeBoxWidthPct =
     project.canvas.aspect_preset === "vertical9x16"
       ? 31.6
@@ -1340,6 +1398,7 @@ export function StudioWorkspace({
             onSelectProject={onSelectProject}
             onCreateBlankProject={onCreateBlankProject}
             onRenameProject={onRenameProject}
+            onDeleteProject={onDeleteProject}
             onNewProjectInChat={onBackToChat}
           />
           <button
@@ -1465,8 +1524,10 @@ export function StudioWorkspace({
         </div>
       </header>
 
-      {/* Main Studio Grid — Media-First Pro Layout (Director | Hero Monitor | Optional Scopes | Inspector) */}
+      {/* Main Studio Grid — Aspect-Aware Pro Layout (Director | Program Monitor | Optional Scopes | Inspector) */}
       <div
+        ref={studioGridRef}
+        style={studioGridStyle}
         className={`grid min-h-0 flex-1 grid-cols-1 gap-3 p-3 ${
           scopesOpen
             ? "lg:grid-cols-[minmax(300px,340px)_minmax(340px,1fr)_minmax(276px,308px)] xl:grid-cols-[minmax(330px,375px)_minmax(400px,1fr)_212px_minmax(288px,320px)]"
@@ -1503,9 +1564,9 @@ export function StudioWorkspace({
         {/* Center Hero Stage: Program Monitor */}
         <div
           data-cursor-anchor="program.stage"
-          className="flex min-h-[280px] flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-3 lg:min-h-0"
+          className="flex min-h-[280px] flex-col rounded-2xl border border-areia/10 bg-carbono/70 p-2.5 lg:min-h-0"
         >
-          <div className="mb-2.5 flex items-center justify-between gap-2 text-[10px] font-semibold uppercase tracking-[0.14em]">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em]">
             {project.media_pool.length > 0 ? (
               <div
                 role="tablist"
@@ -1541,16 +1602,21 @@ export function StudioWorkspace({
                 </button>
               </div>
             ) : (
-              <div className="flex items-center gap-2 text-areia/80">
+              <div className="flex items-center gap-1.5 text-areia/80">
                 <span className="h-1.5 w-1.5 rounded-full bg-laranja-criacao" />
                 <span>Program</span>
               </div>
             )}
 
-            <div className="flex items-center gap-2">
-              <span className="truncate rounded-full border border-areia/10 bg-void/70 px-2.5 py-0.5 tabular-nums text-amarelo-ideias">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <span
+                title={viewerMode === "program" ? `${aspectBadge} · ${project.canvas.width}×${project.canvas.height}` : (selectedMedia?.name ?? "No clip")}
+                className="truncate rounded-full border border-areia/10 bg-void/70 px-2 py-0.5 tabular-nums text-amarelo-ideias"
+              >
                 {viewerMode === "program"
-                  ? `${aspectBadge} · ${project.canvas.width}×${project.canvas.height}`
+                  ? canvasAspect < 0.85
+                    ? aspectBadge
+                    : `${aspectBadge} · ${project.canvas.width}×${project.canvas.height}`
                   : (selectedMedia?.name ?? "No clip")}
               </span>
               <button
@@ -1558,7 +1624,7 @@ export function StudioWorkspace({
                 onClick={() => setScopesOpen((v) => !v)}
                 title={scopesOpen ? "Hide Broadcast Scopes" : "Show Broadcast Scopes"}
                 aria-pressed={scopesOpen}
-                className={`hidden items-center gap-1 rounded-full border px-2.5 py-0.5 text-[10px] font-medium normal-case tracking-normal transition-colors xl:flex motion-reduce:transition-none ${
+                className={`hidden items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal transition-colors xl:flex motion-reduce:transition-none ${
                   scopesOpen
                     ? "border-amarelo-ideias/45 bg-amarelo-ideias/12 text-amarelo-ideias"
                     : "border-areia/12 bg-void/65 text-areia/65 hover:bg-accent hover:text-areia"
@@ -1571,7 +1637,7 @@ export function StudioWorkspace({
           </div>
 
           <div
-            className={`relative min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-areia/12 bg-void p-2.5 ${
+            className={`relative min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-areia/12 bg-void p-1.5 ${
               viewerMode === "program" ? "flex" : "hidden"
             }`}
           >

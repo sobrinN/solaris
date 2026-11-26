@@ -1,13 +1,13 @@
 # Solaris Design System (Solar Horizon NLE)
 
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **Inspired by:** Solar Horizon visual language, adapted for a standalone open-source AI video editor.
 
 ---
 
 ## 1. Visual Philosophy
 
-1. **Media First**: The Program Monitor, Source Monitor, and Broadcast Scopes carry primary visual weight. UI chrome recedes into obsidian darkness so color grading and video content remain color-accurate.
+1. **Media First & Aspect-Aware**: The Program Monitor, Source Monitor, and Broadcast Scopes carry primary visual weight while adapting to the active project's canvas format (`9:16`, `1:1`, or `16:9`) so portrait and square projects frame cleanly without wasted black sidebars. UI chrome recedes into obsidian darkness so color grading and video content remain color-accurate.
 2. **Solar Restraint**: Heat pigments (`Vermelho Foco`, `Laranja Criação`, `Amarelo Ideias`) signal active playheads, focus rings, creative actions, and solar horizon atmosphere—never loud multi-hue UI clutter.
 3. **Calm Durability**: Background media probing, proxy generation, and multi-agent swarm edits surface clear, compact status without exposing noisy infrastructure.
 4. **Lightweight & Accessible**: Zero `framer-motion`; pure CSS compositor transforms (`transform`, `opacity`), `prefers-reduced-motion` parity, `focus-visible` rings, and WCAG AA contrast.
@@ -67,6 +67,8 @@ Solaris uses a **single-family system** built on bundled **Sora** (`@fontsource-
 ## 4. Radius, Surfaces & Signature Controls
 
 - **Pre-Editor `MediaComposer`**: `rounded-[24px]` translucent Carbono glass (`bg-carbono/80 backdrop-blur-xl border border-areia/14`).
+- **3-Zone Studio Header & `ProjectManagerPopover`**: Compact top bar with Solaris wordmark + project switcher (switch, rename, blank create, inline-confirmed delete), centered undo/redo + Swarm/Focus presence toggle, and right-aligned studio utilities (`Logs`, `AI`, `Brand`, `Export`).
+- **Aspect-Aware Studio Grid**: On `lg+` viewports, `StudioWorkspace` measures the grid height and fits the Program Monitor column snugly to `9:16` or `1:1` canvases—redistributing reclaimed horizontal width to Director & Swarm, toggleable Broadcast Scopes, and the segmented Inspector—while preserving full widescreen hero width for `16:9` projects and Source Monitor mode.
 - **Studio Panels & Cards**: `rounded-xl` / `rounded-2xl` (`12px–16px`) with hairline `border-areia/10`–`14`.
 - **Pills & Primary CTAs**: `rounded-full` with `.btn-solar-outline` hairline gradient border (`Areia` → `Laranja Criação` → `Amarelo Ideias`).
 - **Swarm Cursors**: Pure CSS `transform: translate3d(x, y, 0)` transitions (`cubic-bezier(0.16, 1, 0.3, 1)`), tagged with agent role pills (`director`, `razor`, `broll`, `grade`, `caps`, `gfx`, `mix`, `mcp`) and a 1-click **Swarm / Focus** visibility toggle.

@@ -293,11 +293,19 @@ mod tests {
 
         let gfx_refs = skill_references_for_role(AgentRole::Gfx);
         assert!(gfx_refs.iter().any(|r| r.uri.ends_with("gfx-contract.md")));
-        assert!(gfx_refs.iter().any(|r| r.uri.ends_with("starter-assets.md")));
+        assert!(
+            gfx_refs
+                .iter()
+                .any(|r| r.uri.ends_with("starter-assets.md"))
+        );
         assert!(gfx_refs.iter().any(|r| r.uri.ends_with("motion-craft.md")));
         assert!(gfx_refs.iter().any(|r| r.uri.ends_with("move-playbook.md")));
         let dir_refs = skill_references_for_role(AgentRole::Director);
-        assert!(dir_refs.iter().any(|r| r.uri.ends_with("direction-and-pacing.md")));
+        assert!(
+            dir_refs
+                .iter()
+                .any(|r| r.uri.ends_with("direction-and-pacing.md"))
+        );
     }
 
     #[test]

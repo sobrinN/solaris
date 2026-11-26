@@ -12,6 +12,7 @@ import {
   Palette,
   Paperclip,
   Sparkles,
+  Trash2,
   X,
 } from "lucide-react";
 import type {
@@ -46,6 +47,7 @@ interface PreEditorChatProps {
   onFilesDropped: (files: File[], aspect: AspectPreset) => Promise<void>;
   onRemoveFile?: (file: File) => Promise<void>;
   onOpenExistingProject: (projectId: string) => Promise<void>;
+  onDeleteProject?: (projectId: string) => Promise<void>;
   onLaunchStudio: (params: {
     prompt: string;
     aspect: AspectPreset;
@@ -80,6 +82,7 @@ export function PreEditorChat({
   onFilesDropped,
   onRemoveFile,
   onOpenExistingProject,
+  onDeleteProject,
   onLaunchStudio,
 }: PreEditorChatProps) {
   const [prompt, setPrompt] = useState("");
@@ -89,6 +92,8 @@ export function PreEditorChat({
   const [agentMode, setAgentMode] = useState<"openrouter" | "mcp">("openrouter");
   const [submitting, setSubmitting] = useState(false);
   const [recentOpen, setRecentOpen] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const recentMenuRef = useRef<HTMLDivElement | null>(null);
@@ -121,7 +126,10 @@ export function PreEditorChat({
       );
 
   useEffect(() => {
-    if (!recentOpen) return;
+    if (!recentOpen) {
+      setConfirmDeleteId(null);
+      return;
+    }
     const onPointerDown = (e: PointerEvent) => {
       if (
         recentMenuRef.current &&
@@ -131,7 +139,13 @@ export function PreEditorChat({
       }
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setRecentOpen(false);
+      if (e.key === "Escape") {
+        if (confirmDeleteId) {
+          setConfirmDeleteId(null);
+        } else {
+          setRecentOpen(false);
+        }
+      }
     };
     window.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("keydown", onKeyDown);
@@ -139,7 +153,7 @@ export function PreEditorChat({
       window.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [recentOpen]);
+  }, [recentOpen, confirmDeleteId]);
 
   const handleFilesAdded = (incoming: FileList | null) => {
     if (!incoming || incoming.length === 0) return;
@@ -267,29 +281,90 @@ export function PreEditorChat({
                     Saved Projects
                   </div>
                   <div className="max-h-64 space-y-1 overflow-y-auto">
-                    {recentProjects.map((proj) => (
-                      <button
-                        key={proj.id}
-                        type="button"
-                        onClick={() => {
-                          setRecentOpen(false);
-                          setErrorMsg(null);
-                          void onOpenExistingProject(proj.id).catch((err) => {
-                            setErrorMsg(
-                              err instanceof Error
-                                ? err.message
-                                : "Failed to open project",
-                            );
-                          });
-                        }}
-                        className="flex w-full items-center justify-between gap-2 rounded-xl px-2.5 py-2 text-left text-xs text-areia hover:bg-accent"
-                      >
-                        <span className="truncate font-medium">{proj.name}</span>
-                        <span className="shrink-0 tabular-nums text-[10px] text-areia/50">
-                          rev {proj.revision}
-                        </span>
-                      </button>
-                    ))}
+                    {recentProjects.map((proj) => {
+                      const isConfirming = confirmDeleteId === proj.id;
+                      const isDeleting = deletingId === proj.id;
+                      return (
+                        <div
+                          key={proj.id}
+                          className="group flex w-full items-center justify-between gap-1.5 rounded-xl px-2 py-1.5 text-xs text-areia hover:bg-accent"
+                        >
+                          <button
+                            type="button"
+                            disabled={deletingId !== null}
+                            onClick={() => {
+                              setRecentOpen(false);
+                              setErrorMsg(null);
+                              void onOpenExistingProject(proj.id).catch((err) => {
+                                setErrorMsg(
+                                  err instanceof Error
+                                    ? err.message
+                                    : "Failed to open project",
+                                );
+                              });
+                            }}
+                            className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left"
+                          >
+                            <span className="truncate font-medium">{proj.name}</span>
+                            <span className="shrink-0 tabular-nums text-[10px] text-areia/50">
+                              rev {proj.revision}
+                            </span>
+                          </button>
+                          {onDeleteProject && (
+                            <div className="flex shrink-0 items-center gap-1">
+                              {isConfirming ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    disabled={deletingId !== null}
+                                    onClick={() => {
+                                      setDeletingId(proj.id);
+                                      setErrorMsg(null);
+                                      void onDeleteProject(proj.id)
+                                        .then(() => setConfirmDeleteId(null))
+                                        .catch((err) => {
+                                          setErrorMsg(
+                                            err instanceof Error
+                                              ? err.message
+                                              : "Failed to delete project",
+                                          );
+                                        })
+                                        .finally(() => setDeletingId(null));
+                                    }}
+                                    className="rounded-full bg-vermelho-foco px-2 py-0.5 text-[10px] font-semibold text-areia hover:brightness-110 disabled:opacity-45"
+                                  >
+                                    {isDeleting ? "..." : "Delete"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={deletingId !== null}
+                                    onClick={() => setConfirmDeleteId(null)}
+                                    aria-label="Cancel delete"
+                                    className="grid h-5 w-5 place-items-center rounded-md border border-areia/12 text-areia/65 hover:text-areia"
+                                  >
+                                    <X className="h-2.5 w-2.5" />
+                                  </button>
+                                </>
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled={deletingId !== null}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setConfirmDeleteId(proj.id);
+                                  }}
+                                  title={`Delete ${proj.name}`}
+                                  aria-label={`Delete ${proj.name}`}
+                                  className="grid h-6 w-6 place-items-center rounded-md text-areia/35 opacity-70 transition-colors hover:bg-vermelho-foco/15 hover:text-vermelho-foco hover:opacity-100 group-hover:opacity-100 disabled:opacity-30 motion-reduce:transition-none"
+                                >
+                                  <Trash2 className="h-3 w-3" />
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               )}

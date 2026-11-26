@@ -237,7 +237,10 @@ pub(crate) async fn build_openrouter_director_plan(
         .map(|s| format!("## {}\n{}", s.name, s.content))
         .collect();
     for r in skill_references_for_role(AgentRole::Director) {
-        skill_sections.push(format!("## {}/{}\n{}", r.skill_name, r.relative_path, r.content));
+        skill_sections.push(format!(
+            "## {}/{}\n{}",
+            r.skill_name, r.relative_path, r.content
+        ));
     }
     let skill_text = skill_sections.join("\n\n");
 
@@ -826,7 +829,10 @@ pub(crate) async fn run_llm_worker_loop(
         .map(|s| format!("## {}\n{}", s.name, s.content))
         .collect();
     for r in skill_references_for_role(role) {
-        skill_sections.push(format!("## {}/{}\n{}", r.skill_name, r.relative_path, r.content));
+        skill_sections.push(format!(
+            "## {}/{}\n{}",
+            r.skill_name, r.relative_path, r.content
+        ));
     }
     let skills = skill_sections.join("\n\n");
 
@@ -1380,8 +1386,7 @@ pub(crate) async fn run_programmatic_scene_worker(
          - Strict sandbox rules: root `<div class=\"clip\" data-start=\"0\" data-duration=\"<scene.duration_sec>\">`, ZERO `<script src=...>`, ZERO external URLs/CDNs, ZERO `Math.random`, `Date.now`, `new Date`, `setInterval`, `setTimeout`, `requestAnimationFrame`, `fetch`, `XMLHttpRequest`, `WebSocket`, `import()`.\n\
          - Keep `inline_html` crisp and focused (~2.5–6 KB) so it renders fast and cleanly.\n\
          - Follow `scene.save_instruction` from the user JSON. Once placed, stop and reply concisely — Director runs Vision QA automatically.\n\n{craft_refs}",
-        project.canvas.width,
-        project.canvas.height,
+        project.canvas.width, project.canvas.height,
     );
 
     let user_prompt = json!({

@@ -256,6 +256,12 @@ export class SolarisEngineClient {
     });
   }
 
+  deleteProject(projectId: string): Promise<void> {
+    return this.request<void>(`/api/v1/projects/${encodeURIComponent(projectId)}`, {
+      method: "DELETE",
+    });
+  }
+
   applyOp(
     projectId: string,
     command: TimelineCommand,

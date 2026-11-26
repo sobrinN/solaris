@@ -7,6 +7,7 @@ import {
   Plus,
   Search,
   Sparkles,
+  Trash2,
   X,
 } from "lucide-react";
 import type { AspectPreset, Project, ProjectSummary } from "@solaris/engine-client";
@@ -19,6 +20,7 @@ interface ProjectManagerPopoverProps {
   onSelectProject: (projectId: string) => Promise<void>;
   onCreateBlankProject: (name: string, aspect: AspectPreset) => Promise<void>;
   onRenameProject: (name: string) => Promise<void>;
+  onDeleteProject: (projectId: string) => Promise<void>;
   onNewProjectInChat: () => void;
 }
 
@@ -64,6 +66,7 @@ export function ProjectManagerPopover({
   onSelectProject,
   onCreateBlankProject,
   onRenameProject,
+  onDeleteProject,
   onNewProjectInChat,
 }: ProjectManagerPopoverProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -71,6 +74,7 @@ export function ProjectManagerPopover({
   const [renaming, setRenaming] = useState(false);
   const [renameDraft, setRenameDraft] = useState(currentProject.name);
   const [creatingBlank, setCreatingBlank] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [newAspect, setNewAspect] = useState<AspectPreset>("vertical9x16");
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -86,6 +90,7 @@ export function ProjectManagerPopover({
       setSearch("");
       setRenaming(false);
       setCreatingBlank(false);
+      setConfirmDeleteId(null);
       setErrorMsg(null);
       return;
     }
@@ -96,7 +101,9 @@ export function ProjectManagerPopover({
     };
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        if (renaming) {
+        if (confirmDeleteId) {
+          setConfirmDeleteId(null);
+        } else if (renaming) {
           setRenaming(false);
           setRenameDraft(currentProject.name);
         } else if (creatingBlank) {
@@ -112,7 +119,7 @@ export function ProjectManagerPopover({
       window.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [open, renaming, creatingBlank, currentProject.name, onOpenChange]);
+  }, [open, confirmDeleteId, renaming, creatingBlank, currentProject.name, onOpenChange]);
 
   const sortedProjects = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -173,6 +180,22 @@ export function ProjectManagerPopover({
       onOpenChange(false);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "Failed to switch project");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleDeleteProject = async (projectId: string) => {
+    setBusyId(`delete:${projectId}`);
+    setErrorMsg(null);
+    try {
+      await onDeleteProject(projectId);
+      setConfirmDeleteId(null);
+      if (projectId === currentProject.id) {
+        onOpenChange(false);
+      }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "Failed to delete project");
     } finally {
       setBusyId(null);
     }
@@ -260,17 +283,52 @@ export function ProjectManagerPopover({
                 <span className="truncate text-xs font-medium text-areia" title={currentProject.name}>
                   {currentProject.name}
                 </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRenameDraft(currentProject.name);
-                    setRenaming(true);
-                  }}
-                  className="flex shrink-0 items-center gap-1 rounded-full border border-areia/12 px-2 py-0.5 text-[10px] text-areia/75 hover:border-laranja-criacao/50 hover:bg-accent hover:text-areia"
-                >
-                  <Pencil className="h-2.5 w-2.5 text-amarelo-ideias" />
-                  <span>Rename</span>
-                </button>
+                <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirmDeleteId(null);
+                      setRenameDraft(currentProject.name);
+                      setRenaming(true);
+                    }}
+                    className="flex shrink-0 items-center gap-1 rounded-full border border-areia/12 px-2 py-0.5 text-[10px] text-areia/75 hover:border-laranja-criacao/50 hover:bg-accent hover:text-areia"
+                  >
+                    <Pencil className="h-2.5 w-2.5 text-amarelo-ideias" />
+                    <span>Rename</span>
+                  </button>
+                  {confirmDeleteId === `header:${currentProject.id}` ? (
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        disabled={busyId !== null}
+                        onClick={() => void handleDeleteProject(currentProject.id)}
+                        className="rounded-full bg-vermelho-foco px-2 py-0.5 text-[10px] font-semibold text-areia hover:brightness-110 disabled:opacity-45"
+                      >
+                        {busyId === `delete:${currentProject.id}` ? "..." : "Delete"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busyId !== null}
+                        onClick={() => setConfirmDeleteId(null)}
+                        aria-label="Cancel delete"
+                        className="grid h-5 w-5 place-items-center rounded-full border border-areia/12 text-areia/65 hover:text-areia"
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={busyId !== null}
+                      onClick={() => setConfirmDeleteId(`header:${currentProject.id}`)}
+                      title="Delete current project"
+                      aria-label="Delete current project"
+                      className="grid h-5 w-5 shrink-0 place-items-center rounded-full border border-areia/12 text-areia/60 hover:border-vermelho-foco/60 hover:bg-vermelho-foco/15 hover:text-vermelho-foco disabled:opacity-40"
+                    >
+                      <Trash2 className="h-2.5 w-2.5" />
+                    </button>
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -378,20 +436,23 @@ export function ProjectManagerPopover({
               ) : (
                 sortedProjects.map((proj) => {
                   const isCurrent = proj.id === currentProject.id;
-                  const isBusy = busyId === proj.id;
+                  const isBusy = busyId === proj.id || busyId === `delete:${proj.id}`;
+                  const isConfirming = confirmDeleteId === proj.id;
                   return (
-                    <button
+                    <div
                       key={proj.id}
-                      type="button"
-                      disabled={busyId !== null}
-                      onClick={() => void handleSwitchProject(proj.id)}
-                      className={`flex w-full items-center justify-between gap-2.5 rounded-xl border px-2.5 py-2 text-left transition-colors motion-reduce:transition-none ${
+                      className={`group flex w-full items-center justify-between gap-2 rounded-xl border px-2.5 py-2 transition-colors motion-reduce:transition-none ${
                         isCurrent
                           ? "border-laranja-criacao/45 bg-accent text-areia"
                           : "border-transparent bg-void/45 text-areia/85 hover:border-areia/12 hover:bg-accent"
                       }`}
                     >
-                      <div className="flex min-w-0 items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={busyId !== null}
+                        onClick={() => void handleSwitchProject(proj.id)}
+                        className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                      >
                         <span
                           className={`h-1.5 w-1.5 shrink-0 rounded-full ${
                             isCurrent ? "bg-laranja-criacao" : "bg-areia/20"
@@ -415,13 +476,53 @@ export function ProjectManagerPopover({
                             )}
                           </div>
                         </div>
+                      </button>
+
+                      <div className="flex shrink-0 items-center gap-1">
+                        {isConfirming ? (
+                          <>
+                            <button
+                              type="button"
+                              disabled={busyId !== null}
+                              onClick={() => void handleDeleteProject(proj.id)}
+                              className="rounded-full bg-vermelho-foco px-2 py-0.5 text-[10px] font-semibold text-areia hover:brightness-110 disabled:opacity-45"
+                            >
+                              {busyId === `delete:${proj.id}` ? "..." : "Delete"}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busyId !== null}
+                              onClick={() => setConfirmDeleteId(null)}
+                              aria-label="Cancel delete"
+                              className="grid h-6 w-6 place-items-center rounded-lg border border-areia/12 text-areia/65 hover:text-areia"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            {isBusy ? (
+                              <span className="text-[10px] text-amarelo-ideias">...</span>
+                            ) : isCurrent ? (
+                              <Check className="h-3.5 w-3.5 text-amarelo-ideias" />
+                            ) : null}
+                            <button
+                              type="button"
+                              disabled={busyId !== null}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setConfirmDeleteId(proj.id);
+                              }}
+                              title={`Delete ${proj.name}`}
+                              aria-label={`Delete ${proj.name}`}
+                              className="grid h-6 w-6 place-items-center rounded-lg text-areia/35 opacity-70 transition-colors hover:bg-vermelho-foco/15 hover:text-vermelho-foco hover:opacity-100 group-hover:opacity-100 disabled:opacity-30 motion-reduce:transition-none"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </button>
+                          </>
+                        )}
                       </div>
-                      {isBusy ? (
-                        <span className="shrink-0 text-[10px] text-amarelo-ideias">...</span>
-                      ) : isCurrent ? (
-                        <Check className="h-3.5 w-3.5 shrink-0 text-amarelo-ideias" />
-                      ) : null}
-                    </button>
+                    </div>
                   );
                 })
               )}

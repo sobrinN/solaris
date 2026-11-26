@@ -2026,16 +2026,17 @@ where
         let mut completed_frames = 0usize;
         let mut specs = Vec::new();
         for (clip_slot, clip) in overlay_clips.into_iter().enumerate() {
-            let clip_specs = render_single_overlay_clip(&ctx, &mut cdp, clip_slot + 1, clip, || {
-                completed_frames += 1;
-                on_progress(OverlayRenderProgress {
-                    completed_frames,
-                    total_frames,
-                    stage_label: format!(
-                        "Rendering GFX & captions ({completed_frames}/{total_frames} frames)"
-                    ),
-                });
-            })?;
+            let clip_specs =
+                render_single_overlay_clip(&ctx, &mut cdp, clip_slot + 1, clip, || {
+                    completed_frames += 1;
+                    on_progress(OverlayRenderProgress {
+                        completed_frames,
+                        total_frames,
+                        stage_label: format!(
+                            "Rendering GFX & captions ({completed_frames}/{total_frames} frames)"
+                        ),
+                    });
+                })?;
             specs.extend(clip_specs);
         }
         return Ok(specs);
