@@ -74,6 +74,7 @@ export function ExportModal({
   const [selectedTarget, setSelectedTarget] = useState<ExportDestinationTarget | null>(() =>
     getRememberedExportFolder(),
   );
+  const [webSaveMode, setWebSaveMode] = useState<"downloads" | "save_as">("downloads");
   const [pickingDestination, setPickingDestination] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -166,8 +167,8 @@ export function ExportModal({
     return Math.max(-24, Math.min(-8, parsed));
   };
 
-  const handleChooseDestination = async () => {
-    if (pickingDestination || isJobActive || !destinationPickerAvailable) return;
+  const handleChooseDesktopFolder = async () => {
+    if (!isDesktop || pickingDestination || isJobActive || !destinationPickerAvailable) return;
     setPickingDestination(true);
     setSubmitError(null);
     try {
@@ -179,44 +180,38 @@ export function ExportModal({
         setSelectedTarget(picked);
         if (picked.kind === "desktop_path") {
           setRememberedExportFolder(picked);
-        } else {
-          setFileNameInput(sanitizeExportBaseName(picked.name));
         }
       }
     } catch (err) {
       setSubmitError(
-        err instanceof Error
-          ? `${err.message}. You can still render using Browser Downloads.`
-          : "Could not open save dialog. You can still render using Browser Downloads.",
+        err instanceof Error ? err.message : "Could not open folder picker",
       );
     } finally {
       setPickingDestination(false);
     }
   };
 
-  const handleClearWebDestination = () => {
-    if (isJobActive) return;
-    setSelectedTarget(null);
-    setSubmitError(null);
-  };
-
   const handleStart = async () => {
     if (submitting || isJobActive || pickingDestination) return;
     setSubmitError(null);
 
-    let target = selectedTarget;
+    const clampedLufs = parseClampedLufs();
+    setTargetLufsInput(String(clampedLufs));
+    let cleanBaseName = sanitizeExportBaseName(fileNameInput || projectName);
+    setFileNameInput(cleanBaseName);
+
+    let target: ExportDestinationTarget | null = isDesktop ? selectedTarget : null;
     if (isDesktop && !target) {
       setPickingDestination(true);
       try {
         target = await pickExportDestination({
-          suggestedBaseName: fileNameInput || projectName,
+          suggestedBaseName: cleanBaseName,
           format,
         });
       } catch (err) {
         setSubmitError(
           err instanceof Error ? err.message : "Could not open folder picker",
         );
-        setPickingDestination(false);
         return;
       } finally {
         setPickingDestination(false);
@@ -226,12 +221,38 @@ export function ExportModal({
       }
       setSelectedTarget(target);
       setRememberedExportFolder(target);
-    } else if (target) {
+    } else if (!isDesktop && webSaveMode === "save_as" && destinationPickerAvailable) {
+      // Open the browser Save As picker only when the user actually starts rendering
+      // so Chromium never creates a 0-byte placeholder file prematurely.
+      setPickingDestination(true);
+      try {
+        target = await pickExportDestination({
+          suggestedBaseName: cleanBaseName,
+          format,
+        });
+      } catch (err) {
+        setSubmitError(
+          err instanceof Error
+            ? `${err.message}. Switch to Downloads to save via Browser Downloads.`
+            : "Could not open save dialog. Switch to Downloads to save via Browser Downloads.",
+        );
+        return;
+      } finally {
+        setPickingDestination(false);
+      }
+      if (!target) {
+        return;
+      }
+      cleanBaseName = sanitizeExportBaseName(target.name);
+      setFileNameInput(cleanBaseName);
+    }
+
+    if (target) {
       try {
         const permitted = await ensureExportWritePermission(target);
         if (!permitted) {
           setSubmitError(
-            "Write permission for the chosen destination was denied. Choose a location again or reset to Browser Downloads.",
+            "Write permission for the chosen destination was denied. Choose a location again or switch to Downloads.",
           );
           return;
         }
@@ -245,11 +266,10 @@ export function ExportModal({
       }
     }
 
-    const clampedLufs = parseClampedLufs();
-    setTargetLufsInput(String(clampedLufs));
-    const cleanBaseName = sanitizeExportBaseName(fileNameInput || projectName);
-    setFileNameInput(cleanBaseName);
-    const desiredFileName = buildExportFileName(cleanBaseName, format);
+    const desiredFileName =
+      target?.kind === "fs_file_handle"
+        ? target.name
+        : buildExportFileName(cleanBaseName, format);
 
     setSubmitting(true);
     setDeliveryState(null);
@@ -279,7 +299,7 @@ export function ExportModal({
     setManualSaving(true);
     setSubmitError(null);
 
-    let target = selectedTarget;
+    let target: ExportDestinationTarget | null = isDesktop ? selectedTarget : null;
     if (isDesktop && !target) {
       try {
         target = await pickExportDestination({
@@ -299,11 +319,29 @@ export function ExportModal({
       }
       setSelectedTarget(target);
       setRememberedExportFolder(target);
-    } else if (target) {
+    } else if (!isDesktop && webSaveMode === "save_as" && destinationPickerAvailable) {
+      try {
+        target = await pickExportDestination({
+          suggestedBaseName: fileNameInput || projectName,
+          format,
+        });
+      } catch (err) {
+        setSubmitError(
+          err instanceof Error ? err.message : "Could not open save dialog",
+        );
+        setManualSaving(false);
+        return;
+      }
+      if (!target) {
+        setManualSaving(false);
+        return;
+      }
+    }
+    if (target) {
       const permitted = await ensureExportWritePermission(target).catch(() => false);
       if (!permitted) {
         setSubmitError(
-          "Write permission for the chosen destination was denied. Choose a location again or reset to Browser Downloads.",
+          "Write permission for the chosen destination was denied. Choose a location again or switch to Downloads.",
         );
         setManualSaving(false);
         return;
@@ -411,30 +449,41 @@ export function ExportModal({
                   }`}
                 />
                 <div className="min-w-0 flex-1">
-                  {selectedTarget ? (
+                  {isDesktop ? (
+                    selectedTarget ? (
+                      <>
+                        <div
+                          className="truncate text-xs font-medium text-areia"
+                          title={destinationDisplayPath}
+                        >
+                          {selectedTarget.name}
+                        </div>
+                        <div
+                          className="truncate text-[10px] text-areia/55"
+                          title={destinationDisplayPath}
+                        >
+                          {selectedTarget.kind === "desktop_path"
+                            ? selectedTarget.path
+                            : selectedTarget.name}
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="truncate text-xs text-areia/80">
+                          Choose destination folder
+                        </div>
+                        <div className="truncate text-[10px] text-areia/50">
+                          Video saves automatically when rendering completes
+                        </div>
+                      </>
+                    )
+                  ) : webSaveMode === "save_as" && destinationPickerAvailable ? (
                     <>
-                      <div
-                        className="truncate text-xs font-medium text-areia"
-                        title={destinationDisplayPath}
-                      >
-                        {selectedTarget.name}
+                      <div className="truncate text-xs font-medium text-areia">
+                        Choose location on render
                       </div>
-                      <div
-                        className="truncate text-[10px] text-areia/55"
-                        title={destinationDisplayPath}
-                      >
-                        {selectedTarget.kind === "desktop_path"
-                          ? selectedTarget.path
-                          : "Saves directly to chosen file after render"}
-                      </div>
-                    </>
-                  ) : isDesktop ? (
-                    <>
-                      <div className="truncate text-xs text-areia/80">
-                        Choose destination folder
-                      </div>
-                      <div className="truncate text-[10px] text-areia/50">
-                        Video saves automatically when rendering completes
+                      <div className="truncate text-[10px] text-areia/55">
+                        Prompts where to save when you click Render
                       </div>
                     </>
                   ) : (
@@ -443,38 +492,63 @@ export function ExportModal({
                         Browser Downloads
                       </div>
                       <div className="truncate text-[10px] text-areia/55">
-                        Auto-downloads when render finishes (or choose any save location)
+                        Auto-downloads when render finishes
                       </div>
                     </>
                   )}
                 </div>
               </div>
-              {destinationPickerAvailable && (
+              {destinationPickerAvailable && isDesktop && (
                 <div className="flex shrink-0 items-center gap-1.5">
-                  {!isDesktop && selectedTarget?.kind === "fs_file_handle" && (
-                    <button
-                      type="button"
-                      disabled={pickingDestination || isJobActive}
-                      onClick={handleClearWebDestination}
-                      className="rounded-full border border-areia/14 px-2 py-1 text-[10px] text-areia/65 transition-colors hover:border-areia/30 hover:text-areia disabled:opacity-50"
-                      title="Use default Browser Downloads"
-                    >
-                      Reset
-                    </button>
-                  )}
                   <button
                     type="button"
                     disabled={pickingDestination || isJobActive}
-                    onClick={() => void handleChooseDestination()}
+                    onClick={() => void handleChooseDesktopFolder()}
                     className="rounded-full border border-areia/16 bg-carbono px-3 py-1 text-[11px] font-medium text-areia transition-colors hover:border-amarelo-ideias/45 hover:bg-accent disabled:opacity-50 motion-reduce:transition-none"
                   >
                     {pickingDestination
                       ? "Opening..."
                       : selectedTarget
                         ? "Change"
-                        : isDesktop
-                          ? "Choose"
-                          : "Save As..."}
+                        : "Choose"}
+                  </button>
+                </div>
+              )}
+              {destinationPickerAvailable && !isDesktop && (
+                <div
+                  role="group"
+                  aria-label="Web save mode"
+                  className="flex shrink-0 items-center gap-0.5 rounded-full border border-areia/12 bg-carbono p-0.5 text-[10px]"
+                >
+                  <button
+                    type="button"
+                    disabled={pickingDestination || isJobActive}
+                    onClick={() => {
+                      setWebSaveMode("downloads");
+                      setSubmitError(null);
+                    }}
+                    className={`rounded-full px-2 py-0.5 font-medium transition-colors disabled:opacity-50 motion-reduce:transition-none ${
+                      webSaveMode === "downloads"
+                        ? "bg-laranja-criacao/25 text-areia"
+                        : "text-areia/55 hover:text-areia"
+                    }`}
+                  >
+                    Downloads
+                  </button>
+                  <button
+                    type="button"
+                    disabled={pickingDestination || isJobActive}
+                    onClick={() => {
+                      setWebSaveMode("save_as");
+                      setSubmitError(null);
+                    }}
+                    className={`rounded-full px-2 py-0.5 font-medium transition-colors disabled:opacity-50 motion-reduce:transition-none ${
+                      webSaveMode === "save_as"
+                        ? "bg-amarelo-ideias/25 text-amarelo-ideias"
+                        : "text-areia/55 hover:text-areia"
+                    }`}
+                  >
+                    Save As
                   </button>
                 </div>
               )}
@@ -700,7 +774,7 @@ export function ExportModal({
                     ? "Rendering..."
                     : isDesktop && !selectedTarget
                       ? "Choose Folder & Render"
-                      : selectedTarget
+                      : isDesktop || webSaveMode === "save_as"
                         ? "Render & Save"
                         : "Render & Download"}
             </span>
