@@ -94,7 +94,7 @@ function resolveAnchorCoordinates(
         const minX = Math.max(12, rect.left + 6);
         const maxX = Math.max(minX, Math.min(rect.right - 140, vw - 200));
         const minY = Math.max(56, rect.top + 4);
-        const maxY = Math.max(minY, Math.min(rect.bottom - 24, vh - 40));
+        const maxY = Math.max(minY, Math.min(rect.bottom - 24, vh - 54));
         const dx = microJitter ? (Math.random() - 0.5) * 28 : 0;
         const dy = microJitter ? (Math.random() - 0.5) * 10 : 0;
         return {
@@ -124,7 +124,7 @@ function resolveAnchorCoordinates(
   const minX = Math.max(12, rect.left + 8);
   const maxX = Math.max(minX, Math.min(rect.right - 150, vw - 210));
   const minY = Math.max(56, rect.top + 8);
-  const maxY = Math.max(minY, Math.min(rect.bottom - 34, vh - 42));
+  const maxY = Math.max(minY, Math.min(rect.bottom - 34, vh - 54));
   return {
     x: Math.max(minX, Math.min(maxX, rect.left + spreadX + jitterX)),
     y: Math.max(minY, Math.min(maxY, rect.top + rect.height * 0.5 + jitterY)),

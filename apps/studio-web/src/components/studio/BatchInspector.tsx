@@ -109,18 +109,18 @@ export function BatchInspector({
   return (
     <aside
       aria-label="Batch clip inspector"
-      className="solaris-scroll flex h-full flex-col gap-2.5 overflow-y-auto rounded-xl border border-areia/[0.08] bg-carbono/65 p-2.5 text-xs shadow-[inset_0_1px_0_rgba(247,245,239,0.04)]"
+      className="solaris-panel flex h-full flex-col overflow-hidden rounded-xl text-xs"
     >
-      {/* Header */}
-      <div className="flex items-start justify-between gap-2 border-b border-areia/[0.08] pb-2">
-        <div className="min-w-0">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-amarelo-ideias">
+      {/* Header (h-9) */}
+      <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-areia/[0.08] px-2.5">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-amarelo-ideias">
             Batch Edit
-          </div>
-          <div className="mt-0.5 tabular-nums text-xs font-medium text-areia">
+          </span>
+          <span className="truncate tabular-nums text-[10px] text-areia/65">
             {summary.clipCount} clips · {summary.trackCount}{" "}
             {summary.trackCount === 1 ? "track" : "tracks"} · {summary.durationSec.toFixed(1)}s
-          </div>
+          </span>
         </div>
         <button
           type="button"
@@ -132,6 +132,8 @@ export function BatchInspector({
           <X className="h-3 w-3" />
         </button>
       </div>
+
+      <div className="solaris-scroll flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto p-2.5">
 
       {lockedCount > 0 && (
         <div className="flex items-center gap-1.5 rounded-lg border border-amarelo-ideias/30 bg-amarelo-ideias/10 px-2.5 py-1.5 text-[10px] text-areia/85">
@@ -377,6 +379,7 @@ export function BatchInspector({
           </div>
         </div>
       )}
+      </div>
     </aside>
   );
 }

@@ -1,6 +1,9 @@
 import { useMemo, useRef, useState } from "react";
 import {
+  ChevronLeft,
+  ChevronRight,
   Lock,
+  Magnet,
   Pause,
   Play,
   Scissors,
@@ -20,6 +23,11 @@ import type {
 } from "@solaris/engine-client";
 import { GFX_ASSET_DRAG_MIME } from "../../lib/dragPayloads";
 import {
+  computeRulerTicks,
+  formatCompactDuration,
+  snapTimeSec,
+} from "../../lib/timelineFormat";
+import {
   clampGroupDelta,
   marqueeHits,
   rangeSelection,
@@ -36,6 +44,7 @@ interface TimelinePanelProps {
   totalDurationSec: number;
   fps?: number;
   canvasLabel?: string;
+  heightPx?: number;
   isPlaying: boolean;
   selectedClipIds: string[];
   selectionAnchorId: string | null;
@@ -74,13 +83,13 @@ const TRACK_STRIP_COLORS: Record<TrackKind, string> = {
 };
 
 const TRACK_CLIP_TINTS: Record<TrackKind, string> = {
-  text: "bg-track-t1/[0.11] border-track-t1/30 hover:border-track-t1/55",
-  gfx: "bg-track-g1/[0.11] border-track-g1/30 hover:border-track-g1/55",
-  b_roll: "bg-track-v2/[0.11] border-track-v2/30 hover:border-track-v2/55",
-  a_roll: "bg-track-v1/[0.11] border-track-v1/30 hover:border-track-v1/55",
-  grade: "bg-track-fx/[0.12] border-track-fx/35 hover:border-track-fx/60",
-  voice: "bg-track-a1/[0.11] border-track-a1/30 hover:border-track-a1/55",
-  music: "bg-track-a2/[0.11] border-track-a2/30 hover:border-track-a2/55",
+  text: "bg-track-t1/[0.16] border-track-t1/40 hover:border-track-t1/70 shadow-[inset_0_1px_0_rgba(247,245,239,0.08)]",
+  gfx: "bg-track-g1/[0.16] border-track-g1/40 hover:border-track-g1/70 shadow-[inset_0_1px_0_rgba(247,245,239,0.08)]",
+  b_roll: "bg-track-v2/[0.16] border-track-v2/40 hover:border-track-v2/70 shadow-[inset_0_1px_0_rgba(247,245,239,0.08)]",
+  a_roll: "bg-track-v1/[0.16] border-track-v1/40 hover:border-track-v1/70 shadow-[inset_0_1px_0_rgba(247,245,239,0.08)]",
+  grade: "bg-track-fx/[0.18] border-track-fx/45 hover:border-track-fx/75 shadow-[inset_0_1px_0_rgba(247,245,239,0.08)]",
+  voice: "bg-track-a1/[0.16] border-track-a1/40 hover:border-track-a1/70 shadow-[inset_0_1px_0_rgba(247,245,239,0.08)]",
+  music: "bg-track-a2/[0.16] border-track-a2/40 hover:border-track-a2/70 shadow-[inset_0_1px_0_rgba(247,245,239,0.08)]",
 };
 
 function formatTimecode(sec: number, fps: number): string {
@@ -135,11 +144,11 @@ function sliceWaveformPeaks(
   const startIdx = Math.floor(startFrac * peaks.length);
   const endIdx = Math.max(startIdx + 1, Math.ceil(endFrac * peaks.length));
   const slice = peaks.slice(startIdx, Math.min(peaks.length, endIdx));
-  if (slice.length <= 32) return slice;
+  if (slice.length <= 48) return slice;
   const out: number[] = [];
-  for (let i = 0; i < 32; i++) {
-    const lo = Math.floor((i * slice.length) / 32);
-    const hi = Math.max(lo + 1, Math.floor(((i + 1) * slice.length) / 32));
+  for (let i = 0; i < 48; i++) {
+    const lo = Math.floor((i * slice.length) / 48);
+    const hi = Math.max(lo + 1, Math.floor(((i + 1) * slice.length) / 48));
     let maxVal = 0;
     for (let j = lo; j < hi; j++) {
       if (slice[j] > maxVal) maxVal = slice[j];
@@ -157,7 +166,7 @@ export function TimelinePanel({
   playheadSec,
   totalDurationSec,
   fps = 30,
-  canvasLabel,
+  heightPx,
   isPlaying,
   selectedClipIds,
   selectionAnchorId,
@@ -173,6 +182,7 @@ export function TimelinePanel({
   onToggleTrackFlag,
 }: TimelinePanelProps) {
   const [zoom, setZoom] = useState(1);
+  const [snapEnabled, setSnapEnabled] = useState(true);
   const [dragPreview, setDragPreview] = useState<ClipDragPreview | null>(null);
   const dragPreviewRef = useRef<ClipDragPreview | null>(null);
   const [marquee, setMarquee] = useState<MarqueeDraft | null>(null);
@@ -180,7 +190,7 @@ export function TimelinePanel({
   const tracksContainerRef = useRef<HTMLDivElement | null>(null);
   const [dropHoverTrackId, setDropHoverTrackId] = useState<string | null>(null);
   const [emptyDropHover, setEmptyDropHover] = useState(false);
-  const [showAllTracks, setShowAllTracks] = useState(false);
+  const [showAllTracks, setShowAllTracks] = useState(true);
   const [draggingPayload, setDraggingPayload] = useState<"media" | "gfx" | null>(null);
 
   const activeTrackSet = useMemo(() => new Set(activeTrackIds), [activeTrackIds]);
@@ -220,17 +230,23 @@ export function TimelinePanel({
   const safeFps = Math.max(1, Math.round(fps));
   const timelineSpan = totalDurationSec > 0 ? Math.max(12, Math.ceil(totalDurationSec + 2)) : 20;
   const playheadPct = Math.min(100, Math.max(0, (playheadSec / timelineSpan) * 100));
-  const rulerStepSec = timelineSpan <= 25 ? 2 : timelineSpan <= 60 ? 5 : 10;
-  const rulerTicks: number[] = [];
-  for (let s = 0; s <= timelineSpan; s += rulerStepSec) {
-    rulerTicks.push(s);
-  }
+  const { ticks: rulerTicks } = useMemo(
+    () => computeRulerTicks(timelineSpan, zoom),
+    [timelineSpan, zoom],
+  );
 
   const seekFromPointer = (el: HTMLDivElement, clientX: number) => {
     const rect = el.getBoundingClientRect();
     if (rect.width <= 0) return;
     const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
     onSeek(Math.min(timelineSpan, ratio * timelineSpan));
+  };
+
+  const resetZoomFit = () => {
+    setZoom(1);
+    if (tracksContainerRef.current) {
+      tracksContainerRef.current.scrollLeft = 0;
+    }
   };
 
   const handleClipClick = (
@@ -309,7 +325,8 @@ export function TimelinePanel({
     const deltaSec = (dx / st.laneWidth) * timelineSpan;
 
     if (st.mode === "group-move") {
-      const clamped = clampGroupDelta(unlockedSelectedClips, deltaSec);
+      const snappedDelta = snapEnabled ? Math.round(deltaSec * 10) / 10 : deltaSec;
+      const clamped = clampGroupDelta(unlockedSelectedClips, snappedDelta);
       const rounded = Math.round(clamped * 1000) / 1000;
       const updated: ClipDragPreview = {
         ...st,
@@ -326,13 +343,19 @@ export function TimelinePanel({
     let nextSourceIn = st.origSourceIn;
 
     if (st.mode === "move") {
-      nextStart = Math.max(0, st.origStart + deltaSec);
+      nextStart = snapTimeSec(Math.max(0, st.origStart + deltaSec), snapEnabled);
     } else if (st.mode === "trim-right") {
-      nextDur = Math.max(0.15, st.origDur + deltaSec);
+      const snappedEnd = snapTimeSec(
+        Math.max(st.origStart + 0.15, st.origStart + st.origDur + deltaSec),
+        snapEnabled,
+      );
+      nextDur = Math.max(0.15, Number((snappedEnd - st.origStart).toFixed(3)));
     } else if (st.mode === "trim-left") {
       const maxShift = st.origDur - 0.15;
       const minShift = Math.max(-st.origStart, -st.origSourceIn);
-      const shift = Math.max(minShift, Math.min(maxShift, deltaSec));
+      const rawStart = Math.max(0, st.origStart + deltaSec);
+      const snappedStart = snapTimeSec(rawStart, snapEnabled);
+      const shift = Math.max(minShift, Math.min(maxShift, snappedStart - st.origStart));
       nextStart = st.origStart + shift;
       nextDur = st.origDur - shift;
       nextSourceIn = Math.max(0, st.origSourceIn + shift);
@@ -476,24 +499,36 @@ export function TimelinePanel({
   return (
     <section
       data-cursor-anchor="timeline"
-      className="flex flex-col rounded-xl border border-areia/[0.08] bg-carbono/65 shadow-[inset_0_1px_0_rgba(247,245,239,0.04)]"
+      style={heightPx ? { height: `${heightPx}px` } : undefined}
+      className="solaris-panel flex min-h-0 flex-col overflow-hidden rounded-xl"
     >
       {/* Transport Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-areia/[0.08] px-3 py-1.5">
-        <div className="flex items-center gap-2">
+      <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-areia/[0.08] px-3">
+        <div className="flex min-w-0 items-center gap-1.5">
           <button
             type="button"
             onClick={() => onSeek(0)}
-            className="grid h-7 w-7 place-items-center rounded-full border border-areia/12 text-areia/75 hover:bg-accent hover:text-areia"
+            className="grid h-6 w-6 place-items-center rounded-full border border-areia/12 text-areia/75 transition-colors hover:bg-accent hover:text-areia motion-reduce:transition-none"
             aria-label="Jump to start"
+            title="Jump to start"
           >
-            <SkipBack className="h-3.5 w-3.5" />
+            <SkipBack className="h-3 w-3" />
+          </button>
+          <button
+            type="button"
+            onClick={() => onSeek(Math.max(0, playheadSec - 1))}
+            className="grid h-6 w-6 place-items-center rounded-full border border-areia/10 text-areia/65 transition-colors hover:bg-accent hover:text-areia motion-reduce:transition-none"
+            aria-label="Step back 1 second"
+            title="Step back 1s"
+          >
+            <ChevronLeft className="h-3 w-3" />
           </button>
           <button
             type="button"
             onClick={onTogglePlay}
-            className="grid h-7 w-7 place-items-center rounded-full bg-primary text-areia shadow-sm hover:brightness-110"
+            className="grid h-7 w-7 place-items-center rounded-full bg-primary text-areia shadow-[0_0_14px_-2px_rgba(240,90,0,0.7)] transition-transform hover:scale-105 active:scale-95 motion-reduce:transition-none"
             aria-label={isPlaying ? "Pause" : "Play"}
+            title={isPlaying ? "Pause (Space)" : "Play (Space)"}
           >
             {isPlaying ? (
               <Pause className="h-3.5 w-3.5" />
@@ -501,17 +536,29 @@ export function TimelinePanel({
               <Play className="h-3.5 w-3.5 translate-x-[0.5px]" />
             )}
           </button>
-          <span className="ml-2 tabular-nums text-xs font-medium text-amarelo-ideias">
-            {formatTimecode(playheadSec, safeFps)}
-          </span>
-          <span className="tabular-nums text-[11px] text-areia/45">
-            / {formatTimecode(timelineSpan, safeFps)}
-          </span>
+          <button
+            type="button"
+            onClick={() => onSeek(Math.min(timelineSpan, playheadSec + 1))}
+            className="grid h-6 w-6 place-items-center rounded-full border border-areia/10 text-areia/65 transition-colors hover:bg-accent hover:text-areia motion-reduce:transition-none"
+            aria-label="Step forward 1 second"
+            title="Step forward 1s"
+          >
+            <ChevronRight className="h-3 w-3" />
+          </button>
+
+          <div className="ml-2 flex items-baseline gap-1.5">
+            <span className="tabular-nums text-[13px] font-semibold tracking-tight text-amarelo-ideias">
+              {formatTimecode(playheadSec, safeFps)}
+            </span>
+            <span className="tabular-nums text-[11px] text-areia/40">
+              / {formatTimecode(timelineSpan, safeFps)}
+            </span>
+          </div>
 
           {selectedClipIds.length > 0 && (
-            <div className="ml-3 flex items-center gap-1 border-l border-areia/12 pl-3">
+            <div className="ml-2.5 flex items-center gap-1 border-l border-areia/12 pl-2.5">
               {selectedClipIds.length > 1 && (
-                <span className="tabular-nums mr-1 rounded-full border border-amarelo-ideias/35 bg-amarelo-ideias/15 px-2 py-0.5 text-[10px] font-medium text-amarelo-ideias">
+                <span className="tabular-nums mr-0.5 rounded-full border border-amarelo-ideias/35 bg-amarelo-ideias/15 px-2 py-0.5 text-[10px] font-medium text-amarelo-ideias">
                   {selectedClipIds.length} selected
                 </span>
               )}
@@ -519,7 +566,7 @@ export function TimelinePanel({
                 <button
                   type="button"
                   onClick={onSplitSelected}
-                  className="flex h-6 items-center gap-1 rounded-full border border-areia/14 bg-void/70 px-2.5 text-[10px] text-areia/85 hover:border-laranja-criacao/50 hover:bg-accent"
+                  className="flex h-6 items-center gap-1 rounded-full border border-areia/14 bg-void/70 px-2.5 text-[10px] text-areia/85 transition-colors hover:border-laranja-criacao/50 hover:bg-accent motion-reduce:transition-none"
                   title="Split selected clip(s) at playhead (S)"
                 >
                   <Scissors className="h-3 w-3 text-laranja-criacao" />
@@ -530,7 +577,7 @@ export function TimelinePanel({
                 <button
                   type="button"
                   onClick={onDeleteSelected}
-                  className="flex h-6 items-center gap-1 rounded-full border border-areia/14 bg-void/70 px-2.5 text-[10px] text-areia/85 hover:border-vermelho-foco/60 hover:bg-vermelho-foco/20"
+                  className="flex h-6 items-center gap-1 rounded-full border border-areia/14 bg-void/70 px-2.5 text-[10px] text-areia/85 transition-colors hover:border-vermelho-foco/60 hover:bg-vermelho-foco/20 motion-reduce:transition-none"
                   title="Delete selected clip(s) (Delete)"
                 >
                   <Trash2 className="h-3 w-3 text-vermelho-foco" />
@@ -541,7 +588,22 @@ export function TimelinePanel({
           )}
         </div>
 
-        <div className="flex items-center gap-3 text-[11px] text-areia/60">
+        <div className="flex shrink-0 items-center gap-2 text-[11px] text-areia/60">
+          <button
+            type="button"
+            onClick={() => setSnapEnabled((v) => !v)}
+            aria-pressed={snapEnabled}
+            title={snapEnabled ? "Snapping enabled (0.1s grid)" : "Snapping disabled"}
+            className={`flex h-6 items-center gap-1 rounded-full border px-2 text-[10px] font-medium transition-colors motion-reduce:transition-none ${
+              snapEnabled
+                ? "border-amarelo-ideias/40 bg-amarelo-ideias/12 text-amarelo-ideias"
+                : "border-areia/12 bg-void/65 text-areia/55 hover:bg-accent hover:text-areia"
+            }`}
+          >
+            <Magnet className="h-3 w-3" />
+            <span className="hidden sm:inline">Snap</span>
+          </button>
+
           <div className="flex items-center gap-1 rounded-full border border-areia/12 bg-void/65 px-1.5 py-0.5">
             <button
               type="button"
@@ -553,7 +615,7 @@ export function TimelinePanel({
             >
               <ZoomOut className="h-3 w-3" />
             </button>
-            <span className="tabular-nums w-8 text-center text-[10px] text-areia/80">
+            <span className="tabular-nums w-8 text-center text-[10px] text-areia/85">
               {zoom.toFixed(1)}×
             </span>
             <button
@@ -566,17 +628,37 @@ export function TimelinePanel({
             >
               <ZoomIn className="h-3 w-3" />
             </button>
+            {zoom > 1 && (
+              <button
+                type="button"
+                onClick={resetZoomFit}
+                className="ml-0.5 rounded-full border border-areia/15 bg-carbono px-1.5 py-0.5 text-[9px] font-medium text-amarelo-ideias hover:border-amarelo-ideias/50"
+                title="Reset zoom to fit timeline"
+              >
+                Fit
+              </button>
+            )}
           </div>
-          {canvasLabel && (
-            <span className="tabular-nums text-areia/70">{canvasLabel}</span>
-          )}
-          <span className="tabular-nums text-areia/80">{safeFps} FPS</span>
         </div>
       </div>
 
       {/* Tracks */}
       <div
         ref={tracksContainerRef}
+        onWheel={(e) => {
+          const el = tracksContainerRef.current;
+          if (!el) return;
+          if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            const delta = e.deltaY < 0 ? 0.25 : -0.25;
+            setZoom((z) => Math.max(1, Math.min(4, Number((z + delta).toFixed(2)))));
+            return;
+          }
+          if (zoom > 1 && (Math.abs(e.deltaX) > 0 || e.shiftKey)) {
+            const pan = Math.abs(e.deltaX) > 0 ? e.deltaX : e.deltaY;
+            el.scrollLeft += pan;
+          }
+        }}
         onDragOver={(e) => {
           if (
             Boolean(onPlaceGfxFromAsset) &&
@@ -596,16 +678,18 @@ export function TimelinePanel({
           }
         }}
         onDrop={() => setDraggingPayload(null)}
-        className="relative flex max-h-[240px] flex-col divide-y divide-areia/[0.06] overflow-x-auto overflow-y-auto"
+        className={`relative flex min-h-0 flex-1 flex-col divide-y divide-areia/[0.06] overflow-y-auto solaris-scroll ${
+          zoom > 1 ? "overflow-x-auto solaris-scroll-no-x" : "overflow-x-hidden"
+        }`}
       >
         {/* Timecode Ruler */}
-        <div className="sticky top-0 z-20 flex h-6 shrink-0 items-stretch bg-void/90 backdrop-blur-sm">
-          <div className="sticky left-0 z-30 flex w-40 shrink-0 items-center justify-between border-r border-areia/10 bg-void/95 px-2.5 text-[10px] font-medium uppercase tracking-[0.12em] text-areia/45 backdrop-blur-sm">
+        <div className="sticky top-0 z-20 flex h-6 shrink-0 items-stretch bg-void/95 backdrop-blur-sm">
+          <div className="sticky left-0 z-30 flex w-44 shrink-0 items-center justify-between border-r border-areia/10 bg-void/95 px-2.5 text-[10px] font-medium uppercase tracking-[0.12em] text-areia/50 backdrop-blur-sm">
             <span>Tracks</span>
             <button
               type="button"
               onClick={() => setShowAllTracks((v) => !v)}
-              className="tabular-nums rounded px-1 py-0.5 text-areia/45 transition-colors hover:bg-accent hover:text-areia motion-reduce:transition-none"
+              className="tabular-nums rounded-full border border-areia/10 bg-carbono/80 px-2 py-0.5 text-[9px] font-semibold tracking-normal text-areia/70 transition-colors hover:border-laranja-criacao/40 hover:bg-accent hover:text-areia motion-reduce:transition-none"
               title={
                 showAllTracks
                   ? "Show only active tracks"
@@ -613,9 +697,7 @@ export function TimelinePanel({
               }
               aria-pressed={showAllTracks}
             >
-              {showAllTracks || visibleTracks.length === tracks.length
-                ? `${visibleTracks.length}`
-                : `${visibleTracks.length}/${tracks.length}`}
+              {showAllTracks ? `All ${tracks.length}` : `${visibleTracks.length}/${tracks.length}`}
             </button>
           </div>
           <div
@@ -632,26 +714,46 @@ export function TimelinePanel({
             }}
             className="relative min-w-0 flex-1 cursor-pointer select-none"
           >
-            {rulerTicks.map((sec) => {
-              const pct = (sec / timelineSpan) * 100;
-              return (
-                <div
-                  key={sec}
-                  className="pointer-events-none absolute top-0 bottom-0 flex flex-col justify-between"
-                  style={{ left: `${pct}%` }}
-                >
-                  <span className="h-1.5 w-px bg-areia/25" />
-                  <span className="tabular-nums -translate-x-1/2 pb-0.5 text-[10px] text-areia/40">
-                    {sec === 0 ? "" : `${sec}s`}
+            {rulerTicks.map((tick) => (
+              <div
+                key={`${tick.sec}-${tick.major ? "M" : "m"}`}
+                className="pointer-events-none absolute top-0 bottom-0 flex flex-col justify-between"
+                style={{ left: `${tick.pct}%` }}
+              >
+                <span
+                  className={
+                    tick.major
+                      ? "h-2 w-px bg-areia/25"
+                      : "h-1 w-px bg-areia/12"
+                  }
+                />
+                {tick.major && tick.pct < 98.5 && (
+                  <span
+                    className={`tabular-nums pb-0.5 text-[9px] text-areia/45 ${
+                      tick.edge === "start"
+                        ? "translate-x-1"
+                        : tick.edge === "end"
+                          ? "-translate-x-full pr-1"
+                          : "-translate-x-1/2"
+                    }`}
+                  >
+                    {tick.sec === 0 ? "0s" : `${tick.sec}s`}
                   </span>
-                </div>
-              );
-            })}
+                )}
+              </div>
+            ))}
+            {/* Playhead Chevron Cap */}
             <div
               className="pointer-events-none absolute top-0 bottom-0 z-10 -translate-x-1/2"
               style={{ left: `${playheadPct}%` }}
             >
-              <div className="mx-auto h-2.5 w-2.5 rounded-b-sm bg-laranja-criacao shadow-[0_0_8px_rgba(240,90,0,0.85)]" />
+              <div className="mx-auto flex flex-col items-center">
+                <div className="h-[2px] w-3 rounded-t-sm bg-amarelo-ideias" />
+                <div
+                  className="h-2.5 w-3 bg-laranja-criacao shadow-[0_0_8px_rgba(240,90,0,0.85)]"
+                  style={{ clipPath: "polygon(0 0, 100% 0, 100% 55%, 50% 100%, 0 55%)" }}
+                />
+              </div>
             </div>
           </div>
         </div>
@@ -700,7 +802,7 @@ export function TimelinePanel({
                 }
               }
             }}
-            className={`flex h-14 items-center justify-center px-4 text-center text-[11px] transition-colors motion-reduce:transition-none ${
+            className={`flex h-16 items-center justify-center px-4 text-center text-[11px] transition-colors motion-reduce:transition-none ${
               emptyDropHover
                 ? "bg-laranja-criacao/15 text-areia"
                 : "bg-void/35 text-areia/45"
@@ -712,41 +814,64 @@ export function TimelinePanel({
           </div>
         ) : null}
 
-        {visibleTracks.map((track) => {
+        {visibleTracks.map((track, trackIdx) => {
           const acceptsMediaDrop =
             Boolean(onDropMediaOnTrack) &&
             !track.locked &&
             (track.id === "v1" || track.id === "v2" || track.id === "a1" || track.id === "a2");
           const acceptsGfxDrop =
             Boolean(onPlaceGfxFromAsset) && !track.locked && track.id === "g1";
+          const isPopulated =
+            track.clips.length > 0 ||
+            activeTrackSet.has(track.id) ||
+            dropHoverTrackId === track.id;
 
           return (
             <div
               key={track.id}
               data-cursor-anchor={`timeline.track.${track.id}`}
-              className="flex min-h-[38px] items-stretch"
+              className={`flex shrink-0 items-stretch ${
+                isPopulated ? "h-[44px]" : "h-[26px]"
+              }`}
             >
               {/* Track Header */}
-              <div className="sticky left-0 z-20 flex w-40 shrink-0 items-center justify-between border-r border-areia/10 bg-void/95 px-2.5 backdrop-blur-sm">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5">
-                    <span className={`h-2 w-1 rounded-full ${TRACK_STRIP_COLORS[track.kind]}`} />
-                    <span className="text-[10px] font-semibold tracking-[0.1em] text-areia">
-                      {track.code} {track.name}
-                    </span>
-                  </div>
-                  <div className="truncate pl-2.5 text-[10px] text-areia/45">
-                    {track.subtitle}
+              <div className="sticky left-0 z-20 flex w-44 shrink-0 items-center justify-between border-r border-areia/10 bg-void/95 pr-2 pl-0 backdrop-blur-sm">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span
+                    className={`w-[3px] self-stretch ${
+                      isPopulated ? "opacity-100" : "opacity-45"
+                    } ${TRACK_STRIP_COLORS[track.kind]}`}
+                  />
+                  <div className="min-w-0 py-0.5">
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className={`text-[10px] font-semibold tracking-[0.08em] ${
+                          isPopulated ? "text-areia" : "text-areia/65"
+                        }`}
+                      >
+                        {track.code} {track.name}
+                      </span>
+                      {track.clips.length > 0 && (
+                        <span className="tabular-nums rounded bg-grafite/90 px-1 text-[9px] font-medium text-areia/60">
+                          {track.clips.length}
+                        </span>
+                      )}
+                    </div>
+                    {isPopulated && (
+                      <div className="truncate text-[9px] text-areia/45">
+                        {track.subtitle}
+                      </div>
+                    )}
                   </div>
                 </div>
                 <div className="flex items-center gap-0.5">
                   <button
                     type="button"
                     onClick={() => onToggleTrackFlag(track.id, "solo", !track.solo)}
-                    className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                    className={`rounded px-1.5 py-0.5 text-[9px] font-bold transition-colors motion-reduce:transition-none ${
                       track.solo
                         ? "bg-amarelo-ideias text-void"
-                        : "text-areia/45 hover:text-areia"
+                        : "text-areia/40 hover:bg-accent hover:text-areia"
                     }`}
                     aria-label={`Solo ${track.code}`}
                     title={`Solo ${track.code}`}
@@ -756,8 +881,10 @@ export function TimelinePanel({
                   <button
                     type="button"
                     onClick={() => onToggleTrackFlag(track.id, "muted", !track.muted)}
-                    className={`rounded p-1 ${
-                      track.muted ? "text-vermelho-foco" : "text-areia/45 hover:text-areia"
+                    className={`rounded p-1 transition-colors motion-reduce:transition-none ${
+                      track.muted
+                        ? "border border-vermelho-foco/55 bg-vermelho-foco/25 text-areia"
+                        : "text-areia/40 hover:bg-accent hover:text-areia"
                     }`}
                     aria-label={`Mute ${track.code}`}
                     title={`Mute ${track.code}`}
@@ -767,8 +894,10 @@ export function TimelinePanel({
                   <button
                     type="button"
                     onClick={() => onToggleTrackFlag(track.id, "locked", !track.locked)}
-                    className={`rounded p-1 ${
-                      track.locked ? "text-amarelo-ideias" : "text-areia/45 hover:text-areia"
+                    className={`rounded p-1 transition-colors motion-reduce:transition-none ${
+                      track.locked
+                        ? "bg-amarelo-ideias/15 text-amarelo-ideias"
+                        : "text-areia/40 hover:bg-accent hover:text-areia"
                     }`}
                     aria-label={`Lock ${track.code}`}
                     title={`Lock ${track.code}`}
@@ -818,7 +947,7 @@ export function TimelinePanel({
                         const maxStart = Math.max(0, totalDurationSec);
                         const snapped = Math.min(
                           maxStart,
-                          Math.max(0, Math.round(dropSec * 10) / 10),
+                          snapTimeSec(dropSec, snapEnabled),
                         );
                         onPlaceGfxFromAsset(asset, snapped);
                         return;
@@ -830,26 +959,29 @@ export function TimelinePanel({
                   const mediaId = e.dataTransfer.getData("application/x-solaris-media-id");
                   if (!mediaId) return;
                   e.preventDefault();
-                  onDropMediaOnTrack(track.id, mediaId, Number(dropSec.toFixed(2)));
+                  onDropMediaOnTrack(track.id, mediaId, snapTimeSec(dropSec, snapEnabled));
                 }}
                 onPointerDown={beginLanePointerDown}
                 onPointerMove={updateLanePointerMove}
                 onPointerUp={finishLanePointerUp}
                 onPointerCancel={finishLanePointerUp}
                 className={`relative min-w-0 flex-1 cursor-pointer select-none transition-colors motion-reduce:transition-none ${
-                  dropHoverTrackId === track.id ? "bg-laranja-criacao/15" : "bg-void/45"
+                  dropHoverTrackId === track.id
+                    ? "bg-laranja-criacao/15"
+                    : trackIdx % 2 === 0
+                      ? "bg-void/55"
+                      : "bg-void/38"
                 }`}
               >
                 {/* Vertical timecode gridlines */}
-                {rulerTicks.map((sec) => {
-                  if (sec === 0) return null;
-                  const pct = (sec / timelineSpan) * 100;
+                {rulerTicks.map((tick) => {
+                  if (!tick.major || tick.sec === 0) return null;
                   return (
                     <span
-                      key={sec}
+                      key={tick.sec}
                       aria-hidden="true"
                       className="pointer-events-none absolute top-0 bottom-0 w-px bg-areia/[0.045]"
-                      style={{ left: `${pct}%` }}
+                      style={{ left: `${tick.pct}%` }}
                     />
                   );
                 })}
@@ -895,6 +1027,8 @@ export function TimelinePanel({
                     (track.kind === "a_roll" ||
                       track.kind === "voice" ||
                       track.kind === "music");
+                  const captionWordCount =
+                    payload.kind === "caption" ? payload.caption.words.length : 0;
 
                   return (
                     <div
@@ -916,13 +1050,13 @@ export function TimelinePanel({
                         }
                       }}
                       title={`${clip.label} (${effectiveStart.toFixed(2)}s · ${effectiveDur.toFixed(2)}s)`}
-                      className={`group absolute top-1 bottom-1 overflow-hidden rounded-md border px-2 py-0.5 text-left text-[10px] text-areia/95 shadow-sm transition-colors motion-reduce:transition-none ${
+                      className={`group absolute top-1 bottom-1 flex flex-col justify-between overflow-hidden rounded-md border px-2 py-1 text-left text-[10px] text-areia/95 transition-colors motion-reduce:transition-none ${
                         track.locked
                           ? "cursor-not-allowed opacity-75"
                           : "cursor-grab active:cursor-grabbing"
                       } ${
                         selected
-                          ? "border-amarelo-ideias bg-grafite/95 ring-1 ring-laranja-criacao/65"
+                          ? "border-amarelo-ideias bg-carbono/95 ring-1 ring-laranja-criacao/75 shadow-[0_0_12px_-3px_rgba(247,183,51,0.45)]"
                           : TRACK_CLIP_TINTS[track.kind]
                       }`}
                       style={{
@@ -940,8 +1074,10 @@ export function TimelinePanel({
                           onPointerUp={finishClipDrag}
                           onPointerCancel={finishClipDrag}
                           title="Drag to trim clip start"
-                          className="absolute top-0 bottom-0 left-0 z-10 w-1.5 cursor-ew-resize bg-transparent hover:bg-amarelo-ideias/70"
-                        />
+                          className="absolute top-0 bottom-0 left-0 z-10 flex w-2 cursor-ew-resize items-center justify-center"
+                        >
+                          <span className="h-4 w-[3px] rounded-full bg-amarelo-ideias/0 transition-colors group-hover:bg-amarelo-ideias/75 motion-reduce:transition-none" />
+                        </div>
                       )}
                       {!track.locked && onTrimOrMoveClip && (
                         <div
@@ -950,13 +1086,15 @@ export function TimelinePanel({
                           onPointerUp={finishClipDrag}
                           onPointerCancel={finishClipDrag}
                           title="Drag to trim clip duration"
-                          className="absolute top-0 right-0 bottom-0 z-10 w-1.5 cursor-ew-resize bg-transparent hover:bg-amarelo-ideias/70"
-                        />
+                          className="absolute top-0 right-0 bottom-0 z-10 flex w-2 cursor-ew-resize items-center justify-center"
+                        >
+                          <span className="h-4 w-[3px] rounded-full bg-amarelo-ideias/0 transition-colors group-hover:bg-amarelo-ideias/75 motion-reduce:transition-none" />
+                        </div>
                       )}
                       {showWave && (
                         <div
                           aria-hidden="true"
-                          className="pointer-events-none absolute inset-x-1 bottom-0.5 flex h-3.5 items-end gap-[1px] opacity-35"
+                          className="pointer-events-none absolute inset-x-1 bottom-0.5 flex h-4 items-end gap-[1px] opacity-50"
                         >
                           {slicedPeaks.map((peak, i) => (
                             <span
@@ -969,9 +1107,32 @@ export function TimelinePanel({
                           ))}
                         </div>
                       )}
-                      <div className="relative mt-0.5 truncate font-medium leading-tight">
-                        {clip.label}
+                      <div className="relative flex items-center justify-between gap-1.5">
+                        <span className="truncate font-semibold leading-tight">
+                          {clip.label}
+                        </span>
+                        <span className="tabular-nums shrink-0 text-[9px] text-areia/55">
+                          {formatCompactDuration(effectiveDur)}
+                        </span>
                       </div>
+                      {!showWave && (
+                        <div className="relative flex items-center gap-1.5">
+                          {payload.kind === "gfx" && (
+                            <span className="rounded bg-track-g1/20 px-1 text-[8px] font-semibold uppercase tracking-wider text-areia/75">
+                              GFX
+                            </span>
+                          )}
+                          {payload.kind === "caption" && captionWordCount > 0 && (
+                            <span className="tabular-nums text-[8px] text-areia/55">
+                              {captionWordCount}w
+                            </span>
+                          )}
+                          <span
+                            aria-hidden="true"
+                            className={`h-[1.5px] flex-1 rounded-full opacity-25 ${TRACK_STRIP_COLORS[track.kind]}`}
+                          />
+                        </div>
+                      )}
                     </div>
                   );
                 })}

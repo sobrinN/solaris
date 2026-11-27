@@ -1,16 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  Activity,
-  Cpu,
-  Download,
-  Palette,
-  Plus,
-  Redo2,
-  Terminal,
-  Undo2,
-  Users,
-  X,
-} from "lucide-react";
+import { Activity, X } from "lucide-react";
 import type {
   AgentRole,
   AgentStatusResponse,
@@ -44,17 +33,18 @@ import {
   lockedClipCount,
   resolveSelection,
 } from "../../lib/timelineSelection";
-import { SolarisWordmark } from "../SolarisBrand";
 import {
   BroadcastScopes,
   type BroadcastScopesHandle,
   type SampledPixelFrame,
 } from "./BroadcastScopes";
 import { ExportModal } from "./ExportModal";
+import { GfxBinPanel } from "./GfxBinPanel";
 import { InspectorPanel } from "./InspectorPanel";
 import { LogsDrawer } from "./LogsDrawer";
-import { ProjectManagerPopover } from "./ProjectManagerPopover";
 import { SourceMonitor } from "./SourceMonitor";
+import { StudioHeader } from "./StudioHeader";
+import { StudioStatusBar } from "./StudioStatusBar";
 import {
   SwarmActivityPanel,
   type ActivityEntry,
@@ -164,6 +154,8 @@ export function StudioWorkspace({
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
   const [projectManagerOpen, setProjectManagerOpen] = useState(false);
   const [scopesOpen, setScopesOpen] = useState(true);
+  const [timelineHeight, setTimelineHeight] = useState(248);
+  const timelineResizeRef = useRef<{ originY: number; originH: number } | null>(null);
 
   useEffect(() => {
     setSelectedClipIds([]);
@@ -1338,6 +1330,11 @@ export function StudioWorkspace({
     }
   };
 
+  const totalClipCount = useMemo(
+    () => project.tracks.reduce((acc, t) => acc + t.clips.length, 0),
+    [project.tracks],
+  );
+
   const handleInsertSourceRange = (media: MediaAsset, sourceIn: number, duration: number) => {
     setViewerMode("program");
     void handleAddMediaToTimeline(media, undefined, playheadSec, { sourceIn, duration });
@@ -1374,7 +1371,7 @@ export function StudioWorkspace({
       {statusToast && !opErrorToast && (
         <div
           role="status"
-          className="fixed right-4 bottom-4 z-50 flex max-w-sm items-center gap-2 rounded-xl border border-amarelo-ideias/45 bg-carbono/95 px-3.5 py-2.5 text-xs text-areia shadow-2xl backdrop-blur-md"
+          className="fixed right-4 bottom-8 z-50 flex max-w-sm items-center gap-2 rounded-xl border border-amarelo-ideias/45 bg-carbono/95 px-3.5 py-2.5 text-xs text-areia shadow-2xl backdrop-blur-md"
         >
           <span className="flex-1 truncate" title={statusToast}>
             {statusToast}
@@ -1393,7 +1390,7 @@ export function StudioWorkspace({
       {opErrorToast && (
         <div
           role="alert"
-          className="fixed right-4 bottom-4 z-50 flex max-w-sm items-center gap-2 rounded-xl border border-vermelho-foco/55 bg-carbono/95 px-3.5 py-2.5 text-xs text-areia shadow-2xl backdrop-blur-md"
+          className="fixed right-4 bottom-8 z-50 flex max-w-sm items-center gap-2 rounded-xl border border-vermelho-foco/55 bg-carbono/95 px-3.5 py-2.5 text-xs text-areia shadow-2xl backdrop-blur-md"
         >
           <span className="flex-1">{opErrorToast}</span>
           <button
@@ -1407,157 +1404,43 @@ export function StudioWorkspace({
         </div>
       )}
 
-      {/* Top NLE Chrome — Sleek 3-Zone Pro Studio Header */}
-      <header className="relative z-30 flex h-11 shrink-0 items-center justify-between gap-2.5 border-b border-areia/[0.08] bg-carbono/80 px-3 backdrop-blur-md">
-        {/* Left Zone: Brand + Project Manager */}
-        <div className="flex min-w-0 items-center gap-2">
-          <SolarisWordmark />
-          <div className="hidden h-3.5 w-px bg-areia/15 sm:block" />
-          <ProjectManagerPopover
-            currentProject={project}
-            projects={projects}
-            open={projectManagerOpen}
-            onOpenChange={setProjectManagerOpen}
-            onSelectProject={onSelectProject}
-            onCreateBlankProject={onCreateBlankProject}
-            onRenameProject={onRenameProject}
-            onDeleteProject={onDeleteProject}
-            onNewProjectInChat={onBackToChat}
-          />
-          <button
-            type="button"
-            onClick={onBackToChat}
-            title="Start a new project with fresh media or prompt"
-            className="hidden h-7 items-center gap-1 rounded-full border border-areia/10 bg-void/70 px-2.5 text-[11px] text-areia/80 transition-colors hover:border-laranja-criacao/50 hover:bg-accent hover:text-areia md:flex motion-reduce:transition-none"
-          >
-            <Plus className="h-3 w-3 text-laranja-criacao" />
-            <span>New</span>
-          </button>
-        </div>
-
-        {/* Center Zone: History & Swarm Presence */}
-        <div className="hidden items-center gap-1.5 lg:flex">
-          <div className="flex items-center rounded-full border border-areia/10 bg-void/70 p-0.5">
-            <button
-              type="button"
-              onClick={() => void handleUndo()}
-              className="grid h-6 w-6 place-items-center rounded-full text-areia/80 hover:bg-accent hover:text-areia"
-              title="Undo (⌘Z)"
-              aria-label="Undo"
-            >
-              <Undo2 className="h-3 w-3" />
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleRedo()}
-              className="grid h-6 w-6 place-items-center rounded-full text-areia/80 hover:bg-accent hover:text-areia"
-              title="Redo (⇧⌘Z)"
-              aria-label="Redo"
-            >
-              <Redo2 className="h-3 w-3" />
-            </button>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => setSwarmCursorsEnabled((v) => !v)}
-            title={
-              wsConnected
-                ? "Swarm WebSocket connected · Toggle agent cursors"
-                : "Reconnecting to Solaris Engine"
-            }
-            className={`flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[11px] transition-colors motion-reduce:transition-none ${
-              swarmCursorsEnabled
-                ? "border-laranja-criacao/55 bg-accent text-areia"
-                : "border-areia/10 bg-void/70 text-areia/75 hover:bg-accent hover:text-areia"
-            }`}
-          >
-            <span
-              className={`h-1.5 w-1.5 rounded-full ${
-                wsConnected ? "bg-amarelo-ideias solar-pulse-dot" : "bg-vermelho-foco"
-              }`}
-            />
-            <Users className="h-3 w-3 text-laranja-criacao" />
-            <span>{swarmCursorsEnabled ? "Swarm Live" : "Focus Mode"}</span>
-          </button>
-        </div>
-
-        {/* Right Zone: Studio Utilities + Primary Export CTA */}
-        <div className="flex items-center gap-1.5">
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => setLogsDrawerOpen(true)}
-              className="flex h-7 items-center gap-1.5 rounded-full border border-areia/10 bg-void/60 px-2.5 text-[11px] text-areia/85 hover:bg-accent"
-              title="Open Diagnostic Logs (OpenRouter, Swarm, QA & Export)"
-              aria-label="Diagnostic Logs"
-            >
-              <Terminal className="h-3 w-3 text-amarelo-ideias" />
-              <span className="hidden xl:inline">Logs</span>
-              {logs.some((l) => l.level === "error") && (
-                <span className="tabular-nums rounded-full bg-vermelho-foco px-1.5 text-[9px] font-semibold text-areia">
-                  {logs.filter((l) => l.level === "error").length}
-                </span>
-              )}
-            </button>
-
-            <button
-              type="button"
-              onClick={onOpenAiSettings}
-              className="flex h-7 items-center gap-1.5 rounded-full border border-areia/10 bg-void/60 px-2.5 text-[11px] text-areia/85 hover:bg-accent"
-              title="OpenRouter API Key, Model Advisor & MCP Mode"
-              aria-label="AI Settings"
-            >
-              <Cpu className="h-3 w-3 text-amarelo-ideias" />
-              <span className="hidden xl:inline">
-                {agentStatus?.openrouter_configured ? "AI Ready" : "AI Keys"}
-              </span>
-            </button>
-
-            <button
-              type="button"
-              data-cursor-anchor="brand.playbook"
-              onClick={onOpenBrandDrawer}
-              className="flex h-7 items-center gap-1.5 rounded-full border border-areia/10 bg-void/60 px-2.5 text-[11px] text-areia/85 hover:bg-accent"
-              title="Open Brand Playbook"
-              aria-label="Brand Playbook"
-            >
-              <Palette className="h-3 w-3 text-laranja-criacao" />
-              <span className="hidden md:inline">Brand</span>
-            </button>
-          </div>
-
-          <div className="mx-0.5 hidden h-3.5 w-px bg-areia/14 sm:block" />
-
-          <button
-            type="button"
-            onClick={() => setExportModalOpen(true)}
-            className="btn-solar-outline flex h-7 items-center gap-1.5 px-3.5 text-[11px] font-medium text-areia"
-          >
-            <Download className="h-3 w-3 text-amarelo-ideias" />
-            <span className="tabular-nums">
-              {exportJob &&
-              (exportJob.state === "queued" ||
-                exportJob.state === "rendering_gfx" ||
-                exportJob.state === "compositing")
-                ? `Export · ${Math.round(exportJob.progress * 100)}%`
-                : "Export"}
-            </span>
-          </button>
-        </div>
-      </header>
+      <StudioHeader
+        project={project}
+        projects={projects}
+        projectManagerOpen={projectManagerOpen}
+        onProjectManagerOpenChange={setProjectManagerOpen}
+        onSelectProject={onSelectProject}
+        onCreateBlankProject={onCreateBlankProject}
+        onRenameProject={onRenameProject}
+        onDeleteProject={onDeleteProject}
+        onBackToChat={onBackToChat}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
+        wsConnected={wsConnected}
+        swarmCursorsEnabled={swarmCursorsEnabled}
+        onToggleSwarmCursors={() => setSwarmCursorsEnabled((v) => !v)}
+        isSwarmActive={isSwarmActive}
+        activeRoles={activeSwarmRun?.active_roles ?? EMPTY_ROLES}
+        logs={logs}
+        onOpenLogsDrawer={() => setLogsDrawerOpen(true)}
+        agentStatus={agentStatus}
+        onOpenAiSettings={onOpenAiSettings}
+        onOpenBrandDrawer={onOpenBrandDrawer}
+        exportJob={exportJob}
+        onOpenExportModal={() => setExportModalOpen(true)}
+      />
 
       {/* Main Studio Grid — Precision Aspect-Aware NLE Layout */}
       <div
         ref={studioGridRef}
         style={studioGridStyle}
-        className={`grid min-h-0 flex-1 grid-cols-1 gap-2 p-2 ${
+        className={`grid min-h-0 flex-1 grid-cols-1 gap-2 px-2 pt-2 ${
           scopesOpen
             ? "lg:grid-cols-[minmax(300px,340px)_minmax(340px,1fr)_minmax(276px,308px)] xl:grid-cols-[minmax(330px,375px)_minmax(400px,1fr)_212px_minmax(288px,320px)]"
             : "lg:grid-cols-[minmax(320px,360px)_minmax(420px,1fr)_minmax(290px,324px)] xl:grid-cols-[minmax(350px,390px)_minmax(500px,1fr)_minmax(310px,340px)]"
         }`}
       >
-        {/* Left Column: AI Director & Swarm Co-Pilot */}
+        {/* Left Column: AI Director, Swarm Co-Pilot & GFX Assets Bin */}
         <div className="flex min-h-0 flex-col">
           <SwarmActivityPanel
             projectId={project.id}
@@ -1575,6 +1458,23 @@ export function StudioWorkspace({
             qaError={qaError}
             swarmError={swarmError}
             activityLog={activityLog}
+            assetsCount={assets.length}
+            assetsTabContent={
+              <GfxBinPanel
+                client={client}
+                projectId={project.id}
+                ticketVersion={ticketVersion}
+                assets={assets}
+                aspect={aspectBadge}
+                brandTokens={fallbackTokens}
+                brandFontCss={brandFontCss}
+                playheadSec={playheadSec}
+                onAddAtPlayhead={(asset) => void handlePlaceSavedAsset(asset)}
+                onAssetsChanged={onAssetsReplaced}
+                onNotice={showStatusToast}
+                onError={(msg) => showErrorToast(msg, "GFX asset operation failed")}
+              />
+            }
             onOpenLogsDrawer={() => setLogsDrawerOpen(true)}
             onStartSwarm={handleStartSwarm}
             onCancelSwarm={handleCancelSwarm}
@@ -1585,9 +1485,9 @@ export function StudioWorkspace({
         {/* Center Hero Stage: Program Monitor */}
         <div
           data-cursor-anchor="program.stage"
-          className="flex min-h-[320px] flex-col rounded-xl border border-areia/[0.08] bg-carbono/65 p-1.5 shadow-[inset_0_1px_0_rgba(247,245,239,0.04)] lg:min-h-0"
+          className="solaris-panel flex min-h-[320px] flex-col overflow-hidden rounded-xl lg:min-h-0"
         >
-          <div className="mb-1.5 flex flex-wrap items-center justify-between gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em]">
+          <div className="flex h-9 shrink-0 flex-wrap items-center justify-between gap-1.5 border-b border-areia/[0.08] px-2.5 text-[10px] font-semibold uppercase tracking-[0.14em]">
             {project.media_pool.length > 0 ? (
               <div
                 role="tablist"
@@ -1658,7 +1558,7 @@ export function StudioWorkspace({
           </div>
 
           <div
-            className={`relative min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl bg-void ${
+            className={`relative m-1.5 min-h-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-areia/[0.06] bg-void ${
               viewerMode === "program" ? "flex" : "hidden"
             }`}
           >
@@ -1680,17 +1580,19 @@ export function StudioWorkspace({
             />
           </div>
           {viewerMode === "source" && project.media_pool.length > 0 && (
-            <SourceMonitor
-              key={selectedMedia?.id ?? "none"}
-              media={selectedMedia}
-              streamUrl={
-                selectedMedia?.path ? client.getMediaStreamUrl(project.id, selectedMedia.id) : null
-              }
-              aspectBadge={aspectBadge}
-              canvasAspect={project.canvas.width / Math.max(1, project.canvas.height)}
-              reframeBoxWidthPct={reframeBoxWidthPct}
-              onInsertRange={handleInsertSourceRange}
-            />
+            <div className="m-1.5 flex min-h-0 flex-1 overflow-hidden rounded-lg border border-areia/[0.06] bg-void">
+              <SourceMonitor
+                key={selectedMedia?.id ?? "none"}
+                media={selectedMedia}
+                streamUrl={
+                  selectedMedia?.path ? client.getMediaStreamUrl(project.id, selectedMedia.id) : null
+                }
+                aspectBadge={aspectBadge}
+                canvasAspect={project.canvas.width / Math.max(1, project.canvas.height)}
+                reframeBoxWidthPct={reframeBoxWidthPct}
+                onInsertRange={handleInsertSourceRange}
+              />
+            </div>
           )}
         </div>
 
@@ -1750,6 +1652,38 @@ export function StudioWorkspace({
         </div>
       </div>
 
+      {/* Resizable Timeline Splitter */}
+      <div
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize timeline height"
+        onPointerDown={(e) => {
+          if (e.button !== 0) return;
+          e.currentTarget.setPointerCapture(e.pointerId);
+          timelineResizeRef.current = { originY: e.clientY, originH: timelineHeight };
+        }}
+        onPointerMove={(e) => {
+          const st = timelineResizeRef.current;
+          if (!st) return;
+          const dy = st.originY - e.clientY;
+          setTimelineHeight(Math.max(156, Math.min(420, st.originH + dy)));
+        }}
+        onPointerUp={(e) => {
+          if (!timelineResizeRef.current) return;
+          timelineResizeRef.current = null;
+          if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+            e.currentTarget.releasePointerCapture(e.pointerId);
+          }
+        }}
+        onPointerCancel={() => {
+          timelineResizeRef.current = null;
+        }}
+        className="group flex h-2 shrink-0 cursor-row-resize items-center justify-center select-none"
+        title="Drag to resize timeline"
+      >
+        <span className="h-1 w-12 rounded-full bg-areia/15 transition-colors group-hover:bg-laranja-criacao/75 motion-reduce:transition-none" />
+      </div>
+
       {/* Bottom: Dynamic Timeline */}
       <div className="shrink-0 px-2 pb-2">
         <TimelinePanel
@@ -1760,7 +1694,7 @@ export function StudioWorkspace({
           playheadSec={playheadSec}
           totalDurationSec={totalDurationSec}
           fps={projectFps}
-          canvasLabel={`${aspectBadge} · ${project.canvas.width}×${project.canvas.height}`}
+          heightPx={timelineHeight}
           isPlaying={isPlaying}
           selectedClipIds={selectedClipIds}
           selectionAnchorId={selectionAnchorId}
@@ -1788,6 +1722,17 @@ export function StudioWorkspace({
           }
         />
       </div>
+
+      <StudioStatusBar
+        wsConnected={wsConnected}
+        revision={project.revision}
+        clipCount={totalClipCount}
+        totalDurationSec={totalDurationSec}
+        aspectBadge={aspectBadge}
+        width={project.canvas.width}
+        height={project.canvas.height}
+        fps={projectFps}
+      />
     </div>
   );
 }

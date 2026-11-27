@@ -70,9 +70,11 @@ export function ColorWheelControl({
   const py = ((Math.sqrt(3) / 2) * (value.g - value.b)) * 1.9;
   const mag = Math.hypot(px, py);
   const norm = mag > 1 ? 1 / mag : 1;
-  const dotX = px * norm * 21;
-  const dotY = py * norm * 21;
+  const dotX = px * norm * 24;
+  const dotY = py * norm * 24;
   const pctValue = Math.round(Math.min(1, mag) * 100);
+  const offsetMag = Math.min(1, mag) * 0.35;
+  const isOffset = offsetMag > 0.005;
 
   return (
     <div className="flex flex-col items-center gap-1">
@@ -175,25 +177,37 @@ export function ColorWheelControl({
           draggedRef.current = false;
         }}
         title="Drag to grade · Double-click to reset"
-        className="relative h-14 w-14 cursor-crosshair select-none rounded-full border border-areia/15 shadow-[inset_0_0_12px_rgba(0,0,0,0.85)] focus-visible:outline-2 focus-visible:outline-laranja-criacao xl:h-[62px] xl:w-[62px]"
+        className="relative h-16 w-16 cursor-crosshair select-none rounded-full border border-areia/15 shadow-[inset_0_2px_12px_rgba(0,0,0,0.88)] focus-visible:outline-2 focus-visible:outline-laranja-criacao xl:h-[70px] xl:w-[70px]"
         style={{
           background:
-            "conic-gradient(from 90deg, #ff4d4d 0deg, #f7b733 60deg, #34d399 120deg, #38bdf8 180deg, #60a5fa 240deg, #a78bfa 300deg, #ff4d4d 360deg)",
+            "radial-gradient(circle at center, rgba(8,4,4,0.88) 0%, rgba(16,10,10,0.68) 46%, rgba(8,4,4,0.12) 100%), conic-gradient(from 90deg, #ff4d4d 0deg, #f7b733 60deg, #34d399 120deg, #38bdf8 180deg, #60a5fa 240deg, #a78bfa 300deg, #ff4d4d 360deg)",
         }}
       >
-        <div className="pointer-events-none absolute inset-[5px] rounded-full border border-areia/10 bg-void/88" />
-        <div className="pointer-events-none absolute top-1/2 right-2.5 left-2.5 h-px -translate-y-1/2 bg-areia/10" />
-        <div className="pointer-events-none absolute top-2.5 bottom-2.5 left-1/2 w-px -translate-x-1/2 bg-areia/10" />
+        <div className="pointer-events-none absolute inset-[6px] rounded-full border border-areia/10" />
+        <div className="pointer-events-none absolute inset-[16px] rounded-full border border-areia/[0.06]" />
+        <div className="pointer-events-none absolute top-1/2 right-2.5 left-2.5 h-px -translate-y-1/2 bg-areia/12" />
+        <div className="pointer-events-none absolute top-2.5 bottom-2.5 left-1/2 w-px -translate-x-1/2 bg-areia/12" />
         <div
-          className="pointer-events-none absolute top-1/2 left-1/2 h-2.5 w-2.5 rounded-full border border-areia bg-laranja-criacao shadow-[0_0_8px_rgba(240,90,0,0.85)]"
+          className={`pointer-events-none absolute top-1/2 left-1/2 rounded-full border border-areia bg-laranja-criacao shadow-[0_0_8px_rgba(240,90,0,0.9)] ${
+            isOffset ? "h-3 w-3" : "h-2.5 w-2.5"
+          }`}
           style={{
             transform: `translate(calc(-50% + ${dotX.toFixed(1)}px), calc(-50% + ${dotY.toFixed(1)}px))`,
           }}
         />
       </div>
-      <span className="text-[9px] font-semibold tracking-[0.14em] text-areia/65">
-        {label}
-      </span>
+      <div className="flex flex-col items-center leading-tight">
+        <span className="text-[9px] font-semibold tracking-[0.14em] text-areia/70">
+          {label}
+        </span>
+        <span
+          className={`tabular-nums text-[9px] ${
+            isOffset ? "font-medium text-amarelo-ideias" : "text-areia/35"
+          }`}
+        >
+          {offsetMag.toFixed(2)}
+        </span>
+      </div>
     </div>
   );
 }

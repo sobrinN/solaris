@@ -55,11 +55,25 @@ interface SwarmActivityPanelProps {
   qaError?: string | null;
   swarmError?: string | null;
   activityLog: ActivityEntry[];
+  assetsTabContent?: React.ReactNode;
+  assetsCount?: number;
   onOpenLogsDrawer: () => void;
   onStartSwarm: (options: StartSwarmOptions) => Promise<void>;
   onCancelSwarm: () => Promise<void>;
   onRunQa: () => Promise<void>;
 }
+
+const ROLE_DOT_COLORS: Record<AgentRole, string> = {
+  user: "bg-areia",
+  director: "bg-amarelo-ideias",
+  razor: "bg-track-v1",
+  b_roll: "bg-track-v2",
+  grade: "bg-track-fx",
+  caps: "bg-track-t1",
+  gfx: "bg-track-g1",
+  mix: "bg-track-a1",
+  mcp_external: "bg-track-a2",
+};
 
 function getSessionStorage(): Storage | null {
   try {
@@ -83,6 +97,8 @@ export function SwarmActivityPanel({
   qaError,
   swarmError,
   activityLog,
+  assetsTabContent,
+  assetsCount,
   onOpenLogsDrawer,
   onStartSwarm,
   onCancelSwarm,
@@ -90,7 +106,7 @@ export function SwarmActivityPanel({
 }: SwarmActivityPanelProps) {
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
-  const [activeTab, setActiveTab] = useState<"prompt" | "activity">("prompt");
+  const [activeTab, setActiveTab] = useState<"prompt" | "activity" | "assets">("prompt");
   const [omittedClipIds, setOmittedClipIds] = useState<string[]>([]);
   const [history, setHistory] = useState<DirectorTurn[]>(() =>
     loadDirectorHistory(getSessionStorage(), projectId),
@@ -187,10 +203,21 @@ export function SwarmActivityPanel({
     }
   };
 
+  const tabs = useMemo(() => {
+    const base: Array<{ id: "prompt" | "activity" | "assets"; label: string; count?: number }> = [
+      { id: "prompt", label: "Prompt" },
+      { id: "activity", label: "Activity", count: activityLog.length > 0 ? activityLog.length : undefined },
+    ];
+    if (assetsTabContent) {
+      base.push({ id: "assets", label: "Assets", count: assetsCount });
+    }
+    return base;
+  }, [activityLog.length, assetsTabContent, assetsCount]);
+
   return (
-    <div className="flex min-h-0 flex-1 flex-col rounded-xl border border-areia/[0.08] bg-carbono/65 p-2.5 shadow-[inset_0_1px_0_rgba(247,245,239,0.04)]">
-      {/* Unified Single-Row NLE Panel Header */}
-      <div className="mb-2 flex items-center justify-between gap-1.5 border-b border-areia/[0.08] pb-2">
+    <div className="solaris-panel flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl">
+      {/* Unified Single-Row NLE Panel Header (h-9) */}
+      <div className="flex h-9 shrink-0 items-center justify-between gap-1.5 border-b border-areia/[0.08] px-2.5">
         <div className="flex min-w-0 items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/75">
           <Sparkles className="h-3 w-3 shrink-0 text-amarelo-ideias" />
           <span className="truncate">Director</span>
@@ -202,27 +229,22 @@ export function SwarmActivityPanel({
             aria-label="Director panel tabs"
             className="flex items-center gap-0.5 rounded-full border border-areia/10 bg-void/75 p-0.5 text-[10px]"
           >
-            {(
-              [
-                ["prompt", "Prompt"],
-                ["activity", "Activity"],
-              ] as const
-            ).map(([id, label]) => (
+            {tabs.map((tab) => (
               <button
-                key={id}
+                key={tab.id}
                 type="button"
                 role="tab"
-                aria-selected={activeTab === id}
-                onClick={() => setActiveTab(id)}
+                aria-selected={activeTab === tab.id}
+                onClick={() => setActiveTab(tab.id)}
                 className={`flex items-center gap-1 rounded-full px-2 py-0.5 font-medium transition-colors motion-reduce:transition-none ${
-                  activeTab === id
+                  activeTab === tab.id
                     ? "bg-laranja-criacao/25 text-areia"
                     : "text-areia/55 hover:text-areia"
                 }`}
               >
-                <span>{label}</span>
-                {id === "activity" && activityLog.length > 0 && (
-                  <span className="tabular-nums text-areia/65">{activityLog.length}</span>
+                <span>{tab.label}</span>
+                {tab.count !== undefined && tab.count > 0 && (
+                  <span className="tabular-nums text-areia/65">{tab.count}</span>
                 )}
               </button>
             ))}
@@ -241,9 +263,10 @@ export function SwarmActivityPanel({
         </div>
       </div>
 
+      <div className="flex min-h-0 flex-1 flex-col p-2.5">
       {/* Live Swarm Status Banner */}
       {activeSwarmRun && (
-        <div className="mb-2 shrink-0 rounded-lg border border-laranja-criacao/30 bg-void/75 px-2.5 py-1.5 text-[10px]">
+        <div className="mb-2 shrink-0 overflow-hidden rounded-lg border border-laranja-criacao/30 bg-void/80 px-2.5 py-1.5 text-[10px]">
           <div className="flex items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-1.5">
               {isRunning && (
@@ -257,6 +280,22 @@ export function SwarmActivityPanel({
               {activeSwarmRun.ops_committed} ops
             </span>
           </div>
+          {isRunning && (
+            <div className="mt-1.5 flex items-center gap-1.5">
+              <div className="h-0.5 flex-1 overflow-hidden rounded-full bg-grafite">
+                <div className="h-full w-2/3 origin-left rounded-full bg-gradient-to-r from-laranja-criacao to-amarelo-ideias solar-pulse-dot" />
+              </div>
+              {activeSwarmRun.active_roles.slice(0, 4).map((role) => (
+                <span
+                  key={role}
+                  className="inline-flex items-center gap-1 rounded bg-grafite px-1.5 py-0.5 text-[8px] font-semibold uppercase tracking-wider text-areia/80"
+                >
+                  <span className={`h-1.5 w-1.5 rounded-full ${ROLE_DOT_COLORS[role]}`} />
+                  {role}
+                </span>
+              ))}
+            </div>
+          )}
           {activeSwarmRun.error && (
             <div className="mt-1.5 rounded border border-vermelho-foco/40 bg-vermelho-foco/15 px-2 py-1 text-areia">
               <div className="break-words">{activeSwarmRun.error}</div>
@@ -351,6 +390,9 @@ export function SwarmActivityPanel({
                     key={entry.id}
                     className="flex items-center gap-1.5 rounded-md border border-areia/[0.06] bg-void/45 px-2 py-1 text-[10px]"
                   >
+                    <span
+                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${ROLE_DOT_COLORS[entry.role] ?? "bg-areia/40"}`}
+                    />
                     <span className="shrink-0 rounded bg-grafite px-1.5 py-0.5 text-[9px] font-semibold text-amarelo-ideias">
                       {entry.agentId}
                     </span>
@@ -545,8 +587,11 @@ export function SwarmActivityPanel({
               activityLog.map((entry) => (
                 <div
                   key={entry.id}
-                  className="flex items-start gap-2 rounded-lg border border-areia/[0.06] bg-void/55 px-2 py-1.5"
+                  className="flex items-center gap-2 rounded-lg border border-areia/[0.06] bg-void/55 px-2 py-1.5"
                 >
+                  <span
+                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${ROLE_DOT_COLORS[entry.role] ?? "bg-areia/40"}`}
+                  />
                   <span className="tabular-nums shrink-0 text-[10px] text-areia/40">
                     {entry.timecode}
                   </span>
@@ -560,6 +605,14 @@ export function SwarmActivityPanel({
           </div>
         </div>
       )}
+
+      {/* TAB 3: ASSETS (GFX BIN) */}
+      {activeTab === "assets" && assetsTabContent && (
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          {assetsTabContent}
+        </div>
+      )}
+      </div>
     </div>
   );
 }

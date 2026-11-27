@@ -11,6 +11,12 @@ import type {
   Transform2D,
 } from "@solaris/engine-client";
 import { extractPropFields, lintGfxHtml } from "@solaris/gfx-runtime";
+import {
+  applyColorLook,
+  COLOR_LOOK_PRESETS,
+  matchingColorLookId,
+  sliderTrackGradient,
+} from "../../lib/colorLooks";
 import type { SelectedClip } from "../../lib/timelineSelection";
 import { BatchInspector } from "./BatchInspector";
 import { ColorWheelControl } from "./ColorWheelControl";
@@ -355,10 +361,12 @@ export function InspectorPanel({
     Math.abs(grade.gain.g) > 0.005 ||
     Math.abs(grade.gain.b) > 0.005;
 
+  const activeLookId = useMemo(() => matchingColorLookId(grade), [grade]);
+
   return (
-    <aside className="solaris-scroll flex h-full flex-col gap-2.5 overflow-y-auto rounded-xl border border-areia/[0.08] bg-carbono/65 p-2.5 text-xs shadow-[inset_0_1px_0_rgba(247,245,239,0.04)]">
-      {/* Pro Segmented Inspector Tabs */}
-      <div className="flex items-center justify-between gap-2 border-b border-areia/[0.08] pb-2">
+    <aside className="solaris-panel flex h-full flex-col overflow-hidden rounded-xl text-xs">
+      {/* Pro Segmented Inspector Tabs (h-9) */}
+      <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-areia/[0.08] px-2.5">
         <div
           role="tablist"
           aria-label="Inspector sections"
@@ -414,6 +422,7 @@ export function InspectorPanel({
         )}
       </div>
 
+      <div className="solaris-scroll flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto p-2.5">
       {activeTab === "clip" && (
         <>
       {/* Contextual Selected GFX Prop Editor */}
@@ -774,47 +783,67 @@ export function InspectorPanel({
         <div className="space-y-2 rounded-lg border border-areia/[0.07] bg-void/55 p-2.5">
           {(
             [
-              ["temp", "Temp", -1, 1, 0.02],
-              ["tint", "Tint", -1, 1, 0.02],
-              ["contrast", "Contrast", 0.5, 1.6, 0.02],
-              ["saturation", "Saturation", 0, 2, 0.02],
-              ["exposure", "Exposure", -1, 1, 0.02],
+              ["temp", "Temp", -1, 1, 0.02, 0],
+              ["tint", "Tint", -1, 1, 0.02, 0],
+              ["contrast", "Contrast", 0.5, 1.6, 0.02, 1],
+              ["saturation", "Saturation", 0, 2, 0.02, 1],
+              ["exposure", "Exposure", -1, 1, 0.02, 0],
             ] as const
-          ).map(([field, label, min, max, step]) => (
-            <label key={field} className="flex items-center gap-2 text-[11px]">
-              <span className="w-16 text-[10px] text-areia/65">{label}</span>
-              <input
-                type="range"
-                min={min}
-                max={max}
-                step={step}
-                value={grade[field]}
-                onChange={(e) =>
-                  onPreviewGrade({
-                    ...grade,
-                    [field]: parseFloat(e.target.value),
-                  })
-                }
-                onPointerUp={(e) =>
-                  onCommitGrade({
-                    ...grade,
-                    [field]: parseFloat(e.currentTarget.value),
-                  })
-                }
-                onKeyUp={(e) => {
-                  if (!SLIDER_COMMIT_KEYS.has(e.key)) return;
-                  onCommitGrade({
-                    ...grade,
-                    [field]: parseFloat(e.currentTarget.value),
-                  });
-                }}
-                className="solaris-slider flex-1 cursor-pointer"
-              />
-              <span className="w-9 text-right tabular-nums text-[10px] text-areia/75">
-                {grade[field].toFixed(2)}
-              </span>
-            </label>
-          ))}
+          ).map(([field, label, min, max, step, neutral]) => {
+            const val = grade[field];
+            const isChanged = Math.abs(val - neutral) > 0.005;
+            const trackBg = sliderTrackGradient(val, min, max, neutral);
+            return (
+              <label key={field} className="flex items-center gap-2 text-[11px]">
+                <span
+                  onDoubleClick={() => {
+                    const next = { ...grade, [field]: neutral };
+                    onPreviewGrade(next);
+                    onCommitGrade(next);
+                  }}
+                  title="Double-click label to reset"
+                  className="w-16 cursor-pointer select-none text-[10px] text-areia/65 hover:text-areia"
+                >
+                  {label}
+                </span>
+                <input
+                  type="range"
+                  min={min}
+                  max={max}
+                  step={step}
+                  value={val}
+                  style={{ "--slider-track": trackBg } as React.CSSProperties}
+                  onChange={(e) =>
+                    onPreviewGrade({
+                      ...grade,
+                      [field]: parseFloat(e.target.value),
+                    })
+                  }
+                  onPointerUp={(e) =>
+                    onCommitGrade({
+                      ...grade,
+                      [field]: parseFloat(e.currentTarget.value),
+                    })
+                  }
+                  onKeyUp={(e) => {
+                    if (!SLIDER_COMMIT_KEYS.has(e.key)) return;
+                    onCommitGrade({
+                      ...grade,
+                      [field]: parseFloat(e.currentTarget.value),
+                    });
+                  }}
+                  className="solaris-slider flex-1 cursor-pointer"
+                />
+                <span
+                  className={`w-9 text-right tabular-nums text-[10px] ${
+                    isChanged ? "font-medium text-amarelo-ideias" : "text-areia/65"
+                  }`}
+                >
+                  {val.toFixed(2)}
+                </span>
+              </label>
+            );
+          })}
 
           {hasBrandLut && (
             <label className="flex items-center gap-2 text-[11px]">
@@ -825,6 +854,17 @@ export function InspectorPanel({
                 max={1}
                 step={0.02}
                 value={grade.lut_intensity}
+                style={
+                  {
+                    "--slider-track": sliderTrackGradient(
+                      grade.lut_intensity,
+                      0,
+                      1,
+                      0,
+                      "#F7B733",
+                    ),
+                  } as React.CSSProperties
+                }
                 onChange={(e) =>
                   onPreviewGrade({
                     ...grade,
@@ -851,6 +891,45 @@ export function InspectorPanel({
               </span>
             </label>
           )}
+        </div>
+
+        {/* Look Presets */}
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between text-[9px] font-semibold uppercase tracking-[0.14em] text-areia/55">
+            <span>Look Presets</span>
+            <span className="text-areia/40">1-click grade</span>
+          </div>
+          <div className="grid grid-cols-2 gap-1.5">
+            {COLOR_LOOK_PRESETS.map((preset) => {
+              const active = activeLookId === preset.id;
+              return (
+                <button
+                  key={preset.id}
+                  type="button"
+                  title={preset.description}
+                  onClick={() => {
+                    const next = applyColorLook(grade, preset);
+                    onPreviewGrade(next);
+                    onCommitGrade(next);
+                  }}
+                  className={`flex items-center gap-2 rounded-lg border px-2 py-1.5 text-left transition-colors motion-reduce:transition-none ${
+                    active
+                      ? "border-amarelo-ideias/55 bg-accent text-areia"
+                      : "border-areia/[0.08] bg-void/65 text-areia/75 hover:border-laranja-criacao/40 hover:bg-accent hover:text-areia"
+                  }`}
+                >
+                  <span
+                    aria-hidden="true"
+                    className="h-3.5 w-3.5 shrink-0 rounded-full border border-areia/20"
+                    style={{
+                      background: `linear-gradient(135deg, ${preset.swatchColors[0]} 0%, ${preset.swatchColors[1]} 52%, ${preset.swatchColors[2]} 100%)`,
+                    }}
+                  />
+                  <span className="truncate text-[10px] font-medium">{preset.label}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
 
@@ -890,35 +969,36 @@ export function InspectorPanel({
           <span>Swarm Roles</span>
           <span className="tabular-nums text-amarelo-ideias/85">6 roles</span>
         </div>
-        <div className="grid grid-cols-2 gap-x-2.5 gap-y-1.5 text-[10px]">
-          {[
-            ["caps", "bg-track-t1"],
-            ["b_roll", "bg-track-v2"],
-            ["grade", "bg-track-fx"],
-            ["razor", "bg-track-v1"],
-            ["gfx", "bg-track-g1"],
-            ["mix", "bg-track-a1"],
-          ].map(([role, colorClass]) => {
-            const count = swarmRoleCounts[role] ?? 0;
-            const widthPct = count === 0 ? 0 : Math.min(100, 24 + count * 18);
-            return (
-              <div key={role} className="flex items-center gap-1.5">
-                <span
-                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${count > 0 ? colorClass : "bg-areia/20"}`}
-                />
-                <span className="w-9 truncate text-areia/70">{role}</span>
-                <div className="h-1 flex-1 overflow-hidden rounded-full bg-grafite">
-                  <div
-                    className={`h-full rounded-full ${colorClass}`}
-                    style={{ width: `${widthPct}%` }}
+          <div className="grid grid-cols-2 gap-x-2.5 gap-y-1.5 text-[10px]">
+            {[
+              ["caps", "bg-track-t1"],
+              ["b_roll", "bg-track-v2"],
+              ["grade", "bg-track-fx"],
+              ["razor", "bg-track-v1"],
+              ["gfx", "bg-track-g1"],
+              ["mix", "bg-track-a1"],
+            ].map(([role, colorClass]) => {
+              const count = swarmRoleCounts[role] ?? 0;
+              const widthPct = count === 0 ? 0 : Math.min(100, 24 + count * 18);
+              return (
+                <div key={role} className="flex items-center gap-1.5">
+                  <span
+                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${count > 0 ? colorClass : "bg-areia/20"}`}
                   />
+                  <span className="w-9 truncate text-areia/70">{role}</span>
+                  <div className="h-1 flex-1 overflow-hidden rounded-full bg-grafite">
+                    <div
+                      className={`h-full rounded-full ${colorClass}`}
+                      style={{ width: `${widthPct}%` }}
+                    />
+                  </div>
+                  <span className="w-3 text-right tabular-nums text-[9px] text-areia/60">
+                    {count}
+                  </span>
                 </div>
-                <span className="w-3 text-right tabular-nums text-[9px] text-areia/60">
-                  {count}
-                </span>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
         </div>
       </div>
     </aside>
