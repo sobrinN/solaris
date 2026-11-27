@@ -28,6 +28,7 @@ import {
 } from "@solaris/engine-client";
 import { AiSettingsModal } from "./components/AiSettingsModal";
 import { BrandPlaybookDrawer } from "./components/BrandPlaybookDrawer";
+import { inferCanvasFromVideo } from "./lib/canvasMatch";
 import { PreEditorChat } from "./components/chat/PreEditorChat";
 import { SolarisWordmark } from "./components/SolarisBrand";
 import { createEngineClient } from "./lib/engineBridge";
@@ -644,15 +645,34 @@ export function App() {
     if (
       !templateId &&
       existingDraft &&
-      existingDraft.canvas.aspect_preset === aspect &&
       files.length > 0 &&
       existingDraft.media_pool.length > 0
     ) {
-      // Reuse already-indexed background draft project and apply real project name & prompt
+      // Reuse already-indexed background draft project and apply real project name, prompt & canvas
       project = await client.updateProjectMetadata(existingDraft.id, {
         name: cleanName,
         prompt: userPrompt || undefined,
       });
+      if (project.canvas.aspect_preset !== aspect) {
+        const firstVideo = project.media_pool.find((m) => m.kind === "video");
+        const matched = firstVideo ? inferCanvasFromVideo(firstVideo) : null;
+        const nextCanvas =
+          matched && matched.aspect_preset === aspect
+            ? matched
+            : {
+                width: aspect === "landscape16x9" ? 1920 : 1080,
+                height: aspect === "vertical9x16" ? 1920 : 1080,
+                fps_num: matched?.fps_num ?? project.canvas.fps_num,
+                fps_den: 1,
+                aspect_preset: aspect,
+              };
+        const res = await client.applyOp(
+          project.id,
+          { type: "set_canvas", canvas: nextCanvas },
+          { agent_id: "user", role: "user" },
+        );
+        project = res.project;
+      }
       if (project.brand_playbook_id !== selectedBrandId) {
         const res = await client.applyOp(
           project.id,
@@ -662,6 +682,9 @@ export function App() {
         project = res.project;
       }
     } else {
+      if (existingDraft && existingDraft.id) {
+        void client.deleteProject(existingDraft.id).catch(() => {});
+      }
       project = await client.createProject(
         cleanName,
         templateId ? undefined : aspect,

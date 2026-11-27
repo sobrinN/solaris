@@ -828,13 +828,23 @@ impl ProjectEngine {
                     .iter_mut()
                     .find(|c| c.id == clip_id)
                     .ok_or_else(|| CoreError::ClipNotFound(clip_id.clone()))?;
-                let eff_start = new_start_sec.unwrap_or(clip.start_sec);
+                let old_start = clip.start_sec;
+                let eff_start = new_start_sec.unwrap_or(old_start);
                 let eff_dur = new_duration_sec.unwrap_or(clip.duration_sec);
                 let eff_src_in = new_source_in_sec.unwrap_or(clip.source_in_sec);
                 ensure_finite_span(eff_start, eff_dur, eff_src_in)?;
                 clip.start_sec = eff_start;
                 clip.duration_sec = eff_dur;
                 clip.source_in_sec = eff_src_in;
+                let delta = eff_start - old_start;
+                if delta.abs() > 1e-9
+                    && let ClipKind::Caption { caption } = &mut clip.payload
+                {
+                    for w in &mut caption.words {
+                        w.start_sec = (w.start_sec + delta).max(0.0);
+                        w.end_sec = (w.end_sec + delta).max(w.start_sec);
+                    }
+                }
                 let label = clip.label.clone();
                 track
                     .clips
@@ -947,6 +957,19 @@ impl ProjectEngine {
                     return Err(CoreError::InvalidOperation(format!(
                         "clip '{clip_id}' is not a Caption clip"
                     )));
+                }
+                if !caption.words.is_empty() {
+                    let preview: String = caption
+                        .words
+                        .iter()
+                        .take(6)
+                        .map(|w| w.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let trimmed: String = preview.chars().take(48).collect();
+                    if !trimmed.trim().is_empty() {
+                        clip.label = trimmed;
+                    }
                 }
                 clip.payload = ClipKind::Caption { caption };
                 Ok((
@@ -1089,6 +1112,46 @@ impl ProjectEngine {
                 Ok((
                     format!("switched brand playbook to '{brand_playbook_id}'"),
                     "brand.playbook".to_string(),
+                ))
+            }
+            TimelineCommand::SetCanvas { canvas } => {
+                if !(16..=7680).contains(&canvas.width) || !(16..=7680).contains(&canvas.height) {
+                    return Err(CoreError::InvalidOperation(
+                        "canvas width/height must be between 16 and 7680".to_string(),
+                    ));
+                }
+                if canvas.fps_num == 0 || canvas.fps_den == 0 {
+                    return Err(CoreError::InvalidOperation(
+                        "canvas fps_num and fps_den must be > 0".to_string(),
+                    ));
+                }
+                let summary = format!(
+                    "updated canvas to {}x{} ({:?})",
+                    canvas.width, canvas.height, canvas.aspect_preset
+                );
+                self.project.canvas = canvas;
+                Ok((summary, "program.stage".to_string()))
+            }
+            TimelineCommand::UpdateMediaRole {
+                media_id,
+                role_hint,
+            } => {
+                let cleaned = role_hint.trim().to_string();
+                if cleaned.is_empty() {
+                    return Err(CoreError::InvalidOperation(
+                        "role_hint must not be empty".to_string(),
+                    ));
+                }
+                let asset = self
+                    .project
+                    .media_pool
+                    .iter_mut()
+                    .find(|m| m.id == media_id)
+                    .ok_or_else(|| CoreError::MediaNotFound(media_id.clone()))?;
+                asset.role_hint = cleaned.clone();
+                Ok((
+                    format!("updated media role for '{}' to '{cleaned}'", asset.name),
+                    format!("media.pool.{media_id}"),
                 ))
             }
             TimelineCommand::Batch { commands, summary } => {
@@ -2079,5 +2142,131 @@ mod tests {
             .clips;
         assert!((v1_clips[0].start_sec - 0.0).abs() < 1e-6);
         assert!((v1_clips[1].start_sec - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn color_grade_brightness_defaults_zero_and_set_canvas_update_media_role_undo_cleanly() {
+        let old_json = r#"{"lift":{"r":0,"g":0,"b":0},"gamma":{"r":0,"g":0,"b":0},"gain":{"r":0,"g":0,"b":0},"temp":0,"tint":0,"contrast":1,"saturation":1,"exposure":0,"lut_path":null,"lut_intensity":0.85}"#;
+        let parsed: ColorGrade = serde_json::from_str(old_json).expect("backward compat serde");
+        assert!((parsed.brightness - 0.0).abs() < 1e-9);
+
+        let mut engine =
+            ProjectEngine::new(Project::new_default("canvas", AspectPreset::Vertical9x16));
+        let meta = CommandMeta::default();
+        engine
+            .apply(
+                TimelineCommand::AddMedia {
+                    asset: crate::model::MediaAsset {
+                        id: "m1".into(),
+                        name: "clip.mp4".into(),
+                        kind: crate::model::MediaKind::Video,
+                        role_hint: "a_roll".into(),
+                        path: "/tmp/clip.mp4".into(),
+                        added_at: chrono::Utc::now(),
+                        intelligence: Default::default(),
+                    },
+                },
+                meta.clone(),
+            )
+            .unwrap();
+
+        engine
+            .apply(
+                TimelineCommand::SetCanvas {
+                    canvas: crate::model::CanvasConfig::from_preset(AspectPreset::Landscape16x9),
+                },
+                meta.clone(),
+            )
+            .expect("set_canvas");
+        assert_eq!(engine.project().canvas.width, 1920);
+        assert_eq!(engine.project().canvas.height, 1080);
+
+        engine
+            .apply(
+                TimelineCommand::UpdateMediaRole {
+                    media_id: "m1".into(),
+                    role_hint: "b_roll".into(),
+                },
+                meta,
+            )
+            .expect("update_media_role");
+        assert_eq!(engine.project().media_pool[0].role_hint, "b_roll");
+
+        engine.undo().unwrap();
+        assert_eq!(engine.project().media_pool[0].role_hint, "a_roll");
+        engine.undo().unwrap();
+        assert_eq!(engine.project().canvas.width, 1080);
+        assert_eq!(engine.project().canvas.height, 1920);
+    }
+
+    #[test]
+    fn trim_clip_shifts_caption_word_timestamps_with_start_sec() {
+        let mut engine =
+            ProjectEngine::new(Project::new_default("cap_trim", AspectPreset::Vertical9x16));
+        let meta = CommandMeta::default();
+        let cap_clip = Clip {
+            id: "c_cap".into(),
+            label: "Hello world".into(),
+            start_sec: 1.0,
+            duration_sec: 2.0,
+            source_in_sec: 0.0,
+            transform: Transform2D::default(),
+            audio: AudioSettings::default(),
+            payload: ClipKind::Caption {
+                caption: crate::model::CaptionBlock {
+                    words: vec![
+                        crate::model::CaptionWord {
+                            text: "Hello".into(),
+                            start_sec: 1.1,
+                            end_sec: 1.5,
+                        },
+                        crate::model::CaptionWord {
+                            text: "world".into(),
+                            start_sec: 1.6,
+                            end_sec: 2.2,
+                        },
+                    ],
+                    preset: crate::model::CaptionPreset::NeonGlow,
+                    font_family: "Sora".into(),
+                    highlight_color: "#F7B733".into(),
+                },
+            },
+        };
+        engine
+            .apply(
+                TimelineCommand::PlaceClip {
+                    track_id: "t1".into(),
+                    clip: cap_clip,
+                },
+                meta.clone(),
+            )
+            .unwrap();
+
+        engine
+            .apply(
+                TimelineCommand::TrimClip {
+                    track_id: "t1".into(),
+                    clip_id: "c_cap".into(),
+                    new_start_sec: Some(3.5),
+                    new_duration_sec: None,
+                    new_source_in_sec: None,
+                },
+                meta,
+            )
+            .unwrap();
+
+        let t1 = engine
+            .project()
+            .tracks
+            .iter()
+            .find(|t| t.id == "t1")
+            .unwrap();
+        let ClipKind::Caption { caption } = &t1.clips[0].payload else {
+            panic!("expected caption");
+        };
+        assert!((caption.words[0].start_sec - 3.6).abs() < 1e-6);
+        assert!((caption.words[0].end_sec - 4.0).abs() < 1e-6);
+        assert!((caption.words[1].start_sec - 4.1).abs() < 1e-6);
+        assert!((caption.words[1].end_sec - 4.7).abs() < 1e-6);
     }
 }

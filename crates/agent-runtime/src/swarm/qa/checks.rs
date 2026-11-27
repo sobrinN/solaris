@@ -407,6 +407,12 @@ pub(super) async fn check_and_fix_audio(
             if music.audio.gain_db <= -90.0 {
                 continue;
             }
+            let is_unducked_sfx = !music.audio.ducking_enabled
+                && (music.duration_sec < 4.0
+                    || matches!(&music.payload, ClipKind::Media { media_id, .. } if project.media_pool.iter().any(|m| m.id == *media_id && m.role_hint.to_ascii_lowercase().contains("sfx"))));
+            if is_unducked_sfx {
+                continue;
+            }
             let needs_duck = !music.audio.ducking_enabled
                 || music.audio.duck_target_db > -12.0
                 || music.audio.gain_db > -8.0;

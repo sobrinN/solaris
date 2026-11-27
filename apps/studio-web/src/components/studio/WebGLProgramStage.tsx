@@ -7,6 +7,7 @@ import type {
   ColorGrade,
   MediaAsset,
   ParsedCubeLut,
+  SavedCodeAsset,
   SolarisEngineClient,
 } from "@solaris/engine-client";
 import { buildSandboxedGfxDoc, escapeHtml } from "@solaris/gfx-runtime";
@@ -31,7 +32,9 @@ interface WebGLProgramStageProps {
   isPlaying: boolean;
   grade: ColorGrade;
   activeLayers: StageVisualLayer[];
+  upcomingLayers?: StageVisualLayer[];
   activeGfxClips: Clip[];
+  savedAssets?: SavedCodeAsset[];
   activeCaptionClip: Clip | null;
   brandTokens: BrandTokens;
   brandFontCss?: string;
@@ -70,6 +73,7 @@ uniform float u_tint;
 uniform float u_contrast;
 uniform float u_sat;
 uniform float u_exp;
+uniform float u_brightness;
 uniform vec2 u_translate;
 uniform float u_scale;
 uniform float u_rotation;
@@ -115,15 +119,16 @@ void main() {
 
   // Lift / Gamma / Gain + Temp/Tint
   col = clamp(col + u_lift * (1.0 - col) + u_gain * col, 0.0, 1.0);
-  col.r += u_temp * 0.14;
-  col.b -= u_temp * 0.14;
-  col.g += u_tint * 0.12;
+  col.r += u_temp * 0.16;
+  col.b -= u_temp * 0.16;
+  col.g += u_tint * 0.14;
   col = clamp(col, 0.0, 1.0);
   vec3 gammaPow = max(vec3(0.35), 1.0 - u_gamma * 0.65);
   col = pow(col, gammaPow);
 
-  // Exposure, Contrast & Saturation
+  // Exposure, Brightness, Contrast & Saturation
   col *= pow(2.0, u_exp);
+  col = clamp(col + u_brightness, 0.0, 1.0);
   col = (col - 0.5) * u_contrast + 0.5;
   float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
   col = mix(vec3(luma), col, u_sat);
@@ -162,7 +167,9 @@ export function WebGLProgramStage({
   isPlaying,
   grade,
   activeLayers,
+  upcomingLayers = [],
   activeGfxClips,
+  savedAssets = [],
   activeCaptionClip,
   brandTokens,
   brandFontCss = "",
@@ -317,6 +324,7 @@ export function WebGLProgramStage({
       "u_contrast",
       "u_sat",
       "u_exp",
+      "u_brightness",
       "u_translate",
       "u_scale",
       "u_rotation",
@@ -391,6 +399,7 @@ export function WebGLProgramStage({
     gl.uniform1f(uniforms.u_contrast, currentGrade.contrast);
     gl.uniform1f(uniforms.u_sat, currentGrade.saturation);
     gl.uniform1f(uniforms.u_exp, currentGrade.exposure);
+    gl.uniform1f(uniforms.u_brightness, currentGrade.brightness ?? 0);
     gl.uniform1f(uniforms.u_dstAspect, width / Math.max(1, height));
 
     let drewAny = false;
@@ -537,7 +546,7 @@ export function WebGLProgramStage({
       const targetSec =
         vidDur !== null ? Math.min(rawTarget, Math.max(0, vidDur - 0.04)) : rawTarget;
 
-      const threshold = isPlaying ? 0.22 : 0.015;
+      const threshold = isPlaying ? 0.10 : 0.015;
       if (vid.readyState < 1) {
         pendingVideoSeekRef.current[key] = targetSec;
       } else if (!vid.seeking && Math.abs(vid.currentTime - targetSec) > threshold) {
@@ -624,18 +633,20 @@ export function WebGLProgramStage({
   const gfxKeySignature = activeGfxClips
     .map((c) => {
       const gfx = c.payload.kind === "gfx" ? c.payload.gfx : null;
-      return `${c.id}:${c.start_sec}:${c.duration_sec}:${c.label}:${gfx?.inline_html ?? ""}:${JSON.stringify(gfx?.props ?? {})}`;
+      const saved = gfx?.asset_id ? savedAssets.find((a) => a.id === gfx.asset_id) : null;
+      return `${c.id}:${c.start_sec}:${c.duration_sec}:${c.label}:${gfx?.inline_html ?? saved?.html_source ?? ""}:${JSON.stringify(gfx?.props ?? {})}`;
     })
     .join("|");
 
   const gfxDocs = useMemo(() => {
     return activeGfxClips.map((clip) => {
+      const gfx = clip.payload.kind === "gfx" ? clip.payload.gfx : null;
+      const saved = gfx?.asset_id ? savedAssets.find((a) => a.id === gfx.asset_id) : null;
       const html =
-        clip.payload.kind === "gfx"
-          ? clip.payload.gfx.inline_html ??
-            `<div style="padding:12px 18px;border-radius:14px;background:rgba(8,4,4,0.85);border:1px solid var(--brand-accent);font-weight:600;">${escapeHtml(clip.label)}</div>`
-          : "";
-      const props = clip.payload.kind === "gfx" ? clip.payload.gfx.props : {};
+        gfx?.inline_html ??
+        saved?.html_source ??
+        `<div style="padding:12px 18px;border-radius:14px;background:rgba(8,4,4,0.85);border:1px solid var(--brand-accent);font-weight:600;">${escapeHtml(clip.label)}</div>`;
+      const props = { ...(saved?.default_props ?? {}), ...(gfx?.props ?? {}) };
       return {
         clipId: clip.id,
         startSec: clip.start_sec,
@@ -791,15 +802,41 @@ export function WebGLProgramStage({
         return null;
       })}
 
+      {/* Preload upcoming video clips (within 3s) to eliminate cut-boundary black flashes */}
+      {upcomingLayers.map((layer) => {
+        if (layer.media.kind !== "video" || !layer.url) return null;
+        const key = `preload:${layer.trackId}:${layer.clip.id}`;
+        return (
+          <video
+            key={key}
+            src={layer.url}
+            preload="auto"
+            crossOrigin="anonymous"
+            muted
+            playsInline
+            className="hidden"
+          />
+        );
+      })}
+
       {/* Persistently mounted WebGL2 Canvas */}
-      <canvas
-        ref={canvasRef}
-        width={540}
-        height={Math.round((540 * height) / Math.max(1, width))}
-        className={`h-full w-full object-cover ${
-          hasVisualMedia ? "opacity-100" : "pointer-events-none opacity-0"
-        }`}
-      />
+      {(() => {
+        const dpr = typeof window !== "undefined" ? Math.min(window.devicePixelRatio || 1, 2) : 1;
+        const targetW = fittedDims.measured
+          ? Math.min(Math.max(width, 720), Math.max(540, Math.round(fittedDims.w * dpr)))
+          : 720;
+        const targetH = Math.max(2, Math.round((targetW * height) / Math.max(1, width)));
+        return (
+          <canvas
+            ref={canvasRef}
+            width={targetW}
+            height={targetH}
+            className={`h-full w-full object-cover ${
+              hasVisualMedia ? "opacity-100" : "pointer-events-none opacity-0"
+            }`}
+          />
+        );
+      })()}
 
       {!hasVisualMedia && activeGfxClips.length === 0 && !activeCaptionClip && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-4 text-center">
@@ -912,7 +949,7 @@ function CaptionOverlay({
       : [{ text: clip.label, start_sec: clip.start_sec, end_sec: clip.start_sec + clip.duration_sec }];
 
   const rawFontPx = isPortrait ? stageWidth * 0.052 : stageHeight * 0.054;
-  const responsiveFontPx = Math.max(11, Math.min(24, Math.round(rawFontPx)));
+  const responsiveFontPx = Math.max(11, Math.round(rawFontPx));
 
   const presetBoxClass =
     caption.preset === "mono_caps"
@@ -939,9 +976,14 @@ function CaptionOverlay({
     >
       <div className={`inline-flex max-w-full flex-wrap items-center justify-center gap-x-[0.28em] gap-y-0.5 ${presetBoxClass}`}>
         {words.map((w, idx) => {
-          const isActive =
-            playheadSec >= w.start_sec && playheadSec <= Math.max(w.end_sec, w.start_sec + 0.05);
-          const isSpoken = playheadSec > w.end_sec;
+          const nextStart =
+            idx + 1 < words.length
+              ? words[idx + 1].start_sec
+              : clip.start_sec + clip.duration_sec;
+          const sliceStart = idx === 0 ? Math.min(clip.start_sec, w.start_sec) : w.start_sec;
+          const sliceEnd = Math.max(w.end_sec, nextStart, sliceStart + 0.05);
+          const isActive = playheadSec >= sliceStart && playheadSec < sliceEnd;
+          const isSpoken = playheadSec >= sliceEnd;
           const activeColor = caption.highlight_color || "#F7B733";
           return (
             <span
@@ -952,6 +994,8 @@ function CaptionOverlay({
                       color: caption.preset === "karaoke" ? "#080404" : activeColor,
                       backgroundColor:
                         caption.preset === "karaoke" ? activeColor : "transparent",
+                      borderBottom:
+                        caption.preset === "mono_caps" ? `2px solid ${activeColor}` : undefined,
                       textShadow:
                         caption.preset === "neon_glow"
                           ? `0 0 16px ${activeColor}, 0 0 4px ${activeColor}`
@@ -962,11 +1006,16 @@ function CaptionOverlay({
                         caption.preset === "karaoke" && isSpoken
                           ? activeColor
                           : "#F7F5EF",
-                      opacity: caption.preset === "minimal" && !isActive ? 0.84 : 0.94,
+                      opacity:
+                        caption.preset === "karaoke" && !isSpoken
+                          ? 0.65
+                          : caption.preset === "minimal" && !isActive
+                            ? 0.84
+                            : 0.94,
                     }
               }
               className={`rounded px-0.5 transition-transform duration-100 motion-reduce:transition-none ${
-                isActive && caption.preset !== "minimal" ? "scale-105" : ""
+                isActive && caption.preset === "neon_glow" ? "scale-105" : ""
               }`}
             >
               {w.text}

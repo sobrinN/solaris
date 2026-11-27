@@ -182,7 +182,12 @@ pub(crate) async fn execute_deterministic_spine(
         let mut cut_idx = 0usize;
         if !video_candidates.is_empty() {
             for asset in video_candidates.iter().take(4) {
-                for (src_in, seg_dur) in compute_speech_segments(asset, 14.0) {
+                let target_dur = if asset.intelligence.duration_sec > 0.5 {
+                    asset.intelligence.duration_sec.clamp(1.0, 180.0)
+                } else {
+                    14.0
+                };
+                for (src_in, seg_dur) in compute_speech_segments(asset, target_dur) {
                     if cancel.is_cancelled() {
                         return Err(AgentError::Cancelled);
                     }

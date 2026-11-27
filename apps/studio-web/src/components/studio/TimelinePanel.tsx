@@ -345,11 +345,25 @@ export function TimelinePanel({
     if (st.mode === "move") {
       nextStart = snapTimeSec(Math.max(0, st.origStart + deltaSec), snapEnabled);
     } else if (st.mode === "trim-right") {
+      const trackObj = tracks.find((t) => t.id === st.trackId);
+      const clipObj = trackObj?.clips.find((c) => c.id === st.clipId);
+      let maxDur = Infinity;
+      if (clipObj?.payload.kind === "media") {
+        const mediaId = clipObj.payload.media_id;
+        const asset = mediaPool.find((m) => m.id === mediaId);
+        if (
+          asset &&
+          (asset.kind === "video" || asset.kind === "audio") &&
+          asset.intelligence.duration_sec > 0
+        ) {
+          maxDur = Math.max(0.15, asset.intelligence.duration_sec - st.origSourceIn);
+        }
+      }
       const snappedEnd = snapTimeSec(
         Math.max(st.origStart + 0.15, st.origStart + st.origDur + deltaSec),
         snapEnabled,
       );
-      nextDur = Math.max(0.15, Number((snappedEnd - st.origStart).toFixed(3)));
+      nextDur = Math.min(maxDur, Math.max(0.15, Number((snappedEnd - st.origStart).toFixed(3))));
     } else if (st.mode === "trim-left") {
       const maxShift = st.origDur - 0.15;
       const minShift = Math.max(-st.origStart, -st.origSourceIn);

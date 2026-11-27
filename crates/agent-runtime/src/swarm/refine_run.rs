@@ -90,8 +90,116 @@ pub(super) async fn run_refinement(
     if cancel.is_cancelled() {
         return tracker.finish_cancelled();
     }
+
+    // Wait briefly if any newly attached media is still analyzing
+    let mut current_project = project.clone();
+    let needs_analysis = |p: &Project| {
+        p.media_pool.iter().any(|m| {
+            !m.path.is_empty()
+                && matches!(
+                    m.kind,
+                    solaris_core_ir::MediaKind::Video | solaris_core_ir::MediaKind::Audio
+                )
+                && !m.intelligence.analyzed
+        })
+    };
+    if needs_analysis(&current_project) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while needs_analysis(&current_project) && tokio::time::Instant::now() < deadline {
+            tokio::select! {
+                _ = cancel.cancelled() => return tracker.finish_cancelled(),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+            }
+            if let Ok(updated) = backend.get_project(&project.id).await {
+                current_project = updated;
+            } else {
+                break;
+            }
+        }
+    }
+
+    // Auto-transcribe untranscribed speech assets if captions/subtitles/transcript are requested or T1 is empty
+    let prompt_lower = req.prompt.to_ascii_lowercase();
+    let t1_empty = current_project
+        .tracks
+        .iter()
+        .find(|t| t.id == "t1")
+        .is_none_or(|t| t.clips.is_empty());
+    let wants_stt = prompt_lower.contains("caption")
+        || prompt_lower.contains("subtitle")
+        || prompt_lower.contains("transcrib")
+        || (t1_empty
+            && (prompt_lower.contains("better")
+                || prompt_lower.contains("enhance")
+                || prompt_lower.contains("edit")
+                || prompt_lower.contains("polish")));
+    if wants_stt {
+        let speech_ids: Vec<String> = current_project
+            .media_pool
+            .iter()
+            .filter(|m| {
+                !m.path.is_empty()
+                    && m.intelligence.transcript.is_empty()
+                    && ((m.kind == solaris_core_ir::MediaKind::Video && m.intelligence.has_audio)
+                        || (m.kind == solaris_core_ir::MediaKind::Audio
+                            && matches!(m.role_hint.as_str(), "voice" | "voiceover" | "audio")))
+            })
+            .map(|m| m.id.clone())
+            .take(3)
+            .collect();
+        if !speech_ids.is_empty() {
+            tracker.advance(
+                0.06,
+                Some(format!(
+                    "Transcribing {} speech asset(s) before planning",
+                    speech_ids.len()
+                )),
+            );
+            let mut any_transcribed = false;
+            for mid in speech_ids {
+                if cancel.is_cancelled() {
+                    return tracker.finish_cancelled();
+                }
+                match backend
+                    .transcribe_media(&current_project.id, &mid, None)
+                    .await
+                {
+                    Ok(words) if !words.is_empty() => {
+                        any_transcribed = true;
+                        emit_swarm_log(
+                            backend.as_ref(),
+                            LogLevel::Info,
+                            "swarm",
+                            &current_project.id,
+                            run_id,
+                            Some("director-01"),
+                            format!("Transcribed {} word(s) for media {mid}", words.len()),
+                            None,
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        emit_swarm_log(
+                            backend.as_ref(),
+                            LogLevel::Warn,
+                            "swarm",
+                            &current_project.id,
+                            run_id,
+                            Some("director-01"),
+                            format!("Auto-transcription skipped for {mid}: {err}"),
+                            None,
+                        );
+                    }
+                }
+            }
+            if any_transcribed && let Ok(updated) = backend.get_project(&current_project.id).await {
+                current_project = updated;
+            }
+        }
+    }
+
     let snapshot = build_refine_snapshot(
-        project,
+        &current_project,
         &RefineFocus {
             selected_clip_ids: &req.selected_clip_ids,
             playhead_sec: req.playhead_sec,
@@ -145,7 +253,7 @@ pub(super) async fn run_refinement(
         let (locked_tracks, open): (Vec<&str>, Vec<&str>) = refinement_tracks(target.role)
             .iter()
             .copied()
-            .partition(|track| is_locked(project, track));
+            .partition(|track| is_locked(&current_project, track));
         locked.extend(locked_tracks);
         if !open.is_empty() {
             dispatch.push((target, open));
@@ -175,7 +283,7 @@ pub(super) async fn run_refinement(
         openrouter,
         models: &models,
         run_id,
-        project,
+        project: &current_project,
         brand,
         assets,
         prompt: &req.prompt,
@@ -406,7 +514,7 @@ fn role_instruction(ctx: &RefineContext<'_>, target: &RefinementTarget, tracks: 
         .filter(|track| track["id"].as_str().is_some_and(|id| tracks.contains(&id)))
         .collect();
     format!(
-        "Refinement request: \"{}\". Your change: {}. Edit only existing clips on your tracks, addressed by clip id. Never place new clips or GFX scenes and never re-place scenes that already exist. Your tracks: {}. Selected clip ids: {}. Playhead (sec): {}.",
+        "Edit/Refinement request: \"{}\". Your change: {}. Preserve existing clips unless asked to modify or remove them; edit existing clips by clip id when modifying them, or add newly requested elements cleanly on your tracks without duplicating existing clips. Your tracks: {}. Selected clip ids: {}. Playhead (sec): {}.",
         ctx.prompt,
         target.instruction,
         json!(own_tracks),

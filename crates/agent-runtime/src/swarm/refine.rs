@@ -19,7 +19,7 @@ const REFINABLE_ROLES: [AgentRole; 6] = [
     AgentRole::Mix,
 ];
 
-pub(crate) const REFINEMENT_SYSTEM_PROMPT: &str = "You are Solaris Director in REFINEMENT mode. The user already has a finished cut and wants a targeted change. Read `request` and `cut` (tracks, clip ids, selected clips, playhead, recent conversation) and pick the smallest set of specialists that can make the change. Output ONLY one compact raw JSON object (no markdown, no commentary) with keys: \"summary\" (string, max 280 characters: what will change, or why nothing needs to change), \"target_roles\" (array, at most 4, from: razor = V1/A1 spine clips; b_roll = V2 inserts; grade = FX master grade; caps = T1 captions; gfx = G1 motion graphics; mix = A2 music and audio levels) and \"role_instructions\" (object mapping each target role to one concrete instruction that names the clip ids to edit). Rules: edit existing clips by id only; never ask for new scenes, duplicate clips or re-placed GFX; never target a role whose tracks are locked; return an empty target_roles array when nothing needs to change.";
+pub(crate) const REFINEMENT_SYSTEM_PROMPT: &str = "You are Solaris Director in REFINEMENT / EDIT-EXISTING-CUT mode. The user has an existing timeline cut (or placed media) and wants to improve, edit, or enhance it. Read `request` and `cut` (tracks, clip ids, media_pool with transcripts/dimensions, active_grade, selected clips, playhead, recent conversation) and pick the smallest set of specialists that can fulfill the request. Output ONLY one compact raw JSON object (no markdown, no commentary) with keys: \"summary\" (string, max 280 characters: what will change, or why nothing needs to change), \"target_roles\" (array, at most 4, from: razor = V1/A1 spine cuts, splits & trims; b_roll = V2 inserts; grade = FX color grade, brightness, saturation, contrast, temp, tint, exposure & per-scene FX clips; caps = T1 word-synced captions & transcription; gfx = G1 transparent motion-graphic overlays; mix = A2 music/SFX & audio levels) and \"role_instructions\" (object mapping each target role to one concrete instruction). Rules: preserve existing clips unless asked to change/remove them; edit existing clips by id when modifying them, and add newly requested captions (T1), transparent GFX overlays (G1), cuts/splits (V1), B-roll (V2), FX grade clips (FX), or audio (A2) cleanly without duplicating existing clips; never target a role whose tracks are locked; return an empty target_roles array when nothing needs to change.";
 
 pub(crate) struct RefineFocus<'a> {
     pub selected_clip_ids: &'a [String],
@@ -68,6 +68,36 @@ pub(crate) fn build_refine_snapshot(project: &Project, focus: &RefineFocus<'_>) 
         .map(|turn| json!({ "role": turn.role, "text": turn.text }))
         .collect();
 
+    let media_pool: Vec<Value> = project
+        .media_pool
+        .iter()
+        .take(16)
+        .map(|m| {
+            let transcript_preview: Vec<Value> = m
+                .intelligence
+                .transcript
+                .iter()
+                .take(250)
+                .map(|w| json!({ "w": w.word, "s": w.start_sec, "e": w.end_sec }))
+                .collect();
+            json!({
+                "id": m.id,
+                "name": m.name,
+                "kind": m.kind,
+                "role_hint": m.role_hint,
+                "width": m.intelligence.width,
+                "height": m.intelligence.height,
+                "fps": m.intelligence.fps,
+                "duration_sec": m.intelligence.duration_sec,
+                "has_audio": m.intelligence.has_audio,
+                "is_log_footage": m.intelligence.is_log_footage,
+                "silences": m.intelligence.silences,
+                "transcript_words": m.intelligence.transcript.len(),
+                "transcript": transcript_preview,
+            })
+        })
+        .collect();
+
     let omitted = total - refs.len();
     json!({
         "canvas": {
@@ -78,6 +108,8 @@ pub(crate) fn build_refine_snapshot(project: &Project, focus: &RefineFocus<'_>) 
         "duration_sec": project.duration_sec(),
         "playhead_sec": focus.playhead_sec,
         "selected_clip_ids": focus.selected_clip_ids,
+        "active_grade": project.active_grade,
+        "media_pool": media_pool,
         "tracks": tracks,
         "omitted_clips": omitted,
         "truncation_note": (omitted > 0).then(|| format!(
@@ -93,11 +125,15 @@ fn clip_summary(clip: &Clip, selected: &HashSet<&str>, media_names: &HashMap<&st
         "label": clip.label,
         "start_sec": clip.start_sec,
         "duration_sec": clip.duration_sec,
+        "source_in_sec": clip.source_in_sec,
+        "transform": clip.transform,
+        "audio": clip.audio,
         "selected": selected.contains(clip.id.as_str()),
     });
     let details = match &clip.payload {
         ClipKind::Media { media_id, .. } => json!({
             "kind": "media",
+            "media_id": media_id,
             "source": media_names.get(media_id.as_str()).copied().unwrap_or_default(),
         }),
         ClipKind::Caption { caption } => {

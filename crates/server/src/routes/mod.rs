@@ -57,7 +57,11 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/projects/{id}/media/{media_id}",
-            delete(media::delete_media),
+            axum::routing::patch(media::update_media_role).delete(media::delete_media),
+        )
+        .route(
+            "/api/v1/projects/{id}/captions/generate",
+            post(agent::generate_captions_route),
         )
         .route("/api/v1/gfx/sandbox", post(register_gfx_sandbox))
         .route("/api/v1/projects/{id}/export", post(exports::start_export))
@@ -658,11 +662,14 @@ struct HealthResponse {
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+    let mut toolchain = state.inner.capabilities.clone();
+    toolchain.whisper_model_ready =
+        solaris_media_engine::discover_whisper_model(Some(&state.inner.workspace_dir)).is_some();
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
         storage_backend: state.inner.storage.backend_kind(),
-        toolchain: state.inner.capabilities.clone(),
+        toolchain,
     })
 }
 

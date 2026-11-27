@@ -122,6 +122,13 @@ pub enum TimelineCommand {
     SetBrandPlaybook {
         brand_playbook_id: String,
     },
+    SetCanvas {
+        canvas: crate::model::CanvasConfig,
+    },
+    UpdateMediaRole {
+        media_id: String,
+        role_hint: String,
+    },
     Batch {
         commands: Vec<TimelineCommand>,
         #[serde(default)]
@@ -147,6 +154,8 @@ impl TimelineCommand {
             Self::SetAudioSettings { .. } => "set_audio_settings",
             Self::SetTrackFlags { .. } => "set_track_flags",
             Self::SetBrandPlaybook { .. } => "set_brand_playbook",
+            Self::SetCanvas { .. } => "set_canvas",
+            Self::UpdateMediaRole { .. } => "update_media_role",
             Self::Batch { .. } => "batch",
         }
     }
@@ -168,6 +177,8 @@ impl TimelineCommand {
             | Self::RemoveMedia { .. }
             | Self::UpdateMediaIntelligence { .. }
             | Self::SetBrandPlaybook { .. }
+            | Self::SetCanvas { .. }
+            | Self::UpdateMediaRole { .. }
             | Self::Batch { .. } => None,
         }
     }

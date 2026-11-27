@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Paperclip,
   Play,
   ShieldCheck,
   Sparkles,
@@ -56,8 +57,11 @@ interface SwarmActivityPanelProps {
   qaError?: string | null;
   swarmError?: string | null;
   activityLog: ActivityEntry[];
+  mediaTabContent?: React.ReactNode;
+  mediaCount?: number;
   assetsTabContent?: React.ReactNode;
   assetsCount?: number;
+  onAttachFiles?: (files: File[]) => void;
   onOpenLogsDrawer: () => void;
   onStartSwarm: (options: StartSwarmOptions) => Promise<void>;
   onCancelSwarm: () => Promise<void>;
@@ -98,8 +102,11 @@ export function SwarmActivityPanel({
   qaError,
   swarmError,
   activityLog,
+  mediaTabContent,
+  mediaCount,
   assetsTabContent,
   assetsCount,
+  onAttachFiles,
   onOpenLogsDrawer,
   onStartSwarm,
   onCancelSwarm,
@@ -107,7 +114,7 @@ export function SwarmActivityPanel({
 }: SwarmActivityPanelProps) {
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
-  const [activeTab, setActiveTab] = useState<"prompt" | "activity" | "assets">("prompt");
+  const [activeTab, setActiveTab] = useState<"prompt" | "activity" | "media" | "assets">("prompt");
   const [omittedClipIds, setOmittedClipIds] = useState<string[]>([]);
   const [history, setHistory] = useState<DirectorTurn[]>(() =>
     loadDirectorHistory(getSessionStorage(), projectId),
@@ -207,15 +214,18 @@ export function SwarmActivityPanel({
   };
 
   const tabs = useMemo(() => {
-    const base: Array<{ id: "prompt" | "activity" | "assets"; label: string; count?: number }> = [
+    const base: Array<{ id: "prompt" | "activity" | "media" | "assets"; label: string; count?: number }> = [
       { id: "prompt", label: "Prompt" },
       { id: "activity", label: "Activity", count: activityLog.length > 0 ? activityLog.length : undefined },
     ];
+    if (mediaTabContent) {
+      base.push({ id: "media", label: "Media", count: mediaCount });
+    }
     if (assetsTabContent) {
       base.push({ id: "assets", label: "Assets", count: assetsCount });
     }
     return base;
-  }, [activityLog.length, assetsTabContent, assetsCount]);
+  }, [activityLog.length, mediaTabContent, mediaCount, assetsTabContent, assetsCount]);
 
   return (
     <div className="@container solaris-panel flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl">
@@ -496,7 +506,27 @@ export function SwarmActivityPanel({
                 className="w-full resize-none bg-transparent text-[11px] leading-snug text-areia placeholder:text-areia/35 outline-none disabled:opacity-50"
               />
               <div className="mt-1.5 flex items-center justify-between gap-2">
-                <span className="text-[10px] text-areia/40">⌘/Ctrl+Enter</span>
+                <div className="flex items-center gap-2">
+                  {onAttachFiles && (
+                    <label className="inline-flex h-6 cursor-pointer items-center gap-1 rounded-md border border-areia/12 bg-carbono/80 px-2 text-[10px] text-areia/80 transition-colors hover:border-laranja-criacao/45 hover:text-areia motion-reduce:transition-none">
+                      <Paperclip className="h-3 w-3 text-laranja-criacao" />
+                      <span>Attach</span>
+                      <input
+                        type="file"
+                        multiple
+                        accept="video/*,image/*,audio/*,.pdf,.md,.txt"
+                        className="hidden"
+                        onChange={(e) => {
+                          if (e.target.files && e.target.files.length > 0) {
+                            onAttachFiles(Array.from(e.target.files));
+                          }
+                          e.currentTarget.value = "";
+                        }}
+                      />
+                    </label>
+                  )}
+                  <span className="text-[10px] text-areia/40">⌘/Ctrl+Enter</span>
+                </div>
                 {isRunning ? (
                   <button
                     type="button"
@@ -627,7 +657,14 @@ export function SwarmActivityPanel({
         </div>
       )}
 
-      {/* TAB 3: ASSETS (GFX BIN) */}
+      {/* TAB 3: MEDIA BIN */}
+      {activeTab === "media" && mediaTabContent && (
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          {mediaTabContent}
+        </div>
+      )}
+
+      {/* TAB 4: ASSETS (GFX BIN) */}
       {activeTab === "assets" && assetsTabContent && (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {assetsTabContent}

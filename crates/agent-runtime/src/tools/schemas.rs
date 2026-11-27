@@ -270,7 +270,17 @@ pub fn all_tools() -> Vec<ToolSpec> {
                     "source_in_sec": {"type": "number"},
                     "ken_burns": {"type": "boolean"},
                     "scale": {"type": "number"},
-                    "gain_db": {"type": "number"}
+                    "gain_db": {"type": "number"},
+                    "smart_reframe": {
+                        "type": "object",
+                        "properties": {
+                            "x": {"type": "number"},
+                            "y": {"type": "number"},
+                            "width": {"type": "number"},
+                            "height": {"type": "number"}
+                        },
+                        "required": ["x", "y", "width", "height"]
+                    }
                 },
                 "required": ["project_id", "track_id", "clip_id", "media_id", "start_sec", "duration_sec"]
             }),
@@ -340,7 +350,17 @@ pub fn all_tools() -> Vec<ToolSpec> {
                     "y": {"type": "number"},
                     "scale": {"type": "number"},
                     "rotation_deg": {"type": "number"},
-                    "opacity": {"type": "number"}
+                    "opacity": {"type": "number"},
+                    "smart_reframe": {
+                        "type": "object",
+                        "properties": {
+                            "x": {"type": "number"},
+                            "y": {"type": "number"},
+                            "width": {"type": "number"},
+                            "height": {"type": "number"}
+                        },
+                        "required": ["x", "y", "width", "height"]
+                    }
                 },
                 "required": ["project_id", "track_id", "clip_id"]
             }),
@@ -349,7 +369,7 @@ pub fn all_tools() -> Vec<ToolSpec> {
         ToolSpec {
             mcp_name: "color.set_grade",
             llm_name: "color_set_grade",
-            description: "Set project active_grade (or clip-scoped FX grade) with Lift/Gamma/Gain, temp, tint, contrast, saturation, exposure, and LUT.",
+            description: "Set project active_grade (or clip-scoped FX grade) with Lift/Gamma/Gain, temp, tint, contrast, saturation, exposure, brightness, and LUT.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -362,6 +382,7 @@ pub fn all_tools() -> Vec<ToolSpec> {
                     "contrast": {"type": "number"},
                     "saturation": {"type": "number"},
                     "exposure": {"type": "number"},
+                    "brightness": {"type": "number"},
                     "temp": {"type": "number"},
                     "tint": {"type": "number"},
                     "lut_path": {"type": ["string", "null"]},
@@ -370,6 +391,34 @@ pub fn all_tools() -> Vec<ToolSpec> {
                 "required": ["project_id"]
             }),
             annotations: MUTATE_IDEMPOTENT,
+        },
+        ToolSpec {
+            mcp_name: "color.place_grade_clip",
+            llm_name: "color_place_grade_clip",
+            description: "Place a time-ranged FX color-grade adjustment clip on track fx for per-scene color matching.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string"},
+                    "clip_id": {"type": "string"},
+                    "label": {"type": "string"},
+                    "start_sec": {"type": "number"},
+                    "duration_sec": {"type": "number"},
+                    "lift": rgb_schema,
+                    "gamma": rgb_schema,
+                    "gain": rgb_schema,
+                    "contrast": {"type": "number"},
+                    "saturation": {"type": "number"},
+                    "exposure": {"type": "number"},
+                    "brightness": {"type": "number"},
+                    "temp": {"type": "number"},
+                    "tint": {"type": "number"},
+                    "lut_path": {"type": ["string", "null"]},
+                    "lut_intensity": {"type": "number"}
+                },
+                "required": ["project_id", "clip_id", "start_sec", "duration_sec"]
+            }),
+            annotations: MUTATE_NON_IDEMPOTENT,
         },
         ToolSpec {
             mcp_name: "color.get_scope_stats",
@@ -674,6 +723,7 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
             "project.run_qa",
             "media.get_manifest",
             "media.transcribe",
+            "media.extract_keyframes",
             "brand.get_playbook",
             "color.get_scope_stats",
             "assets.search",
@@ -683,6 +733,7 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
             "project.get",
             "media.get_manifest",
             "media.transcribe",
+            "media.extract_keyframes",
             "timeline.place_clip",
             "timeline.split_clip",
             "timeline.trim_clip",
@@ -693,6 +744,7 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
         AgentRole::BRoll => &[
             "project.get",
             "media.get_manifest",
+            "media.extract_keyframes",
             "timeline.place_clip",
             "timeline.split_clip",
             "timeline.trim_clip",
@@ -703,9 +755,11 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
         AgentRole::Grade => &[
             "project.get",
             "media.get_manifest",
+            "media.extract_keyframes",
             "brand.get_playbook",
             "color.get_scope_stats",
             "color.set_grade",
+            "color.place_grade_clip",
             "preview.capture_frame",
         ],
         // Captions come strictly from transcribed narration; scripted captions are not
@@ -726,6 +780,7 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
         AgentRole::Gfx => &[
             "project.get",
             "media.get_manifest",
+            "media.extract_keyframes",
             "brand.get_playbook",
             "assets.search",
             "assets.save",
@@ -759,22 +814,12 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
         .collect()
 }
 
-const REFINE_EDIT_TOOLS: [&str; 7] = [
-    "gfx.update_clip",
-    "captions.update_clip",
-    "timeline.trim_clip",
-    "timeline.delete_clip",
-    "timeline.set_transform",
-    "color.set_grade",
-    "audio.set_mix",
-];
-
 pub fn tools_for_refinement(role: AgentRole) -> Vec<ToolDefinition> {
     tools_for_role(role)
         .into_iter()
         .filter(|def| {
             let name = normalize_tool_name(&def.function.name);
-            !is_mutating_tool(name) || REFINE_EDIT_TOOLS.contains(&name)
+            name != "assets.save"
         })
         .collect()
 }
@@ -818,6 +863,7 @@ pub fn normalize_tool_name(raw: &str) -> &str {
         ("timeline_delete_clip", "timeline.delete_clip"),
         ("timeline_set_transform", "timeline.set_transform"),
         ("color_set_grade", "color.set_grade"),
+        ("color_place_grade_clip", "color.place_grade_clip"),
         ("color_get_scope_stats", "color.get_scope_stats"),
         (
             "captions_generate_from_transcript",
@@ -845,4 +891,34 @@ pub fn normalize_tool_name(raw: &str) -> &str {
         }
     }
     raw
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_tools_normalize_and_classify_mutability_consistently() {
+        for spec in all_tools() {
+            assert_eq!(
+                normalize_tool_name(spec.llm_name),
+                spec.mcp_name,
+                "llm_name '{}' did not normalize to mcp_name '{}'",
+                spec.llm_name,
+                spec.mcp_name
+            );
+            assert_eq!(
+                normalize_tool_name(spec.mcp_name),
+                spec.mcp_name,
+                "mcp_name '{}' did not stay idempotent under normalize_tool_name",
+                spec.mcp_name
+            );
+            assert_eq!(
+                is_mutating_tool(spec.llm_name),
+                !spec.annotations.read_only_hint,
+                "mutability mismatch for '{}'",
+                spec.llm_name
+            );
+        }
+    }
 }

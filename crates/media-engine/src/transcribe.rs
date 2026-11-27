@@ -59,6 +59,16 @@ struct WhisperCppItem {
     text: String,
     #[serde(default)]
     offsets: Option<WhisperCppOffsets>,
+    #[serde(default)]
+    tokens: Vec<WhisperCppToken>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WhisperCppToken {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    offsets: Option<WhisperCppOffsets>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -178,6 +188,13 @@ fn extract_payload_words(payload: WhisperPayload) -> Result<Vec<TranscriptWord>,
 
     if !payload.transcription.is_empty() {
         for item in payload.transcription {
+            if !item.tokens.is_empty() {
+                let before_len = out.len();
+                append_whisper_cpp_tokens(&mut out, &item.tokens);
+                if out.len() > before_len {
+                    continue;
+                }
+            }
             if let Some(off) = item.offsets {
                 let start = off.from / 1000.0;
                 let end = off.to / 1000.0;
@@ -194,6 +211,49 @@ fn extract_payload_words(payload: WhisperPayload) -> Result<Vec<TranscriptWord>,
     }
 
     Ok(out)
+}
+
+fn append_whisper_cpp_tokens(out: &mut Vec<TranscriptWord>, tokens: &[WhisperCppToken]) {
+    let mut current_text = String::new();
+    let mut current_start: Option<f64> = None;
+    let mut current_end: f64 = 0.0;
+
+    let flush =
+        |out: &mut Vec<TranscriptWord>, text: &mut String, start: &mut Option<f64>, end: f64| {
+            if let Some(st) = start.take() {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    push_word(out, trimmed, st, end);
+                }
+            }
+            text.clear();
+        };
+
+    for tok in tokens {
+        let raw = tok.text.as_str();
+        let trimmed = raw.trim();
+        if trimmed.is_empty()
+            || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+            || (trimmed.starts_with("<|") && trimmed.ends_with("|>"))
+        {
+            continue;
+        }
+        let Some(off) = &tok.offsets else {
+            continue;
+        };
+        let st = (off.from / 1000.0).max(0.0);
+        let en = (off.to / 1000.0).max(st);
+        let starts_new_word = raw.starts_with(char::is_whitespace) || current_start.is_none();
+        if starts_new_word && current_start.is_some() {
+            flush(out, &mut current_text, &mut current_start, current_end);
+        }
+        if current_start.is_none() {
+            current_start = Some(st);
+        }
+        current_text.push_str(trimmed);
+        current_end = en.max(current_end);
+    }
+    flush(out, &mut current_text, &mut current_start, current_end);
 }
 
 fn choose_word_text<'a>(a: &'a str, b: &'a str) -> &'a str {
@@ -264,6 +324,151 @@ pub fn validate_language_code(lang: &str) -> Result<&str, MediaError> {
         )));
     }
     Ok(trimmed)
+}
+
+pub fn discover_whisper_model(workspace_dir: Option<&Path>) -> Option<PathBuf> {
+    if let Ok(env_path) = std::env::var("SOLARIS_WHISPER_MODEL") {
+        let trimmed = env_path.trim();
+        if !trimmed.is_empty() {
+            let candidate = PathBuf::from(trimmed);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    let mut search_dirs: Vec<PathBuf> = Vec::new();
+    if let Some(ws) = workspace_dir {
+        search_dirs.push(ws.join("models"));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let h = PathBuf::from(home);
+        search_dirs.push(h.join(".cache").join("whisper"));
+        search_dirs.push(h.join(".local").join("share").join("whisper"));
+        search_dirs.push(
+            h.join("Library")
+                .join("Application Support")
+                .join("whisper"),
+        );
+    }
+    search_dirs.push(PathBuf::from("/opt/homebrew/share/whisper-cpp"));
+    search_dirs.push(PathBuf::from("/usr/local/share/whisper-cpp"));
+
+    let mut best: Option<(usize, PathBuf)> = None;
+    let priority = [
+        "large-v3-turbo",
+        "large-v3",
+        "medium",
+        "small",
+        "base",
+        "tiny",
+    ];
+
+    for dir in search_dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let lower = name.to_ascii_lowercase();
+            if !lower.starts_with("ggml-")
+                || !lower.ends_with(".bin")
+                || lower.starts_with("for-tests-")
+            {
+                continue;
+            }
+            let rank = priority
+                .iter()
+                .position(|p| lower.contains(p))
+                .unwrap_or(priority.len());
+            if best.as_ref().is_none_or(|(best_rank, _)| rank < *best_rank) {
+                best = Some((rank, path));
+            }
+        }
+    }
+
+    best.map(|(_, path)| path)
+}
+
+pub fn transcribe_via_whisper_cli(
+    toolchain: &MediaToolchain,
+    input: &Path,
+    model_path: &Path,
+    language: Option<&str>,
+    work_dir: &Path,
+) -> Result<Vec<TranscriptWord>, MediaError> {
+    let ffmpeg = toolchain
+        .ffmpeg_path
+        .as_ref()
+        .ok_or_else(|| MediaError::ToolchainUnavailable("ffmpeg not found".to_string()))?;
+    let whisper_cli = toolchain
+        .whisper_cli_path
+        .as_ref()
+        .ok_or_else(|| MediaError::ToolchainUnavailable("whisper-cli not found".to_string()))?;
+
+    if !model_path.is_file() {
+        return Err(MediaError::StorageError(format!(
+            "whisper model file not found: {}",
+            model_path.display()
+        )));
+    }
+
+    let lang = match language.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(l) => validate_language_code(l)?,
+        None => "auto",
+    };
+
+    if !work_dir.as_os_str().is_empty() {
+        std::fs::create_dir_all(work_dir)?;
+    }
+
+    let job_id = Uuid::new_v4();
+    let wav_path = work_dir.join(format!("whisper_in_{job_id}.wav"));
+    let out_base = work_dir.join(format!("whisper_out_{job_id}"));
+    let out_json = work_dir.join(format!("whisper_out_{job_id}.json"));
+    let _wav_guard = TempFileGuard(wav_path.clone());
+    let _json_guard = TempFileGuard(out_json.clone());
+
+    let wav_out = Command::new(ffmpeg)
+        .args(["-y", "-hide_banner", "-v", "error", "-vn", "-i"])
+        .arg(input)
+        .args(["-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])
+        .arg(&wav_path)
+        .output()?;
+
+    if !wav_out.status.success() {
+        return Err(MediaError::ProcessFailed(
+            String::from_utf8_lossy(&wav_out.stderr).to_string(),
+        ));
+    }
+
+    let cli_out = Command::new(whisper_cli)
+        .arg("-m")
+        .arg(model_path)
+        .arg("-f")
+        .arg(&wav_path)
+        .args(["-l", lang, "-ojf", "-of"])
+        .arg(&out_base)
+        .output()?;
+
+    if !cli_out.status.success() {
+        let stderr = String::from_utf8_lossy(&cli_out.stderr);
+        let stdout = String::from_utf8_lossy(&cli_out.stdout);
+        return Err(MediaError::ProcessFailed(if stderr.trim().is_empty() {
+            stdout.to_string()
+        } else {
+            stderr.to_string()
+        }));
+    }
+
+    let raw = std::fs::read_to_string(&out_json)?;
+    parse_whisper_json(&raw)
 }
 
 pub fn transcribe_via_ffmpeg_whisper(
@@ -474,5 +679,33 @@ mod tests {
         assert!(validate_language_code("en:a=b").is_err());
         assert!(validate_language_code("en,volume=0").is_err());
         assert!(validate_language_code("").is_err());
+    }
+
+    #[test]
+    fn parses_whisper_cpp_ojf_tokens_merging_subwords_and_skipping_control_tokens() {
+        let json = r#"{
+            "transcription": [
+                {
+                    "offsets": { "from": 0, "to": 1400 },
+                    "text": " Stand by me",
+                    "tokens": [
+                        { "text": "[_BEG_]", "offsets": { "from": 0, "to": 0 } },
+                        { "text": " Stand", "offsets": { "from": 100, "to": 550 } },
+                        { "text": "ing", "offsets": { "from": 550, "to": 800 } },
+                        { "text": " by", "offsets": { "from": 820, "to": 1020 } },
+                        { "text": " me", "offsets": { "from": 1040, "to": 1360 } },
+                        { "text": "[_TT_68]", "offsets": { "from": 1360, "to": 1400 } }
+                    ]
+                }
+            ]
+        }"#;
+        let words = parse_whisper_json(json).expect("parse whisper.cpp -ojf tokens");
+        assert_eq!(words.len(), 3);
+        assert_eq!(words[0].word, "Standing");
+        assert!((words[0].start_sec - 0.1).abs() < 1e-6);
+        assert!((words[0].end_sec - 0.8).abs() < 1e-6);
+        assert_eq!(words[1].word, "by");
+        assert_eq!(words[2].word, "me");
+        assert!((words[2].end_sec - 1.36).abs() < 1e-6);
     }
 }

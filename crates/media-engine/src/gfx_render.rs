@@ -1378,6 +1378,11 @@ pub fn build_caption_overlay_html(
     } else {
         1.0
     };
+    let rotation_deg = if clip.transform.rotation_deg.is_finite() {
+        clip.transform.rotation_deg.clamp(-360.0, 360.0)
+    } else {
+        0.0
+    };
     let opacity = if clip.transform.opacity.is_finite() {
         clip.transform.opacity.clamp(0.0, 1.0)
     } else {
@@ -1438,7 +1443,7 @@ pub fn build_caption_overlay_html(
     let idle_json = serde_json::to_string(&idle_css).unwrap_or_else(|_| "\"\"".to_string());
 
     format!(
-        "<div style=\"position:fixed;top:{top_pct:.2}%;left:{left_pct:.2}%;transform:translate(-50%,-50%) scale({scale:.3});opacity:{opacity:.3};width:86%;text-align:center;text-wrap:balance;font-family:'{font_fam}',var(--brand-font-display),'Sora',sans-serif;font-size:{base_font_px}px;line-height:1.15;text-transform:{word_transform};\"><div style=\"{container_style}\">{words_html}</div></div><script>(function(){{const A={active_json},S={spoken_json},I={idle_json};window.__solarisSetCaptionWord=function(idx){{const spans=document.querySelectorAll('[data-word-idx]');for(const el of spans){{const i=Number(el.getAttribute('data-word-idx'));el.setAttribute('style','display:inline-block;'+(i===idx?A:(idx!==null&&i<idx?S:I)));}}void document.body.offsetHeight;}};}})();</script>"
+        "<div style=\"position:fixed;top:{top_pct:.2}%;left:{left_pct:.2}%;transform:translate(-50%,-50%) scale({scale:.3}) rotate({rotation_deg:.2}deg);opacity:{opacity:.3};width:86%;text-align:center;text-wrap:balance;font-family:'{font_fam}',var(--brand-font-display),'Sora',sans-serif;font-size:{base_font_px}px;line-height:1.15;text-transform:{word_transform};\"><div style=\"{container_style}\">{words_html}</div></div><script>(function(){{const A={active_json},S={spoken_json},I={idle_json};window.__solarisSetCaptionWord=function(idx){{const spans=document.querySelectorAll('[data-word-idx]');for(const el of spans){{const i=Number(el.getAttribute('data-word-idx'));el.setAttribute('style','display:inline-block;'+(i===idx?A:(idx!==null&&i<idx?S:I)));}}void document.body.offsetHeight;}};}})();</script>"
     )
 }
 
@@ -2429,6 +2434,7 @@ mod tests {
             ffmpeg_path: None,
             ffprobe_path: None,
             chromium_path: None,
+            whisper_cli_path: None,
         };
         let tokens = solaris_core_ir::BrandPlaybook::solaris_default().tokens;
         // No overlays -> Ok(empty)

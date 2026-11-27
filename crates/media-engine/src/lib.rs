@@ -39,6 +39,7 @@ pub use probe::{ProbeSummary, parse_ffprobe_json, probe_media};
 pub use s3_storage::{S3Storage, S3StorageConfig};
 pub use storage::{AssetStorage, LocalFsStorage};
 pub use transcribe::{
-    extract_audio_for_stt, parse_whisper_json, transcribe_via_ffmpeg_whisper,
-    transcribe_via_ffmpeg_whisper_checked, validate_language_code,
+    discover_whisper_model, extract_audio_for_stt, parse_whisper_json,
+    transcribe_via_ffmpeg_whisper, transcribe_via_ffmpeg_whisper_checked,
+    transcribe_via_whisper_cli, validate_language_code,
 };

@@ -26,6 +26,7 @@ import type {
 } from "@solaris/engine-client";
 import { escapeHtml } from "@solaris/gfx-runtime";
 import { SolarisAudioEngine } from "../../lib/audioEngine";
+import { composeEffectiveGrade } from "../../lib/colorLooks";
 import { computeStudioGridLayout } from "../../lib/studioLayout";
 import {
   buildBatchDelete,
@@ -43,6 +44,7 @@ import { ExportModal } from "./ExportModal";
 import { GfxBinPanel } from "./GfxBinPanel";
 import { InspectorPanel } from "./InspectorPanel";
 import { LogsDrawer } from "./LogsDrawer";
+import { MediaBinPanel } from "./MediaBinPanel";
 import { SourceMonitor } from "./SourceMonitor";
 import { StudioHeader } from "./StudioHeader";
 import { StudioStatusBar } from "./StudioStatusBar";
@@ -153,6 +155,10 @@ export function StudioWorkspace({
   const wasSwarmActiveRef = useRef(false);
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
+  const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null);
+  const [mediaImporting, setMediaImporting] = useState(false);
+  const [transcribingMediaId, setTranscribingMediaId] = useState<string | null>(null);
+  const [autoCaptionsBusy, setAutoCaptionsBusy] = useState(false);
   const [projectManagerOpen, setProjectManagerOpen] = useState(false);
   const [scopesOpen, setScopesOpen] = useState(true);
   const [timelineHeight, setTimelineHeight] = useState(248);
@@ -161,6 +167,7 @@ export function StudioWorkspace({
   useEffect(() => {
     setSelectedClipIds([]);
     setSelectionAnchorId(null);
+    setSelectedMediaId(null);
     setViewerMode("program");
   }, [project.id]);
   const [exportModalOpen, setExportModalOpen] = useState(false);
@@ -190,6 +197,20 @@ export function StudioWorkspace({
     sig: string;
     layers: StageVisualLayer[];
   }>({ sig: "", layers: [] });
+  const upcomingLayersCacheRef = useRef<{
+    sig: string;
+    layers: StageVisualLayer[];
+  }>({ sig: "", layers: [] });
+
+  const mediaStreamUrl = useCallback(
+    (asset: MediaAsset) =>
+      client.getMediaStreamUrl(
+        project.id,
+        asset.id,
+        asset.intelligence.proxy_path ? "proxy" : "raw",
+      ),
+    [client, project.id],
+  );
 
   const showErrorToast = useCallback((err: unknown, fallback: string) => {
     const msg = typeof err === "string" ? err : err instanceof Error ? err.message : fallback;
@@ -361,9 +382,23 @@ export function StudioWorkspace({
       mediaPool: project.media_pool,
       playheadSec,
       isPlaying,
-      getStreamUrl: (mediaId) => client.getMediaStreamUrl(project.id, mediaId),
+      getStreamUrl: (mediaId) => {
+        const found = project.media_pool.find((m) => m.id === mediaId);
+        return found
+          ? mediaStreamUrl(found)
+          : client.getMediaStreamUrl(project.id, mediaId);
+      },
     });
-  }, [client, project.id, project.tracks, project.media_pool, playheadSec, isPlaying, ticketVersion]);
+  }, [
+    client,
+    mediaStreamUrl,
+    project.id,
+    project.tracks,
+    project.media_pool,
+    playheadSec,
+    isPlaying,
+    ticketVersion,
+  ]);
 
   // Sample real Web Audio AnalyserNode levels during playback for BroadcastScopes
   useEffect(() => {
@@ -418,8 +453,13 @@ export function StudioWorkspace({
   }, [activityLog]);
 
   const selectedMedia = useMemo(
-    () => project.media_pool[0] ?? null,
-    [project.media_pool],
+    () =>
+      (selectedMediaId
+        ? project.media_pool.find((m) => m.id === selectedMediaId)
+        : null) ??
+      project.media_pool[0] ??
+      null,
+    [project.media_pool, selectedMediaId],
   );
 
   const selectedClips = useMemo(
@@ -431,6 +471,12 @@ export function StudioWorkspace({
     if (selectedClips.length !== 1) return null;
     return { trackId: selectedClips[0].trackId, clip: selectedClips[0].clip };
   }, [selectedClips]);
+
+  const selectedMediaKind = useMemo(() => {
+    if (!selectedClip || selectedClip.clip.payload.kind !== "media") return null;
+    const mid = selectedClip.clip.payload.media_id;
+    return project.media_pool.find((m) => m.id === mid)?.kind ?? null;
+  }, [selectedClip, project.media_pool]);
 
   const hasTimelineClips = useMemo(
     () => project.tracks.some((t) => t.clips.length > 0),
@@ -490,7 +536,7 @@ export function StudioWorkspace({
         const mediaId = clip.payload.media_id;
         const found = project.media_pool.find((m) => m.id === mediaId);
         if (found) {
-          const url = found.path ? client.getMediaStreamUrl(project.id, found.id) : null;
+          const url = found.path ? mediaStreamUrl(found) : null;
           const tr = clip.transform;
           const rf = tr.smart_reframe;
           sigParts.push(
@@ -512,8 +558,48 @@ export function StudioWorkspace({
     activeVisualLayersCacheRef.current = { sig, layers };
     return layers;
   }, [
-    client,
-    project.id,
+    mediaStreamUrl,
+    project.tracks,
+    project.media_pool,
+    playheadSec,
+    isVisualTrackActive,
+    ticketVersion,
+  ]);
+
+  const upcomingLayers = useMemo<StageVisualLayer[]>(() => {
+    const layers: StageVisualLayer[] = [];
+    const sigParts: string[] = [String(ticketVersion)];
+    const seenMediaIds = new Set<string>(
+      activeVisualLayers.map((layer) => layer.media.id),
+    );
+    for (const trackId of ["v1", "v2"] as const) {
+      if (!isVisualTrackActive(trackId)) continue;
+      const track = project.tracks.find((t) => t.id === trackId);
+      if (!track) continue;
+      for (const clip of track.clips) {
+        if (clip.start_sec <= playheadSec || clip.start_sec > playheadSec + 3.0) continue;
+        if (clip.payload.kind !== "media") continue;
+        const mediaId = clip.payload.media_id;
+        if (seenMediaIds.has(mediaId)) continue;
+        const found = project.media_pool.find((m) => m.id === mediaId);
+        if (!found || found.kind !== "video" || !found.path) continue;
+        seenMediaIds.add(mediaId);
+        const url = mediaStreamUrl(found);
+        sigParts.push(`${trackId}:${clip.id}:${url}`);
+        layers.push({ trackId, clip, media: found, url });
+        if (layers.length >= 4) break;
+      }
+      if (layers.length >= 4) break;
+    }
+    const sig = sigParts.join("|");
+    if (sig === upcomingLayersCacheRef.current.sig) {
+      return upcomingLayersCacheRef.current.layers;
+    }
+    upcomingLayersCacheRef.current = { sig, layers };
+    return layers;
+  }, [
+    activeVisualLayers,
+    mediaStreamUrl,
     project.tracks,
     project.media_pool,
     playheadSec,
@@ -578,11 +664,14 @@ export function StudioWorkspace({
 
   // Effective stage grade: stable reference across 60fps playback ticks, immediately reflects live draftGrade previews
   const effectiveStageGrade = useMemo<ColorGrade>(() => {
-    if (!draftGrade.lut_path && activeBrand?.default_lut) {
-      return { ...draftGrade, lut_path: activeBrand.default_lut };
+    const composed = activeFxClip
+      ? composeEffectiveGrade(project.active_grade, draftGrade)
+      : draftGrade;
+    if (!composed.lut_path && activeBrand?.default_lut) {
+      return { ...composed, lut_path: activeBrand.default_lut };
     }
-    return draftGrade;
-  }, [draftGrade, activeBrand?.default_lut]);
+    return composed;
+  }, [activeFxClip, project.active_grade, draftGrade, activeBrand?.default_lut]);
 
   // Resolve 3D LUT from effectiveStageGrade (supports custom FX clip LUTs + brand default_lut)
   useEffect(() => {
@@ -752,6 +841,148 @@ export function StudioWorkspace({
     }
   };
 
+  const handleImportMediaFiles = async (files: File[]) => {
+    if (files.length === 0 || mediaImporting) return;
+    setMediaImporting(true);
+    try {
+      const existingIds = new Set(project.media_pool.map((m) => m.id));
+      await client.importMediaFiles(project.id, files);
+      const updated = await client.getProject(project.id);
+      onProjectUpdate(updated);
+      const firstNew = updated.media_pool.find((m) => !existingIds.has(m.id));
+      if (firstNew && !selectedMediaId) {
+        setSelectedMediaId(firstNew.id);
+      }
+      showStatusToast(`Imported ${files.length} media file(s)`);
+    } catch (err) {
+      showErrorToast(err, "Failed to import media");
+    } finally {
+      setMediaImporting(false);
+    }
+  };
+
+  const handleUpdateMediaRole = async (mediaId: string, roleHint: string) => {
+    try {
+      await client.updateMediaRole(project.id, mediaId, roleHint);
+      const updated = await client.getProject(project.id);
+      onProjectUpdate(updated);
+    } catch (err) {
+      showErrorToast(err, "Failed to update media role");
+    }
+  };
+
+  const handleDeleteMedia = async (mediaId: string) => {
+    try {
+      const updated = await client.deleteMedia(project.id, mediaId);
+      onProjectUpdate(updated);
+      if (selectedMediaId === mediaId) {
+        setSelectedMediaId(null);
+      }
+    } catch (err) {
+      showErrorToast(err, "Failed to remove media");
+    }
+  };
+
+  const handleTranscribeMedia = async (mediaId: string) => {
+    setTranscribingMediaId(mediaId);
+    try {
+      const res = await client.transcribeMedia(project.id, mediaId);
+      const updated = await client.getProject(project.id);
+      onProjectUpdate(updated);
+      showStatusToast(`Transcribed ${res.word_count} words`);
+    } catch (err) {
+      showErrorToast(err, "Transcription failed");
+    } finally {
+      setTranscribingMediaId((cur) => (cur === mediaId ? null : cur));
+    }
+  };
+
+  const handleAutoCaptions = async (media?: MediaAsset, preset?: CaptionPreset) => {
+    if (autoCaptionsBusy) return;
+    setAutoCaptionsBusy(true);
+    try {
+      const isSpeechCapable = (m: MediaAsset) =>
+        m.kind === "audio" || (m.kind === "video" && m.intelligence.has_audio !== false);
+
+      if (media) {
+        if (media.intelligence.transcript.length === 0) {
+          setTranscribingMediaId(media.id);
+          try {
+            const stt = await client.transcribeMedia(project.id, media.id);
+            if (stt.word_count === 0) {
+              showErrorToast(
+                `No spoken words detected in '${media.name}'.`,
+                "Auto Captions",
+              );
+              return;
+            }
+          } finally {
+            setTranscribingMediaId((cur) => (cur === media.id ? null : cur));
+          }
+        }
+        const res = await client.generateCaptions(project.id, {
+          media_id: media.id,
+          preset,
+        });
+        const updated = await client.getProject(project.id);
+        onProjectUpdate(updated);
+        showStatusToast(`Placed ${res.placed_count} caption burst(s) on T1`);
+        return;
+      }
+
+      const placedIds = new Set<string>();
+      for (const tid of ["v1", "a1"]) {
+        const tr = project.tracks.find((t) => t.id === tid);
+        for (const clip of tr?.clips ?? []) {
+          if (clip.payload.kind === "media") placedIds.add(clip.payload.media_id);
+        }
+      }
+      const placedTargets = project.media_pool.filter(
+        (m) => placedIds.has(m.id) && isSpeechCapable(m),
+      );
+      const hasPlacedTargets = placedTargets.length > 0;
+      const targets = hasPlacedTargets
+        ? placedTargets
+        : project.media_pool.filter(isSpeechCapable).slice(0, 1);
+
+      if (targets.length === 0) {
+        showErrorToast("No speech-capable video or audio asset found in project.", "Auto Captions");
+        return;
+      }
+
+      let hasTranscript = false;
+      for (const target of targets) {
+        if (target.intelligence.transcript.length > 0) {
+          hasTranscript = true;
+          continue;
+        }
+        setTranscribingMediaId(target.id);
+        try {
+          const stt = await client.transcribeMedia(project.id, target.id);
+          if (stt.word_count > 0) hasTranscript = true;
+        } finally {
+          setTranscribingMediaId((cur) => (cur === target.id ? null : cur));
+        }
+      }
+      if (!hasTranscript) {
+        showErrorToast("No spoken words detected in speech assets.", "Auto Captions");
+        return;
+      }
+
+      const res = await client.generateCaptions(
+        project.id,
+        hasPlacedTargets ? { preset } : { media_id: targets[0].id, preset },
+      );
+      const updated = await client.getProject(project.id);
+      onProjectUpdate(updated);
+      showStatusToast(`Placed ${res.placed_count} caption burst(s) on T1`);
+    } catch (err) {
+      showErrorToast(err, "Failed to generate captions");
+    } finally {
+      setAutoCaptionsBusy(false);
+    }
+  };
+
   const handleAddMediaToTimeline = async (
     item: MediaAsset,
     targetTrackId?: string,
@@ -787,6 +1018,17 @@ export function StudioWorkspace({
     );
     const clipId = `clip-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 
+    const isSfx = item.kind === "audio" && item.role_hint === "sfx";
+    const projAspect = project.canvas.width / Math.max(1, project.canvas.height);
+    const shouldReframe =
+      Boolean(item.intelligence.width && item.intelligence.height) &&
+      Math.abs(
+        (item.intelligence.width ?? 1) /
+          Math.max(1, item.intelligence.height ?? 1) /
+          projAspect -
+          1,
+      ) > 0.2;
+
     try {
       const res = await client.applyOp(
         project.id,
@@ -805,17 +1047,22 @@ export function StudioWorkspace({
               scale: 1,
               rotation_deg: 0,
               opacity: 1,
-              smart_reframe:
-                project.canvas.aspect_preset === "vertical9x16"
-                  ? item.intelligence.default_reframe ?? null
-                  : null,
+              smart_reframe: shouldReframe
+                ? item.intelligence.default_reframe ?? null
+                : null,
             },
             audio: {
-              gain_db: trackId === "a2" ? -14 : trackId === "v2" ? -99 : 0,
-              ducking_enabled: trackId === "a2",
+              gain_db: isSfx
+                ? 0
+                : trackId === "a2"
+                  ? -14
+                  : trackId === "v2"
+                    ? -99
+                    : 0,
+              ducking_enabled: trackId === "a2" && !isSfx,
               duck_target_db: -18,
-              fade_in_sec: trackId === "a2" ? 0.25 : 0,
-              fade_out_sec: trackId === "a2" ? 0.6 : 0,
+              fade_in_sec: trackId === "a2" && !isSfx ? 0.25 : 0,
+              fade_out_sec: trackId === "a2" && !isSfx ? 0.6 : 0,
             },
             payload: {
               kind: "media",
@@ -1155,6 +1402,99 @@ export function StudioWorkspace({
     }
   };
 
+  const handleApplyStyleToAllCaptions = async (style: {
+    preset?: CaptionPreset;
+    font_family?: string;
+    highlight_color?: string;
+  }) => {
+    const t1 = project.tracks.find((t) => t.id === "t1");
+    if (!t1) return;
+    const commands: TimelineCommand[] = [];
+    for (const clip of t1.clips) {
+      if (clip.payload.kind !== "caption") continue;
+      commands.push({
+        type: "update_caption_clip",
+        track_id: "t1",
+        clip_id: clip.id,
+        caption: {
+          ...clip.payload.caption,
+          ...(style.preset !== undefined ? { preset: style.preset } : {}),
+          ...(style.font_family !== undefined ? { font_family: style.font_family } : {}),
+          ...(style.highlight_color !== undefined
+            ? { highlight_color: style.highlight_color }
+            : {}),
+        },
+      });
+    }
+    if (commands.length === 0) return;
+    await handleApplyBatchCommand({
+      type: "batch",
+      commands,
+      summary: "Updated caption style on T1",
+    });
+  };
+
+  const handleAddFxGradeClip = async () => {
+    const clipId = `fx-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const startSec = Number(Math.max(0, playheadSec).toFixed(2));
+    const durationSec = Number(
+      Math.min(4, Math.max(1, totalDurationSec - startSec)).toFixed(2),
+    );
+    try {
+      const res = await client.applyOp(
+        project.id,
+        {
+          type: "place_clip",
+          track_id: "fx",
+          clip: {
+            id: clipId,
+            label: "FX Grade",
+            start_sec: startSec,
+            duration_sec: durationSec,
+            source_in_sec: 0,
+            transform: {
+              x: 0,
+              y: 0,
+              scale: 1,
+              rotation_deg: 0,
+              opacity: 1,
+              smart_reframe: null,
+            },
+            audio: {
+              gain_db: 0,
+              ducking_enabled: false,
+              duck_target_db: -18,
+              fade_in_sec: 0,
+              fade_out_sec: 0,
+            },
+            payload: {
+              kind: "grade",
+              grade: {
+                lift: { r: 0, g: 0, b: 0 },
+                gamma: { r: 0, g: 0, b: 0 },
+                gain: { r: 0, g: 0, b: 0 },
+                temp: 0,
+                tint: 0,
+                contrast: 1,
+                saturation: 1,
+                exposure: 0,
+                brightness: 0,
+                lut_path: null,
+                lut_intensity: 0.85,
+              },
+            },
+          },
+        },
+        { agent_id: "user", role: "user", reason: "added FX grade adjustment clip" },
+      );
+      onProjectUpdate(res.project);
+      setSelectedClipIds([clipId]);
+      setSelectionAnchorId(clipId);
+    } catch (err) {
+      showErrorToast(err, "Failed to add FX grade clip (FX track may be locked)");
+    }
+  };
+
   const handleSaveClipAsAsset = async (clip: Clip) => {
     if (clip.payload.kind !== "gfx") return;
     const html =
@@ -1437,6 +1777,27 @@ export function StudioWorkspace({
             qaError={qaError}
             swarmError={swarmError}
             activityLog={activityLog}
+            mediaCount={project.media_pool.length}
+            mediaTabContent={
+              <MediaBinPanel
+                mediaPool={project.media_pool}
+                selectedMediaId={selectedMedia?.id ?? null}
+                importing={mediaImporting}
+                transcribingId={transcribingMediaId}
+                generatingCaptions={autoCaptionsBusy}
+                onImportFiles={handleImportMediaFiles}
+                onSelectMedia={setSelectedMediaId}
+                onPreviewInSource={(id) => {
+                  setSelectedMediaId(id);
+                  setViewerMode("source");
+                }}
+                onAddToTimeline={(m) => handleAddMediaToTimeline(m)}
+                onUpdateRole={handleUpdateMediaRole}
+                onTranscribe={handleTranscribeMedia}
+                onAutoCaptions={(m) => handleAutoCaptions(m)}
+                onDeleteMedia={handleDeleteMedia}
+              />
+            }
             assetsCount={assets.length}
             assetsTabContent={
               <GfxBinPanel
@@ -1454,6 +1815,7 @@ export function StudioWorkspace({
                 onError={(msg) => showErrorToast(msg, "GFX asset operation failed")}
               />
             }
+            onAttachFiles={(files) => void handleImportMediaFiles(files)}
             onOpenLogsDrawer={() => setLogsDrawerOpen(true)}
             onStartSwarm={handleStartSwarm}
             onCancelSwarm={handleCancelSwarm}
@@ -1550,7 +1912,9 @@ export function StudioWorkspace({
               isPlaying={isPlaying}
               grade={effectiveStageGrade}
               activeLayers={activeVisualLayers}
+              upcomingLayers={upcomingLayers}
               activeGfxClips={activeGfxClips}
+              savedAssets={assets}
               activeCaptionClip={activeCaptionClip}
               brandTokens={fallbackTokens}
               brandFontCss={brandFontCss}
@@ -1564,7 +1928,7 @@ export function StudioWorkspace({
                 key={selectedMedia?.id ?? "none"}
                 media={selectedMedia}
                 streamUrl={
-                  selectedMedia?.path ? client.getMediaStreamUrl(project.id, selectedMedia.id) : null
+                  selectedMedia?.path ? mediaStreamUrl(selectedMedia) : null
                 }
                 aspectBadge={aspectBadge}
                 canvasAspect={project.canvas.width / Math.max(1, project.canvas.height)}
@@ -1625,6 +1989,11 @@ export function StudioWorkspace({
               void handleUpdateCaptionClip(trackId, clipId, caption)
             }
             onUpdateCaptionPreset={(preset) => void handleUpdateCaptionPreset(preset)}
+            onApplyStyleToAllCaptions={(style) => void handleApplyStyleToAllCaptions(style)}
+            onAutoCaptions={(preset) => handleAutoCaptions(undefined, preset)}
+            autoCaptionsBusy={autoCaptionsBusy}
+            onAddFxGradeClip={() => void handleAddFxGradeClip()}
+            selectedMediaKind={selectedMediaKind}
             onSaveClipAsAsset={handleSaveClipAsAsset}
             swarmRoleCounts={swarmRoleCounts}
           />

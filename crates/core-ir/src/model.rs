@@ -121,6 +121,8 @@ pub struct ColorGrade {
     pub saturation: f64,
     pub exposure: f64,
     #[serde(default)]
+    pub brightness: f64,
+    #[serde(default)]
     pub lut_path: Option<String>,
     pub lut_intensity: f64,
 }
@@ -136,6 +138,7 @@ impl Default for ColorGrade {
             contrast: 1.0,
             saturation: 1.0,
             exposure: 0.0,
+            brightness: 0.0,
             lut_path: None,
             lut_intensity: 0.85,
         }

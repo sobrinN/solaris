@@ -24,7 +24,7 @@ Use this skill whenever the primary spine is a human speaker on `V1` (typically 
 
 Remove dead pauses while keeping delivery natural—never chop consonants or leave `> 0.40s` gaps on `V1`:
 
-1. Read `silences` (`[{ start_sec, end_sec, duration_sec }]`) from `media.get_manifest`.
+1. Read `silences` (`[{ start_sec, end_sec }]`, computing `end_sec - start_sec` for duration) from `media.get_manifest`.
 2. **Cut threshold**: Remove any silence with `duration_sec > 0.25`.
 3. **Breath-safe pad**: Keep **`0.12s`** before speech resumes and **`0.12s`** after a phrase ends (minimum `0.24s` kept around a trimmed silence) so cuts breathe cleanly without robotic clicks.
 4. **Contiguous timeline placement**:

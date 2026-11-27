@@ -147,7 +147,10 @@ fn validate_worker_tool_scope(
     // Track-level scope enforcement for mutating timeline/audio/color tools
     let implicit_track = match norm {
         "gfx.update_clip" | "gfx.place" => Some("g1"),
-        "captions.update_clip" | "captions.set_style" => Some("t1"),
+        "captions.update_clip" | "captions.set_style" | "captions.generate_from_transcript" => {
+            Some("t1")
+        }
+        "color.place_grade_clip" => Some("fx"),
         _ => None,
     };
     if let Some(tid) = implicit_track
@@ -253,7 +256,7 @@ pub(crate) async fn build_openrouter_director_plan(
                 .intelligence
                 .transcript
                 .iter()
-                .take(200)
+                .take(400)
                 .map(|w| json!({ "w": w.word, "s": w.start_sec, "e": w.end_sec }))
                 .collect();
             json!({
@@ -261,6 +264,12 @@ pub(crate) async fn build_openrouter_director_plan(
                 "name": m.name,
                 "kind": m.kind,
                 "role_hint": m.role_hint,
+                "width": m.intelligence.width,
+                "height": m.intelligence.height,
+                "fps": m.intelligence.fps,
+                "codec": m.intelligence.codec,
+                "color_space": m.intelligence.color_space,
+                "default_reframe": m.intelligence.default_reframe,
                 "duration_sec": m.intelligence.duration_sec,
                 "is_log_footage": m.intelligence.is_log_footage,
                 "has_audio": m.intelligence.has_audio,
@@ -343,15 +352,18 @@ pub(crate) async fn build_openrouter_director_plan(
     let mut attached_native_video = false;
     let mut attached_native_audio = false;
 
-    if let Some(primary_video) = project
+    for (vid_idx, video_asset) in project
         .media_pool
         .iter()
-        .find(|m| m.kind == MediaKind::Video && !m.path.is_empty())
+        .filter(|m| m.kind == MediaKind::Video && !m.path.is_empty())
+        .take(3)
+        .enumerate()
     {
-        if supports_native_video {
+        let mut attached_this_video_native = false;
+        if vid_idx == 0 && supports_native_video {
             let proxy_res = tokio::select! {
                 _ = cancel.cancelled() => return Err(AgentError::Cancelled),
-                r = backend.prepare_llm_video_proxy(&project.id, &primary_video.id, MAX_LLM_VIDEO_PROXY_BYTES) => r,
+                r = backend.prepare_llm_video_proxy(&project.id, &video_asset.id, MAX_LLM_VIDEO_PROXY_BYTES) => r,
             };
             if let Ok(Some(video_b64)) = proxy_res {
                 parts.push(ContentPart::VideoUrl {
@@ -360,11 +372,12 @@ pub(crate) async fn build_openrouter_director_plan(
                     },
                 });
                 attached_native_video = true;
+                attached_this_video_native = true;
             }
         }
 
-        if !attached_native_video {
-            let dur = primary_video.intelligence.duration_sec.max(1.0);
+        if !attached_this_video_native {
+            let dur = video_asset.intelligence.duration_sec.max(1.0);
             let ts = vec![
                 0.4,
                 (dur * 0.45).min(dur - 0.1),
@@ -372,7 +385,7 @@ pub(crate) async fn build_openrouter_director_plan(
             ];
             let kf_res = tokio::select! {
                 _ = cancel.cancelled() => return Err(AgentError::Cancelled),
-                r = backend.extract_keyframes(&project.id, &primary_video.id, ts) => r,
+                r = backend.extract_keyframes(&project.id, &video_asset.id, ts) => r,
             };
             if let Ok(frames) = kf_res {
                 for kf in frames.into_iter().take(3) {
@@ -842,11 +855,24 @@ pub(crate) async fn run_llm_worker_loop(
         .media_pool
         .iter()
         .map(|m| {
+            let transcript_preview: Vec<serde_json::Value> = m
+                .intelligence
+                .transcript
+                .iter()
+                .take(250)
+                .map(|w| json!({ "w": w.word, "s": w.start_sec, "e": w.end_sec }))
+                .collect();
             json!({
                 "id": m.id,
                 "name": m.name,
                 "kind": m.kind,
                 "role_hint": m.role_hint,
+                "width": m.intelligence.width,
+                "height": m.intelligence.height,
+                "fps": m.intelligence.fps,
+                "codec": m.intelligence.codec,
+                "color_space": m.intelligence.color_space,
+                "default_reframe": m.intelligence.default_reframe,
                 "duration_sec": m.intelligence.duration_sec,
                 "is_log_footage": m.intelligence.is_log_footage,
                 "has_audio": m.intelligence.has_audio,
@@ -855,6 +881,7 @@ pub(crate) async fn run_llm_worker_loop(
                 "scene_cuts": m.intelligence.scene_cuts.iter().take(32).copied().collect::<Vec<_>>(),
                 "integrated_lufs": m.intelligence.integrated_lufs,
                 "transcript_words": m.intelligence.transcript.len(),
+                "transcript": transcript_preview,
             })
         })
         .collect();
@@ -921,11 +948,23 @@ pub(crate) async fn run_llm_worker_loop(
             _ => String::new(),
         }
     } else {
-        String::new()
+        match role {
+            AgentRole::Gfx => "\n\n## FOOTAGE OVERLAY GFX MODE\n\
+                 Real camera footage is playing on V1/V2! Your `G1` overlays sit ON TOP of the video.\n\
+                 - **TRANSPARENT BACKGROUNDS ONLY**: Always set `html, body { background: transparent !important; }` and NEVER paint an opaque full-screen backdrop covering the video unless the user explicitly requested a full-screen title card/intertitle.\n\
+                 - Design crisp lower-thirds, speaker nameplates, song/topic badges, or kinetic callouts that stay clear of faces and `T1` captions (`6vh..58vh` or upper/corner safe zones in 9:16), using `window.gsap` (pre-loaded offline) or CSS `@keyframes`.\n\
+                 - Keep each inline HTML overlay compact (~1.5-3 KB) and call `gfx_place` directly."
+                .to_string(),
+            AgentRole::Grade => "\n\n## FOOTAGE COLOR GRADE MODE\n\
+                 Call `color_get_scope_stats` and `preview_capture_frame` on active V1 timestamps to inspect the actual footage before grading.\n\
+                 - Adjust `exposure`, `brightness`, `contrast`, `saturation`, `temp`, `tint`, and `lift`/`gamma`/`gain` with restraint. Use `color_place_grade_clip` on `fx` if different scenes need different grades."
+                .to_string(),
+            _ => String::new(),
+        }
     };
 
     let mode_override = if mode == SwarmRunMode::Refine {
-        "\n\n## REFINEMENT MODE OVERRIDE\nYou are refining an EXISTING timeline. Only invoke your provided edit-in-place tools (e.g. `gfx_update_clip`, `captions_update_clip`, `timeline_trim_clip`, `timeline_delete_clip`, `timeline_set_transform`, `color_set_grade`, `audio_set_mix`). Ignore any skill instructions that ask to place new clips, regenerate tracks, or lock/unlock tracks."
+        "\n\n## REFINEMENT / EDIT-EXISTING-CUT MODE\nYou are editing an EXISTING timeline cut. Preserve existing clips unless the user asked to change or remove them; edit existing clips by clip id when modifying them, and add newly requested elements cleanly on your tracks without duplicating existing clips."
     } else {
         " Track locking and pre-edit keyframe scouting are handled automatically by the runtime; only call tools present in your provided tool schema."
     };
@@ -2038,6 +2077,16 @@ mod tests {
                 &["g1"],
                 refine
             )
+            .is_ok()
+        );
+        assert!(
+            validate_worker_tool_scope(
+                AgentRole::Gfx,
+                "assets_save",
+                &json!({"project_id": "p1", "id": "a1"}),
+                &["g1"],
+                refine
+            )
             .is_err()
         );
         assert!(
@@ -2048,7 +2097,7 @@ mod tests {
                 &["t1"],
                 refine
             )
-            .is_err()
+            .is_ok()
         );
         assert!(
             validate_worker_tool_scope(
@@ -2060,6 +2109,47 @@ mod tests {
             )
             .is_ok()
         );
+        let fx_args = json!({
+            "project_id": "p1",
+            "clip_id": "fx1",
+            "start_sec": 0.0,
+            "duration_sec": 4.0
+        });
+        for mode in [SwarmRunMode::Generate, SwarmRunMode::Refine] {
+            assert!(
+                validate_worker_tool_scope(
+                    AgentRole::Grade,
+                    "color_place_grade_clip",
+                    &fx_args,
+                    &["fx"],
+                    mode
+                )
+                .is_ok(),
+                "{mode:?}"
+            );
+            assert!(
+                validate_worker_tool_scope(
+                    AgentRole::Grade,
+                    "color_place_grade_clip",
+                    &fx_args,
+                    &["v1"],
+                    mode
+                )
+                .is_err(),
+                "{mode:?}"
+            );
+            assert!(
+                validate_worker_tool_scope(
+                    AgentRole::Gfx,
+                    "color_place_grade_clip",
+                    &fx_args,
+                    &["fx", "g1"],
+                    mode
+                )
+                .is_err(),
+                "{mode:?}"
+            );
+        }
     }
 
     #[test]

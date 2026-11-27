@@ -121,17 +121,26 @@ pub async fn import_media(
                 .await
                 .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
+        let mut requested_role_hint: Option<String> = None;
         while let Some(field) = multipart
             .next_field()
             .await
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
         {
-            let file_name = field
-                .file_name()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("upload-{}.bin", Uuid::new_v4()));
+            let field_name = field.name().unwrap_or("").to_string();
+            let Some(raw_file_name) = field.file_name().map(|s| s.to_string()) else {
+                if field_name == "role_hint"
+                    && let Ok(text) = field.text().await
+                {
+                    let trimmed = text.trim().to_string();
+                    if !trimmed.is_empty() {
+                        requested_role_hint = Some(trimmed);
+                    }
+                }
+                continue;
+            };
             let media_id = Uuid::new_v4().to_string();
-            let safe_name = sanitize_file_name(&file_name);
+            let safe_name = sanitize_file_name(&raw_file_name);
             let rel_key = format!("uploads/{id}/{media_id}_{safe_name}");
             let saved_path =
                 stream_multipart_field_to_workspace(&state.inner.workspace_dir, &rel_key, field)
@@ -146,11 +155,14 @@ pub async fn import_media(
                     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
             let kind = infer_media_kind(&safe_name);
+            let role_hint = requested_role_hint
+                .clone()
+                .unwrap_or_else(|| infer_default_role_hint(kind, &safe_name).to_string());
             let asset = MediaAsset {
                 id: media_id,
                 name: safe_name,
                 kind,
-                role_hint: default_role_hint(kind).to_string(),
+                role_hint,
                 path: synced_path,
                 added_at: Utc::now(),
                 intelligence: MediaIntelligenceManifest::default(),
@@ -187,11 +199,11 @@ pub async fn import_media(
             let kind = infer_media_kind(&name);
             let asset = MediaAsset {
                 id: Uuid::new_v4().to_string(),
-                name,
+                name: name.clone(),
                 kind,
                 role_hint: item
                     .role_hint
-                    .unwrap_or_else(|| default_role_hint(kind).to_string()),
+                    .unwrap_or_else(|| infer_default_role_hint(kind, &name).to_string()),
                 path: resolved.to_string_lossy().to_string(),
                 added_at: Utc::now(),
                 intelligence: MediaIntelligenceManifest::default(),
@@ -284,9 +296,53 @@ pub async fn delete_media(
                 }
             }
         }
+        let proxies_dir = state.inner.workspace_dir.join("proxies");
+        let proxy_file = proxies_dir.join(&id).join(format!("{media_id}.mp4"));
+        if let Ok(canon_proxies) = tokio::fs::canonicalize(&proxies_dir).await
+            && let Ok(canon_proxy) = tokio::fs::canonicalize(&proxy_file).await
+            && canon_proxy.starts_with(&canon_proxies)
+        {
+            let _ = tokio::fs::remove_file(canon_proxy).await;
+        }
     }
 
     Ok(Json(project))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateMediaRoleRequest {
+    pub role_hint: String,
+}
+
+pub async fn update_media_role(
+    State(state): State<AppState>,
+    AxumPath((id, media_id)): AxumPath<(String, String)>,
+    Json(req): Json<UpdateMediaRoleRequest>,
+) -> Result<Json<solaris_core_ir::OpResult>, (StatusCode, String)> {
+    validate_safe_id(&id)?;
+    validate_safe_id(&media_id)?;
+
+    let (result, project_snapshot) = {
+        let mut guard = state.inner.projects.write().await;
+        let engine = guard
+            .get_mut(&id)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("project '{id}' not found")))?;
+        let (res, event) = engine
+            .apply(
+                TimelineCommand::UpdateMediaRole {
+                    media_id,
+                    role_hint: req.role_hint,
+                },
+                CommandMeta::default(),
+            )
+            .map_err(map_core_error)?;
+        let snapshot = engine.project().clone();
+        state.emit(event);
+        (res, snapshot)
+    };
+
+    state.persist_project_locked(&project_snapshot).await;
+    Ok(Json(result))
 }
 
 pub fn spawn_media_analysis_task(
@@ -598,11 +654,32 @@ fn infer_media_kind(name: &str) -> MediaKind {
     }
 }
 
-fn default_role_hint(kind: MediaKind) -> &'static str {
+fn infer_default_role_hint(kind: MediaKind, name: &str) -> &'static str {
     match kind {
         MediaKind::Video => "a_roll",
         MediaKind::Image => "b_roll",
-        MediaKind::Audio => "audio",
+        MediaKind::Audio => {
+            let lower = name.to_ascii_lowercase();
+            if lower.contains("voice")
+                || lower.contains("vo_")
+                || lower.contains("_vo")
+                || lower.contains("narration")
+                || lower.contains("speech")
+                || lower.contains("mic")
+                || lower.contains("dialog")
+            {
+                "voice"
+            } else if lower.contains("sfx")
+                || lower.contains("whoosh")
+                || lower.contains("riser")
+                || lower.contains("hit")
+                || lower.contains("boom")
+            {
+                "sfx"
+            } else {
+                "music"
+            }
+        }
         MediaKind::Document => "reference",
     }
 }

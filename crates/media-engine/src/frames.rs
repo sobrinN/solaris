@@ -559,6 +559,7 @@ mod tests {
     fn builds_grade_preview_vf_matching_export_math_and_unquoted_lut() {
         let grade = ColorGrade {
             exposure: 1.0,
+            brightness: 0.12,
             temp: 0.5,
             tint: -0.25,
             contrast: 1.1,
@@ -573,10 +574,11 @@ mod tests {
         )
         .unwrap();
         assert!(vf.contains("scale='min(640,iw)':-2"));
-        assert!(vf.contains("brightness=0.150"));
-        assert!(vf.contains("rm=0.090"));
-        assert!(vf.contains("gm=-0.040"));
-        assert!(vf.contains("bm=-0.090"));
+        assert!(vf.contains("exposure=exposure=1.000"));
+        assert!(vf.contains("brightness=0.120"));
+        assert!(vf.contains("rm=0.080"));
+        assert!(vf.contains("gm=-0.035"));
+        assert!(vf.contains("bm=-0.080"));
         assert!(vf.contains("lut3d=file=/tmp/o\\\\\\'reilly/look\\\\:1\\,2\\[a\\].cube"));
         assert!(!vf.contains("lut3d=file='"));
     }

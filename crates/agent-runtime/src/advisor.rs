@@ -227,7 +227,16 @@ impl ModelAdvisor {
         }
 
         if let Some(models) = catalog_opt {
-            let ranked = rank_models(&models, role);
+            let mut ranked = rank_models(&models, role);
+            if ranked.is_empty()
+                && role == ModelRoleKind::TranscriptionStt
+                && let Ok(stt_models) = self
+                    .client
+                    .list_models(None, Some("transcription"), None)
+                    .await
+            {
+                ranked = rank_models(&stt_models, role);
+            }
             if let Some(first) = ranked.first() {
                 let primary = first.id.clone();
                 let fallbacks = ranked

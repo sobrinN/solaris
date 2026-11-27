@@ -195,6 +195,7 @@ export class SolarisAudioEngine {
 
     const a1 = tracks.find((t) => t.id === "a1");
     const v1 = tracks.find((t) => t.id === "v1");
+    const v2 = tracks.find((t) => t.id === "v2");
     const a2 = tracks.find((t) => t.id === "a2");
 
     const activeSources: AudioBusSource[] = [];
@@ -210,6 +211,7 @@ export class SolarisAudioEngine {
 
     const activeA1 = activeAt(a1);
     const activeV1 = activeAt(v1);
+    const activeV2 = activeAt(v2);
     const activeA2 = activeAt(a2);
 
     const resolvePlayableMedia = (clip: Clip): MediaAsset | null => {
@@ -254,6 +256,17 @@ export class SolarisAudioEngine {
       }
     }
 
+    for (const clip of activeV2) {
+      const asset = resolvePlayableMedia(clip);
+      if (asset) {
+        activeSources.push({
+          clip,
+          bus: "music",
+          streamUrl: getStreamUrl(asset.id),
+        });
+      }
+    }
+
     for (const clip of activeA2) {
       const asset = resolvePlayableMedia(clip);
       if (asset) {
@@ -276,8 +289,8 @@ export class SolarisAudioEngine {
         }
         if (!slot.el.paused) slot.el.pause();
         // Garbage-collect slots removed from timeline
-        const stillInTimeline = audioTracks.some((t) =>
-          t.clips.some((c) => c.id === clipId),
+        const stillInTimeline = [a1, a2, v1, v2].some((t) =>
+          t?.clips.some((c) => c.id === clipId),
         );
         if (!stillInTimeline) {
           this.destroySlot(clipId);
@@ -324,7 +337,7 @@ export class SolarisAudioEngine {
         slot.pendingSeekSec = targetSec;
       } else if (
         !slot.el.seeking &&
-        Math.abs(slot.el.currentTime - targetSec) > 0.22
+        Math.abs(slot.el.currentTime - targetSec) > 0.10
       ) {
         slot.pendingSeekSec = null;
         try {

@@ -1,13 +1,18 @@
 use std::path::Path;
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use reqwest::multipart::{Form, Part};
 use solaris_core_ir::TranscriptWord;
 use solaris_media_engine::parse_whisper_json;
 
 use crate::advisor::{ModelAdvisor, ModelRoleKind};
 use crate::error::AgentError;
-use crate::openrouter::{OpenRouterClient, backoff_delay_ms, parse_retry_after, truncate_msg};
+use crate::openrouter::{
+    ChatMessage, ChatRequest, ContentPart, InputAudioPayload, OpenRouterClient, backoff_delay_ms,
+    parse_retry_after, truncate_msg,
+};
 
 const MAX_STT_BYTES: u64 = 25 * 1024 * 1024; // 25 MB OpenRouter STT limit
 
@@ -59,21 +64,55 @@ pub async fn transcribe_audio_openrouter(
         }
     }
 
-    let cfg = client.config();
-    let url = format!("{}/audio/transcriptions", cfg.base_url);
-    let timeout = Duration::from_secs(cfg.timeout_secs.max(30));
+    let timeout = Duration::from_secs(client.config().timeout_secs.max(30));
     let cleaned_lang = language
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
+    if let Ok(words) = transcribe_via_multipart_stt(
+        client,
+        &models,
+        &bytes,
+        &file_name,
+        mime,
+        cleaned_lang.as_deref(),
+        timeout,
+    )
+    .await
+        && !words.is_empty()
+    {
+        return Ok(words);
+    }
+
+    transcribe_audio_via_chat_input_audio(
+        client,
+        advisor,
+        &bytes,
+        audio_path,
+        cleaned_lang.as_deref(),
+    )
+    .await
+}
+
+async fn transcribe_via_multipart_stt(
+    client: &OpenRouterClient,
+    models: &[String],
+    bytes: &[u8],
+    file_name: &str,
+    mime: &str,
+    cleaned_lang: Option<&str>,
+    timeout: Duration,
+) -> Result<Vec<TranscriptWord>, AgentError> {
+    let cfg = client.config();
+    let url = format!("{}/audio/transcriptions", cfg.base_url);
     let mut last_err: Option<AgentError> = None;
 
     for model in models {
         let mut attempt = 0u32;
         loop {
-            let file_part = Part::bytes(bytes.clone())
-                .file_name(file_name.clone())
+            let file_part = Part::bytes(bytes.to_vec())
+                .file_name(file_name.to_string())
                 .mime_str(mime)
                 .map_err(|e| AgentError::Serialization(e.to_string()))?;
 
@@ -83,8 +122,8 @@ pub async fn transcribe_audio_openrouter(
                 .text("response_format", "verbose_json")
                 .text("timestamp_granularities[]", "word");
 
-            if let Some(ref lang) = cleaned_lang {
-                form = form.text("language", lang.clone());
+            if let Some(lang) = cleaned_lang {
+                form = form.text("language", lang.to_string());
             }
 
             let headers = client.attribution_headers(true)?;
@@ -159,6 +198,99 @@ pub async fn transcribe_audio_openrouter(
     }
 
     Err(last_err.unwrap_or_else(|| AgentError::Backend("STT transcription failed".to_string())))
+}
+
+async fn transcribe_audio_via_chat_input_audio(
+    client: &OpenRouterClient,
+    advisor: &ModelAdvisor,
+    bytes: &[u8],
+    audio_path: &Path,
+    language: Option<&str>,
+) -> Result<Vec<TranscriptWord>, AgentError> {
+    let dir_rec = advisor.recommend(ModelRoleKind::DirectorMultimodal).await;
+    let mut audio_models: Vec<String> = Vec::new();
+    for cand in dir_rec.candidates {
+        if cand.input_modalities.iter().any(|m| m == "audio")
+            && !audio_models.iter().any(|existing| existing == &cand.id)
+        {
+            audio_models.push(cand.id);
+        }
+    }
+    if audio_models.is_empty() {
+        for fallback in [
+            "google/gemini-4-hydrogen",
+            "google/gemini-4-neon",
+            "xiaomi/mimo-v2.6-pro",
+        ] {
+            if !audio_models.iter().any(|m| m == fallback) {
+                audio_models.push(fallback.to_string());
+            }
+        }
+    }
+
+    let format = audio_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .filter(|s| matches!(s.as_str(), "mp3" | "wav" | "aac" | "ogg" | "flac" | "m4a"))
+        .unwrap_or_else(|| "mp3".to_string());
+
+    let lang_hint = language
+        .map(|l| format!(" Language hint: {l}."))
+        .unwrap_or_default();
+    let prompt = format!(
+        "Transcribe all spoken and sung words in this audio accurately with timestamps in seconds.{lang_hint} \
+         Output ONLY a valid raw JSON object (no markdown fences, no commentary) in this exact schema: \
+         {{\"segments\":[{{\"start\":0.0,\"end\":2.4,\"text\":\"exact words spoken\"}}]}}. \
+         Split into short natural phrases (3-8 words each) with accurate start and end times in seconds. If no speech or singing is present, return {{\"segments\":[]}}."
+    );
+
+    let b64 = BASE64.encode(bytes);
+    let req = ChatRequest {
+        model: None,
+        models: Some(audio_models.into_iter().take(3).collect()),
+        messages: vec![ChatMessage::user_parts(vec![
+            ContentPart::text(prompt),
+            ContentPart::InputAudio {
+                input_audio: InputAudioPayload { data: b64, format },
+            },
+        ])],
+        tools: None,
+        tool_choice: None,
+        provider: None,
+        reasoning: None,
+        session_id: None,
+        max_tokens: Some(4096),
+        temperature: Some(0.0),
+        response_format: None,
+        plugins: None,
+        stream: Some(true),
+    };
+
+    let resp = client.chat_stream(&req, None, |_| {}).await?;
+    let raw = resp
+        .choices
+        .first()
+        .and_then(|c| c.message.content.as_ref())
+        .map(|c| c.as_text())
+        .unwrap_or_default();
+    let stripped = strip_json_code_fence(&raw);
+    parse_whisper_json(stripped).map_err(|e| AgentError::Serialization(e.to_string()))
+}
+
+fn strip_json_code_fence(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    if let Some(after_open) = trimmed.strip_prefix("```") {
+        let after_lang = after_open
+            .find('\n')
+            .map(|idx| &after_open[idx + 1..])
+            .unwrap_or(after_open);
+        if let Some(before_close) = after_lang.strip_suffix("```") {
+            return before_close.trim();
+        }
+        return after_lang.trim();
+    }
+    trimmed
 }
 
 fn infer_stt_mime(path: &Path) -> Result<&'static str, AgentError> {

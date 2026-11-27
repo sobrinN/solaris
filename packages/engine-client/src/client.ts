@@ -7,6 +7,7 @@ import type {
   AssetRestoreResponse,
   BrandPlaybook,
   BrandReferenceKind,
+  CaptionPreset,
   CodeAssetPackManifest,
   CommandMeta,
   CreativePlan,
@@ -326,10 +327,21 @@ export class SolarisEngineClient {
     );
   }
 
-  getMediaStreamUrl(projectId: string, mediaId: string): string {
-    return this.appendTicket(
-      `${this.baseUrl}/api/v1/projects/${encodeURIComponent(projectId)}/media/${encodeURIComponent(mediaId)}/stream`,
+  updateMediaRole(projectId: string, mediaId: string, roleHint: string): Promise<OpResult> {
+    return this.request<OpResult>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/media/${encodeURIComponent(mediaId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role_hint: roleHint }),
+      },
     );
+  }
+
+  getMediaStreamUrl(projectId: string, mediaId: string, cacheKey?: string): string {
+    const base = `${this.baseUrl}/api/v1/projects/${encodeURIComponent(projectId)}/media/${encodeURIComponent(mediaId)}/stream`;
+    const url = cacheKey ? `${base}?v=${encodeURIComponent(cacheKey)}` : base;
+    return this.appendTicket(url);
   }
 
   getGfxSandboxUrl(sandboxId: string): string {
@@ -625,6 +637,20 @@ export class SolarisEngineClient {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ language }),
+      },
+    );
+  }
+
+  generateCaptions(
+    projectId: string,
+    req?: { media_id?: string; preset?: CaptionPreset; words_per_burst?: number },
+  ): Promise<{ placed_count: number }> {
+    return this.request<{ placed_count: number }>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/captions/generate`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req ?? {}),
       },
     );
   }

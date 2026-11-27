@@ -128,7 +128,6 @@ export function SourceMonitor({
             }}
             className="h-full w-full object-contain"
             controls
-            muted
           />
         ) : media?.kind === "image" && streamUrl ? (
           <img

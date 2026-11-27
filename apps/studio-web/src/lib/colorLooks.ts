@@ -122,6 +122,7 @@ export function applyColorLook(
     contrast: preset.grade.contrast,
     saturation: preset.grade.saturation,
     exposure: preset.grade.exposure,
+    brightness: 0,
     lut_path: current.lut_path ?? null,
     lut_intensity: current.lut_intensity,
   };
@@ -140,6 +141,7 @@ export function matchingColorLookId(grade: ColorGrade): string | null {
       approxEq(grade.contrast, g.contrast) &&
       approxEq(grade.saturation, g.saturation) &&
       approxEq(grade.exposure, g.exposure) &&
+      approxEq(grade.brightness ?? 0, g.brightness ?? 0) &&
       approxEq(grade.lift.r, g.lift.r) &&
       approxEq(grade.lift.g, g.lift.g) &&
       approxEq(grade.lift.b, g.lift.b) &&
@@ -154,6 +156,43 @@ export function matchingColorLookId(grade: ColorGrade): string | null {
     }
   }
   return null;
+}
+
+/**
+ * Composes an active FX adjustment-layer grade on top of the project's base grade,
+ * matching `crates/server/src/backend.rs` and `crates/media-engine/src/export.rs`.
+ */
+export function composeEffectiveGrade(
+  base: ColorGrade,
+  fx: ColorGrade | null,
+): ColorGrade {
+  if (!fx) return base;
+  const fxLut = fx.lut_path?.trim() ? fx.lut_path : null;
+  return {
+    lift: {
+      r: base.lift.r + fx.lift.r,
+      g: base.lift.g + fx.lift.g,
+      b: base.lift.b + fx.lift.b,
+    },
+    gamma: {
+      r: base.gamma.r + fx.gamma.r,
+      g: base.gamma.g + fx.gamma.g,
+      b: base.gamma.b + fx.gamma.b,
+    },
+    gain: {
+      r: base.gain.r + fx.gain.r,
+      g: base.gain.g + fx.gain.g,
+      b: base.gain.b + fx.gain.b,
+    },
+    temp: base.temp + fx.temp,
+    tint: base.tint + fx.tint,
+    contrast: base.contrast * fx.contrast,
+    saturation: base.saturation * fx.saturation,
+    exposure: base.exposure + fx.exposure,
+    brightness: (base.brightness ?? 0) + (fx.brightness ?? 0),
+    lut_path: fxLut ?? base.lut_path ?? null,
+    lut_intensity: fxLut ? fx.lut_intensity : base.lut_intensity,
+  };
 }
 
 /**

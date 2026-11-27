@@ -832,13 +832,14 @@ mod tests {
             "solaris://project/{project_id}"
         );
         assert_eq!(anchor_for_tool("color.set_grade"), "color.inspector");
+        assert_eq!(anchor_for_tool("color.place_grade_clip"), "color.inspector");
         assert_eq!(anchor_for_tool("audio.enable_ducking"), "audio.mixer");
 
         let tools = server
             .handle_json_str(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#)
             .await
             .unwrap();
-        assert_eq!(tools.result.unwrap()["tools"].as_array().unwrap().len(), 36);
+        assert_eq!(tools.result.unwrap()["tools"].as_array().unwrap().len(), 37);
 
         let skill = server
             .handle_json_str(

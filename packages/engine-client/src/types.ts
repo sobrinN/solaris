@@ -59,6 +59,7 @@ export interface ColorGrade {
   contrast: number;
   saturation: number;
   exposure: number;
+  brightness?: number;
   lut_path?: string | null;
   lut_intensity: number;
 }
@@ -359,6 +360,10 @@ export interface AgentStatusResponse {
   openrouter_configured: boolean;
   default_model?: string | null;
   has_whisper_filter: boolean;
+  whisper_cli_available?: boolean;
+  whisper_model_ready?: boolean;
+  stt_ready?: boolean;
+  stt_backend?: string;
   mcp_http_path: string;
   skills_count: number;
 }
@@ -488,6 +493,8 @@ export interface ToolchainCapabilities {
   ffmpeg_version?: string | null;
   hw_encoders: string[];
   has_whisper_filter: boolean;
+  whisper_cli_available?: boolean;
+  whisper_model_ready?: boolean;
 }
 
 export interface HealthResponse {
@@ -589,6 +596,8 @@ export type TimelineCommand =
       locked?: boolean;
     }
   | { type: "set_brand_playbook"; brand_playbook_id: string }
+  | { type: "set_canvas"; canvas: CanvasConfig }
+  | { type: "update_media_role"; media_id: string; role_hint: string }
   | { type: "batch"; commands: TimelineCommand[]; summary?: string };
 
 export interface OpResult {

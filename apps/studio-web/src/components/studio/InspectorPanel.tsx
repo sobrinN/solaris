@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, BookmarkPlus } from "lucide-react";
+import { AlertTriangle, BookmarkPlus, Captions, Loader2, Plus, Volume2, VolumeX } from "lucide-react";
 import type {
   AudioSettings,
   CaptionBlock,
   CaptionPreset,
   Clip,
   ColorGrade,
+  MediaKind,
   SavedCodeAsset,
   TimelineCommand,
   Transform2D,
@@ -54,9 +55,26 @@ interface InspectorPanelProps {
     caption: CaptionBlock,
   ) => void;
   onUpdateCaptionPreset?: (preset: CaptionPreset) => void;
+  onApplyStyleToAllCaptions?: (style: {
+    preset?: CaptionPreset;
+    font_family?: string;
+    highlight_color?: string;
+  }) => void;
+  onAutoCaptions?: (preset: CaptionPreset) => Promise<void>;
+  autoCaptionsBusy?: boolean;
+  onAddFxGradeClip?: () => void;
+  selectedMediaKind?: MediaKind | null;
   onSaveClipAsAsset: (clip: Clip) => Promise<void>;
   swarmRoleCounts: Record<string, number>;
 }
+
+const CAPTION_FONTS = [
+  "Sora",
+  "Inter",
+  "Montserrat",
+  "Space Grotesk",
+  "Bebas Neue",
+] as const;
 
 const CAPTION_PRESETS: Array<{ id: CaptionPreset; label: string }> = [
   { id: "neon_glow", label: "Neon Glow" },
@@ -93,6 +111,11 @@ export function InspectorPanel({
   onUpdateClipAudio,
   onUpdateCaptionClip,
   onUpdateCaptionPreset,
+  onApplyStyleToAllCaptions,
+  onAutoCaptions,
+  autoCaptionsBusy = false,
+  onAddFxGradeClip,
+  selectedMediaKind = null,
   onSaveClipAsAsset,
   swarmRoleCounts,
 }: InspectorPanelProps) {
@@ -248,14 +271,22 @@ export function InspectorPanel({
       .split(/\s+/)
       .filter(Boolean);
     if (tokens.length === 0) return;
-    const start = selectedClip.clip.start_sec;
-    const dur = Math.max(0.25, selectedClip.clip.duration_sec);
-    const step = dur / tokens.length;
-    const words = tokens.map((text, idx) => ({
-      text,
-      start_sec: Number((start + idx * step).toFixed(3)),
-      end_sec: Number((start + (idx + 1) * step).toFixed(3)),
-    }));
+    const words =
+      tokens.length === selectedCaption.words.length
+        ? selectedCaption.words.map((orig, idx) => ({
+            ...orig,
+            text: tokens[idx],
+          }))
+        : (() => {
+            const start = selectedClip.clip.start_sec;
+            const dur = Math.max(0.25, selectedClip.clip.duration_sec);
+            const step = dur / tokens.length;
+            return tokens.map((text, idx) => ({
+              text,
+              start_sec: Number((start + idx * step).toFixed(3)),
+              end_sec: Number((start + (idx + 1) * step).toFixed(3)),
+            }));
+          })();
     onUpdateCaptionClip(selectedClip.trackId, selectedClip.clip.id, {
       ...selectedCaption,
       words,
@@ -311,7 +342,8 @@ export function InspectorPanel({
     selectedClip !== null &&
     effectiveAudio !== null &&
     onUpdateClipAudio !== undefined &&
-    selectedClip.clip.payload.kind === "media";
+    selectedClip.clip.payload.kind === "media" &&
+    selectedMediaKind !== "image";
 
   const hasClipControls = Boolean(
     selectedClip &&
@@ -351,6 +383,7 @@ export function InspectorPanel({
     Math.abs(grade.contrast - 1) > 0.005 ||
     Math.abs(grade.saturation - 1) > 0.005 ||
     Math.abs(grade.exposure) > 0.005 ||
+    Math.abs(grade.brightness ?? 0) > 0.005 ||
     Math.abs(grade.lift.r) > 0.005 ||
     Math.abs(grade.lift.g) > 0.005 ||
     Math.abs(grade.lift.b) > 0.005 ||
@@ -638,20 +671,50 @@ export function InspectorPanel({
         <div className="space-y-2 rounded-xl border border-track-a1/30 bg-void/70 p-2.5">
           <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.14em] text-track-a1">
             <span>Audio Mix</span>
-            <label className="flex items-center gap-1 text-[10px] font-normal normal-case text-areia/80">
-              <input
-                type="checkbox"
-                checked={effectiveAudio.ducking_enabled}
-                onChange={(e) =>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const isMuted = effectiveAudio.gain_db <= -80;
                   commitAudio({
                     ...effectiveAudio,
-                    ducking_enabled: e.target.checked,
-                  })
-                }
-                className="h-3 w-3 accent-laranja-criacao"
-              />
-              <span>Duck</span>
-            </label>
+                    gain_db: isMuted ? 0 : -99,
+                  });
+                }}
+                title={effectiveAudio.gain_db <= -80 ? "Unmute clip audio" : "Mute clip audio"}
+                className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium normal-case transition-colors motion-reduce:transition-none ${
+                  effectiveAudio.gain_db <= -80
+                    ? "border border-vermelho-foco/50 bg-vermelho-foco/20 text-areia"
+                    : "border border-areia/15 bg-carbono text-areia/75 hover:text-areia"
+                }`}
+              >
+                {effectiveAudio.gain_db <= -80 ? (
+                  <>
+                    <VolumeX className="h-3 w-3" />
+                    <span>Muted</span>
+                  </>
+                ) : (
+                  <>
+                    <Volume2 className="h-3 w-3" />
+                    <span>Mute</span>
+                  </>
+                )}
+              </button>
+              <label className="flex items-center gap-1 text-[10px] font-normal normal-case text-areia/80">
+                <input
+                  type="checkbox"
+                  checked={effectiveAudio.ducking_enabled}
+                  onChange={(e) =>
+                    commitAudio({
+                      ...effectiveAudio,
+                      ducking_enabled: e.target.checked,
+                    })
+                  }
+                  className="h-3 w-3 accent-laranja-criacao"
+                />
+                <span>Duck</span>
+              </label>
+            </div>
           </div>
           <div className="space-y-1.5 text-[10px]">
             {(
@@ -737,6 +800,7 @@ export function InspectorPanel({
                     contrast: 1,
                     saturation: 1,
                     exposure: 0,
+                    brightness: 0,
                   };
                   onPreviewGrade(resetGrade);
                   onCommitGrade(resetGrade);
@@ -744,6 +808,17 @@ export function InspectorPanel({
                 className="text-[10px] font-medium normal-case tracking-normal text-areia/70 hover:text-amarelo-ideias"
               >
                 Reset
+              </button>
+            )}
+            {onAddFxGradeClip && (
+              <button
+                type="button"
+                onClick={onAddFxGradeClip}
+                title="Add time-ranged FX adjustment clip on track FX"
+                className="inline-flex items-center gap-0.5 rounded-full border border-track-fx/45 bg-track-fx/15 px-2 py-0.5 text-[9px] font-semibold normal-case tracking-normal text-areia hover:bg-track-fx/30"
+              >
+                <Plus className="h-2.5 w-2.5" />
+                <span>FX Clip</span>
               </button>
             )}
             <span
@@ -788,9 +863,10 @@ export function InspectorPanel({
               ["contrast", "Contrast", 0.4, 1.6, 0.02, 1],
               ["saturation", "Saturation", 0, 2, 0.02, 1],
               ["exposure", "Exposure", -1, 1, 0.02, 0],
+              ["brightness", "Brightness", -0.5, 0.5, 0.01, 0],
             ] as const
           ).map(([field, label, min, max, step, neutral]) => {
-            const val = grade[field];
+            const val = grade[field] ?? neutral;
             const isChanged = Math.abs(val - neutral) > 0.005;
             const trackBg = sliderTrackGradient(val, min, max, neutral);
             return (
@@ -938,6 +1014,22 @@ export function InspectorPanel({
         data-cursor-anchor="captions.inspector"
         className={activeTab === "captions" ? "space-y-3" : "hidden"}
       >
+        {onAutoCaptions && (
+          <button
+            type="button"
+            disabled={autoCaptionsBusy}
+            onClick={() => void onAutoCaptions(captionPreset)}
+            className="flex h-8 w-full items-center justify-center gap-1.5 rounded-lg border border-track-t1/45 bg-track-t1/15 px-3 text-[11px] font-semibold text-areia transition-colors hover:bg-track-t1/25 disabled:opacity-45 motion-reduce:transition-none"
+          >
+            {autoCaptionsBusy ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+            ) : (
+              <Captions className="h-3.5 w-3.5 text-amarelo-ideias" />
+            )}
+            <span>{autoCaptionsBusy ? "Generating Captions…" : "Auto Captions (Whisper)"}</span>
+          </button>
+        )}
+
         <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/60">
           <span>Caption Style</span>
           <span className="text-areia/45">word-by-word</span>
@@ -961,6 +1053,48 @@ export function InspectorPanel({
             </button>
           ))}
         </div>
+
+        {onApplyStyleToAllCaptions && (
+          <div className="space-y-2 rounded-lg border border-areia/[0.08] bg-void/55 p-2.5">
+            <div className="flex items-center justify-between gap-2 text-[10px]">
+              <span className="text-areia/65">Font</span>
+              <select
+                aria-label="Caption font family"
+                value={selectedCaption?.font_family ?? "Sora"}
+                onChange={(e) =>
+                  onApplyStyleToAllCaptions({ font_family: e.target.value })
+                }
+                className="h-6 rounded border border-areia/15 bg-carbono px-2 text-[10px] text-areia focus:border-laranja-criacao focus:outline-none"
+              >
+                {CAPTION_FONTS.map((f) => (
+                  <option key={f} value={f}>
+                    {f}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex items-center justify-between gap-2 text-[10px]">
+              <span className="text-areia/65">Highlight</span>
+              <input
+                type="color"
+                aria-label="Caption highlight color"
+                value={selectedCaption?.highlight_color ?? captionColorDraft}
+                onChange={(e) => {
+                  setCaptionColorDraft(e.target.value);
+                  onApplyStyleToAllCaptions({ highlight_color: e.target.value });
+                }}
+                className="h-5 w-7 cursor-pointer rounded border-0 bg-transparent p-0"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => onApplyStyleToAllCaptions({ preset: captionPreset })}
+              className="w-full rounded-md border border-areia/15 bg-carbono py-1 text-[10px] font-medium text-areia/85 hover:border-amarelo-ideias/45 hover:text-areia"
+            >
+              Apply Preset to All T1 Captions
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Swarm Telemetry */}

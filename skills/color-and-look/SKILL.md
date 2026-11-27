@@ -5,7 +5,7 @@ description: Applies Log-to-Rec.709 color recovery, Lift/Gamma/Gain balancing, e
 
 # Solaris Color & Look Craft
 
-Solaris renders color grades identically in the real-time WebGL2 Program Monitor (with half-texel 3D `.cube` LUT sampling) and FFmpeg export.
+Solaris renders color grades across the real-time WebGL2 Program Monitor (with half-texel 3D `.cube` LUT sampling) and FFmpeg export (matching `exposure` stops, `brightness`, `contrast`, `saturation`, `temp`, `tint`, 3-way wheels, and `.cube` LUT blending).
 
 ## 1. Inspect Real State (Honest Tool Behavior)
 
@@ -17,22 +17,22 @@ Solaris renders color grades identically in the real-time WebGL2 Program Monitor
 ## 2. Global vs `FX` Clip Grading
 
 - **Standard path (global grade)**: Call `color.set_grade` **omitting both `track_id` and `clip_id`** to update `project.active_grade`.
-- **Clip-scoped `FX` grade**: Pass **both** `track_id: "fx"` and `clip_id` *only* if `project.get` already contains an existing `ClipKind::Grade` clip on `fx`. (Passing only one of the two errors; Solaris does not expose a separate tool to create new `fx` clips via MCP.)
+- **Per-scene `FX` grade clip**: Use `color.place_grade_clip` to place a time-ranged `ClipKind::Grade` adjustment clip on track `fx` (`start_sec`, `duration_sec`, `label`, plus grade parameters), or call `color.set_grade` with both `track_id: "fx"` and `clip_id` to update an existing `fx` clip.
 
 ## 3. Numerical Starting Points (`color.set_grade`)
 
 Always start from disciplined, repeatable numbers—then refine visually via `preview.capture_frame`:
 
-| Scenario | `contrast` | `saturation` | `exposure` | `lift` (`{r,g,b}`) | `gamma` (`{r,g,b}`) | `gain` (`{r,g,b}`) | `lut_intensity` |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| **Log footage, no LUT** | `1.16–1.24` | `1.14–1.22` | `0.00` to `+0.08` | `{-0.02, -0.02, -0.015}` | `{0.0, 0.0, 0.0}` | `{0.03, 0.03, 0.02}` | `0.0` |
-| **Log footage + Brand `.cube` LUT** | `1.04–1.10` | `1.02–1.08` | `0.00` | `{-0.01, -0.01, -0.01}` | `{0.0, 0.0, 0.0}` | `{0.01, 0.01, 0.01}` | **`0.65–0.85`** |
-| **Rec.709 footage + Brand LUT** | `1.02–1.06` | `1.00–1.05` | `0.00` | `{0.0, 0.0, 0.0}` | `{0.0, 0.0, 0.0}` | `{0.0, 0.0, 0.0}` | **`0.45–0.70`** |
-| **Rec.709 clean editorial polish** | `1.05–1.10` | `1.04–1.10` | `0.00` | `{-0.01, -0.01, -0.008}` | `{0.0, 0.0, 0.0}` | `{0.02, 0.02, 0.01}` | `0.0` |
+| Scenario | `contrast` | `saturation` | `exposure` | `brightness` | `lift` (`{r,g,b}`) | `gamma` (`{r,g,b}`) | `gain` (`{r,g,b}`) | `lut_intensity` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **Log footage, no LUT** | `1.16–1.24` | `1.14–1.22` | `0.00` to `+0.08` | `0.00` | `{-0.02, -0.02, -0.015}` | `{0.0, 0.0, 0.0}` | `{0.03, 0.03, 0.02}` | `0.0` |
+| **Log footage + Brand `.cube` LUT** | `1.04–1.10` | `1.02–1.08` | `0.00` | `0.00` | `{-0.01, -0.01, -0.01}` | `{0.0, 0.0, 0.0}` | `{0.01, 0.01, 0.01}` | **`0.65–0.85`** |
+| **Rec.709 footage + Brand LUT** | `1.02–1.06` | `1.00–1.05` | `0.00` | `0.00` | `{0.0, 0.0, 0.0}` | `{0.0, 0.0, 0.0}` | `{0.0, 0.0, 0.0}` | **`0.45–0.70`** |
+| **Rec.709 clean editorial polish** | `1.05–1.10` | `1.04–1.10` | `0.00` | `0.00` | `{-0.01, -0.01, -0.008}` | `{0.0, 0.0, 0.0}` | `{0.02, 0.02, 0.01}` | `0.0` |
 
 ### Parameter Guardrails
 - **`temp` & `tint`**: Keep restrained (`temp` in `[-0.12, +0.15]`, `tint` in `[-0.08, +0.08]`) to correct greenish LEDs or cool daylight without turning skin orange or magenta.
-- **`exposure`**: Adjust in small `±0.05`–`±0.15` steps (`-1.0` to `+1.0` valid range) rather than crushing shadows with `lift` or blowing highlights with `gain`.
+- **`exposure` & `brightness`**: `exposure` (`-1.0` to `+1.0`) scales photographic stops (`2^exposure`); `brightness` (`-0.5` to `+0.5`) shifts the black/luma floor linearly. Adjust in small `±0.05`–`±0.15` steps rather than crushing shadows with `lift` or blowing highlights with `gain`.
 - **Brand LUT blending**: Whenever `brand.get_playbook` includes `default_lut`, pass `lut_path` and blend at `0.65–0.85` (never blindly `1.0`, which frequently clips specular highlights and oversaturates skin).
 
 ## 4. Visual Verification & Overlay Contrast Hygiene

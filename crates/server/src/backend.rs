@@ -330,32 +330,76 @@ impl SolarisBackend for AppState {
                 .map_err(|e| AgentError::ToolError(e.to_string()))?;
 
             let work_dir = self.inner.workspace_dir.join("tmp_stt").join(&pid);
-            let whisper_model = std::env::var("SOLARIS_WHISPER_MODEL")
-                .ok()
-                .map(PathBuf::from)
-                .filter(|p| p.is_file());
+            let whisper_model =
+                solaris_media_engine::discover_whisper_model(Some(&self.inner.workspace_dir));
 
-            let words = if self.inner.capabilities.has_whisper_filter
-                && let Some(model_path) = whisper_model
-            {
-                let tc = self.inner.toolchain.clone();
-                let has_whisper = self.inner.capabilities.has_whisper_filter;
-                let sp = safe_path.clone();
-                let wd = work_dir.clone();
-                let lang = language.clone();
-                tokio::task::spawn_blocking(move || {
-                    transcribe_via_ffmpeg_whisper_checked(
-                        &tc,
-                        has_whisper,
-                        &sp,
-                        &model_path,
-                        lang.as_deref(),
-                        &wd,
-                    )
-                })
-                .await
-                .map_err(|e| AgentError::Backend(e.to_string()))?
-                .map_err(|e| AgentError::Backend(e.to_string()))?
+            let mut words: Option<Vec<TranscriptWord>> = None;
+            let mut last_stt_err: Option<String> = None;
+
+            if let Some(ref model_path) = whisper_model {
+                if self.inner.toolchain.whisper_cli_path.is_some() {
+                    let tc = self.inner.toolchain.clone();
+                    let sp = safe_path.clone();
+                    let mp = model_path.clone();
+                    let wd = work_dir.clone();
+                    let lang = language.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        solaris_media_engine::transcribe_via_whisper_cli(
+                            &tc,
+                            &sp,
+                            &mp,
+                            lang.as_deref(),
+                            &wd,
+                        )
+                    })
+                    .await
+                    {
+                        Ok(Ok(w)) => words = Some(w),
+                        Ok(Err(e)) => {
+                            let msg = format!("whisper-cli failed ({e}); falling back");
+                            tracing::warn!(project_id = %pid, "{msg}");
+                            last_stt_err = Some(e.to_string());
+                        }
+                        Err(e) => {
+                            last_stt_err = Some(e.to_string());
+                        }
+                    }
+                }
+
+                if words.is_none() && self.inner.capabilities.has_whisper_filter {
+                    let tc = self.inner.toolchain.clone();
+                    let has_whisper = self.inner.capabilities.has_whisper_filter;
+                    let sp = safe_path.clone();
+                    let mp = model_path.clone();
+                    let wd = work_dir.clone();
+                    let lang = language.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        transcribe_via_ffmpeg_whisper_checked(
+                            &tc,
+                            has_whisper,
+                            &sp,
+                            &mp,
+                            lang.as_deref(),
+                            &wd,
+                        )
+                    })
+                    .await
+                    {
+                        Ok(Ok(w)) => words = Some(w),
+                        Ok(Err(e)) => {
+                            let msg = format!("ffmpeg whisper failed ({e}); falling back");
+                            tracing::warn!(project_id = %pid, "{msg}");
+                            last_stt_err = Some(e.to_string());
+                        }
+                        Err(e) => {
+                            last_stt_err = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+
+            let words = if let Some(w) = words {
+                w
             } else if self.inner.openrouter.is_configured() {
                 let mp3_path = work_dir.join(format!("{mid}_{}.mp3", Uuid::new_v4()));
                 let _mp3_guard = TempFileGuard(mp3_path.clone());
@@ -381,10 +425,12 @@ impl SolarisBackend for AppState {
                 )
                 .await?
             } else {
-                return Err(AgentError::ToolError(
-                    "Transcription requires either FFmpeg 8+ whisper filter + SOLARIS_WHISPER_MODEL, or OPENROUTER_API_KEY."
-                        .to_string(),
-                ));
+                let detail = last_stt_err
+                    .map(|e| format!(" Last local STT error: {e}."))
+                    .unwrap_or_default();
+                return Err(AgentError::ToolError(format!(
+                    "Transcription requires either OPENROUTER_API_KEY, or whisper-cpp (`brew install whisper-cpp`) / FFmpeg 8+ whisper filter with a GGML model (SOLARIS_WHISPER_MODEL or ~/.cache/whisper/ggml-base.bin).{detail}"
+                )));
             };
 
             let snap = {
@@ -619,21 +665,39 @@ impl SolarisBackend for AppState {
                     .await
                     .map_err(|e| AgentError::ToolError(e.to_string()))?;
 
-                // Resolve active grade at `time_sec`: FX adjustment clip -> project.active_grade -> brand.default_lut
-                let mut effective_grade = project
+                // Stack active FX adjustment-layer grades onto project.active_grade to match export.rs
+                let mut effective_grade = project.active_grade.clone();
+                if let Some(fx_clip) = project
                     .tracks
                     .iter()
                     .find(|t| t.kind == TrackKind::Grade && !t.muted)
                     .and_then(|t| {
                         t.clips.iter().find(|c| {
-                            time_sec >= c.start_sec && time_sec <= c.start_sec + c.duration_sec
+                            time_sec >= c.start_sec && time_sec < c.start_sec + c.duration_sec
                         })
                     })
-                    .and_then(|c| match &c.payload {
-                        ClipKind::Grade { grade } => Some(grade.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| project.active_grade.clone());
+                    && let ClipKind::Grade { grade: fx } = &fx_clip.payload
+                {
+                    effective_grade.lift.r += fx.lift.r;
+                    effective_grade.lift.g += fx.lift.g;
+                    effective_grade.lift.b += fx.lift.b;
+                    effective_grade.gamma.r += fx.gamma.r;
+                    effective_grade.gamma.g += fx.gamma.g;
+                    effective_grade.gamma.b += fx.gamma.b;
+                    effective_grade.gain.r += fx.gain.r;
+                    effective_grade.gain.g += fx.gain.g;
+                    effective_grade.gain.b += fx.gain.b;
+                    effective_grade.temp += fx.temp;
+                    effective_grade.tint += fx.tint;
+                    effective_grade.contrast *= fx.contrast;
+                    effective_grade.saturation *= fx.saturation;
+                    effective_grade.exposure += fx.exposure;
+                    effective_grade.brightness += fx.brightness;
+                    if fx.lut_path.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+                        effective_grade.lut_path = fx.lut_path.clone();
+                        effective_grade.lut_intensity = fx.lut_intensity;
+                    }
+                }
 
                 if effective_grade.lut_path.is_none() {
                     effective_grade.lut_path = brand_default_lut;

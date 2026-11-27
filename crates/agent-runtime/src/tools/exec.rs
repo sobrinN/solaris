@@ -124,6 +124,23 @@ pub(crate) fn retime_caption_words(
         .collect()
 }
 
+fn parse_smart_reframe(val: Option<&Value>) -> Option<solaris_core_ir::SmartReframeBox> {
+    let obj = val?.as_object()?;
+    let x = obj.get("x")?.as_f64()?.clamp(0.0, 0.95);
+    let y = obj.get("y")?.as_f64()?.clamp(0.0, 0.95);
+    let w = obj.get("width")?.as_f64()?.clamp(0.05, 1.0 - x);
+    let h = obj.get("height")?.as_f64()?.clamp(0.05, 1.0 - y);
+    if !(x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite()) {
+        return None;
+    }
+    Some(solaris_core_ir::SmartReframeBox {
+        x,
+        y,
+        width: w,
+        height: h,
+    })
+}
+
 fn apply_rgb_patch(target: &mut RgbTriplet, obj: Option<&Value>) {
     let Some(v) = obj.and_then(|v| v.as_object()) else {
         return;
@@ -747,6 +764,26 @@ pub async fn execute_tool(
                 }
             }
 
+            let explicit_reframe = parse_smart_reframe(args.get("smart_reframe"));
+            let auto_reframe = if explicit_reframe.is_some() {
+                explicit_reframe
+            } else if matches!(track.kind, TrackKind::ARoll | TrackKind::BRoll)
+                && matches!(media.kind, MediaKind::Video | MediaKind::Image)
+                && let (Some(mw), Some(mh)) = (media.intelligence.width, media.intelligence.height)
+                && mw > 0
+                && mh > 0
+            {
+                let src_aspect = mw as f64 / mh as f64;
+                let dst_aspect = proj.canvas.width as f64 / proj.canvas.height.max(1) as f64;
+                if ((src_aspect / dst_aspect) - 1.0).abs() > 0.2 {
+                    media.intelligence.default_reframe.clone()
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             let clip = Clip {
                 id: clip_id,
                 label,
@@ -755,6 +792,7 @@ pub async fn execute_tool(
                 source_in_sec,
                 transform: Transform2D {
                     scale,
+                    smart_reframe: auto_reframe,
                     ..Transform2D::default()
                 },
                 audio: AudioSettings {
@@ -866,7 +904,10 @@ pub async fn execute_tool(
                     .get("opacity")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(existing.opacity),
-                smart_reframe: existing.smart_reframe,
+                smart_reframe: args
+                    .get("smart_reframe")
+                    .and_then(|v| parse_smart_reframe(Some(v)))
+                    .or(existing.smart_reframe),
             };
             let (res, _) = backend
                 .apply_op(
@@ -925,6 +966,9 @@ pub async fn execute_tool(
             if let Some(v) = args.get("exposure").and_then(|v| v.as_f64()) {
                 grade.exposure = v;
             }
+            if let Some(v) = args.get("brightness").and_then(|v| v.as_f64()) {
+                grade.brightness = v;
+            }
             if let Some(v) = args.get("temp").and_then(|v| v.as_f64()) {
                 grade.temp = v;
             }
@@ -948,6 +992,78 @@ pub async fn execute_tool(
                         grade,
                         track_id,
                         clip_id,
+                    },
+                    meta,
+                )
+                .await?;
+            Ok(ToolOutput {
+                text: res.summary.clone(),
+                structured: serde_json::to_value(&res).unwrap_or_default(),
+                image_png_base64: None,
+                images_png_base64: Vec::new(),
+            })
+        }
+        "color.place_grade_clip" => {
+            let pid = req_str(&args, "project_id")?;
+            let clip_id = req_str(&args, "clip_id")?.to_string();
+            let start_sec = req_f64(&args, "start_sec")?;
+            let duration_sec = req_f64(&args, "duration_sec")?;
+            let label = args
+                .get("label")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("FX Grade")
+                .to_string();
+            let mut grade = ColorGrade::default();
+            apply_rgb_patch(&mut grade.lift, args.get("lift"));
+            apply_rgb_patch(&mut grade.gamma, args.get("gamma"));
+            apply_rgb_patch(&mut grade.gain, args.get("gain"));
+            if let Some(v) = args.get("contrast").and_then(|v| v.as_f64()) {
+                grade.contrast = v;
+            }
+            if let Some(v) = args.get("saturation").and_then(|v| v.as_f64()) {
+                grade.saturation = v;
+            }
+            if let Some(v) = args.get("exposure").and_then(|v| v.as_f64()) {
+                grade.exposure = v;
+            }
+            if let Some(v) = args.get("brightness").and_then(|v| v.as_f64()) {
+                grade.brightness = v;
+            }
+            if let Some(v) = args.get("temp").and_then(|v| v.as_f64()) {
+                grade.temp = v;
+            }
+            if let Some(v) = args.get("tint").and_then(|v| v.as_f64()) {
+                grade.tint = v;
+            }
+            if let Some(s) = args
+                .get("lut_path")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                grade.lut_path = Some(s.to_string());
+            }
+            if let Some(v) = args.get("lut_intensity").and_then(|v| v.as_f64()) {
+                grade.lut_intensity = v;
+            }
+            let clip = Clip {
+                id: clip_id,
+                label,
+                start_sec,
+                duration_sec,
+                source_in_sec: 0.0,
+                transform: Transform2D::default(),
+                audio: AudioSettings::default(),
+                payload: ClipKind::Grade { grade },
+            };
+            let (res, _) = backend
+                .apply_op(
+                    pid,
+                    TimelineCommand::PlaceClip {
+                        track_id: "fx".to_string(),
+                        clip,
                     },
                     meta,
                 )
@@ -1099,41 +1215,40 @@ pub async fn execute_tool(
                 ));
             }
 
+            let mut batch_cmds: Vec<TimelineCommand> = Vec::new();
             // Replace existing caption clips on T1 so regenerating never stacks duplicates
             if let Some(t1) = proj.tracks.iter().find(|t| t.id == "t1") {
-                let existing_cap_ids: Vec<String> = t1
+                for old_id in t1
                     .clips
                     .iter()
                     .filter(|c| matches!(c.payload, ClipKind::Caption { .. }))
                     .map(|c| c.id.clone())
-                    .collect();
-                for old_id in existing_cap_ids {
-                    backend
-                        .apply_op(
-                            pid,
-                            TimelineCommand::DeleteClip {
-                                track_id: "t1".to_string(),
-                                clip_id: old_id,
-                            },
-                            meta.clone(),
-                        )
-                        .await?;
+                {
+                    batch_cmds.push(TimelineCommand::DeleteClip {
+                        track_id: "t1".to_string(),
+                        clip_id: old_id,
+                    });
                 }
             }
 
-            let mut placed = 0usize;
+            let placed = clips.len();
             for clip in clips {
+                batch_cmds.push(TimelineCommand::PlaceClip {
+                    track_id: "t1".to_string(),
+                    clip,
+                });
+            }
+            for chunk in batch_cmds.chunks(256) {
                 backend
                     .apply_op(
                         pid,
-                        TimelineCommand::PlaceClip {
-                            track_id: "t1".to_string(),
-                            clip,
+                        TimelineCommand::Batch {
+                            commands: chunk.to_vec(),
+                            summary: Some(format!("Placed {placed} caption burst(s) on T1")),
                         },
                         meta.clone(),
                     )
                     .await?;
-                placed += 1;
             }
 
             Ok(ToolOutput {
@@ -1153,7 +1268,7 @@ pub async fn execute_tool(
             let Some(t1) = proj.tracks.iter().find(|t| t.id == "t1") else {
                 return Err(AgentError::ToolError("T1 track missing".to_string()));
             };
-            let mut updated = 0usize;
+            let mut batch_cmds: Vec<TimelineCommand> = Vec::new();
             for clip in &t1.clips {
                 if let ClipKind::Caption { caption } = &clip.payload {
                     let mut next = caption.clone();
@@ -1164,18 +1279,28 @@ pub async fn execute_tool(
                     if let Some(c) = args.get("highlight_color").and_then(|v| v.as_str()) {
                         next.highlight_color = c.to_string();
                     }
+                    batch_cmds.push(TimelineCommand::UpdateCaptionClip {
+                        track_id: "t1".to_string(),
+                        clip_id: clip.id.clone(),
+                        caption: next,
+                    });
+                }
+            }
+            let updated = batch_cmds.len();
+            if !batch_cmds.is_empty() {
+                for chunk in batch_cmds.chunks(256) {
                     backend
                         .apply_op(
                             pid,
-                            TimelineCommand::UpdateCaptionClip {
-                                track_id: "t1".to_string(),
-                                clip_id: clip.id.clone(),
-                                caption: next,
+                            TimelineCommand::Batch {
+                                commands: chunk.to_vec(),
+                                summary: Some(format!(
+                                    "Updated style on {updated} caption clip(s)"
+                                )),
                             },
                             meta.clone(),
                         )
                         .await?;
-                    updated += 1;
                 }
             }
             Ok(ToolOutput {
@@ -1604,6 +1729,7 @@ pub async fn execute_tool(
                 )));
             };
             let mut next = caption.clone();
+            let mut batch_cmds: Vec<TimelineCommand> = Vec::new();
             if let Some(text) = args
                 .get("text")
                 .and_then(|v| v.as_str())
@@ -1621,17 +1747,12 @@ pub async fn execute_tool(
             if let Some(c) = args.get("highlight_color").and_then(|v| v.as_str()) {
                 next.highlight_color = c.to_string();
             }
-            let (res, _) = backend
-                .apply_op(
-                    pid,
-                    TimelineCommand::UpdateCaptionClip {
-                        track_id: "t1".to_string(),
-                        clip_id,
-                        caption: next,
-                    },
-                    meta,
-                )
-                .await?;
+            batch_cmds.push(TimelineCommand::UpdateCaptionClip {
+                track_id: "t1".to_string(),
+                clip_id,
+                caption: next,
+            });
+            let (res, _) = backend.apply_op(pid, batch_cmds.remove(0), meta).await?;
             Ok(ToolOutput {
                 text: res.summary.clone(),
                 structured: serde_json::to_value(&res).unwrap_or_default(),
@@ -1779,7 +1900,7 @@ pub async fn execute_tool(
                 .unwrap_or(-14.0)
                 .clamp(-70.0, -5.0);
             let proj = backend.get_project(pid).await?;
-            let mut updated = 0usize;
+            let mut batch_cmds: Vec<TimelineCommand> = Vec::new();
             for tid in ["a1", "v1"] {
                 if let Some(track) = proj.tracks.iter().find(|t| t.id == tid && !t.muted) {
                     for clip in &track.clips {
@@ -1793,20 +1914,30 @@ pub async fn execute_tool(
                             let delta = (target - measured).clamp(-12.0, 12.0);
                             let mut next_audio = clip.audio.clone();
                             next_audio.gain_db = (delta * 100.0).round() / 100.0;
-                            backend
-                                .apply_op(
-                                    pid,
-                                    TimelineCommand::SetAudioSettings {
-                                        track_id: tid.to_string(),
-                                        clip_id: clip.id.clone(),
-                                        audio: next_audio,
-                                    },
-                                    meta.clone(),
-                                )
-                                .await?;
-                            updated += 1;
+                            batch_cmds.push(TimelineCommand::SetAudioSettings {
+                                track_id: tid.to_string(),
+                                clip_id: clip.id.clone(),
+                                audio: next_audio,
+                            });
                         }
                     }
+                }
+            }
+            let updated = batch_cmds.len();
+            if !batch_cmds.is_empty() {
+                for chunk in batch_cmds.chunks(256) {
+                    backend
+                        .apply_op(
+                            pid,
+                            TimelineCommand::Batch {
+                                commands: chunk.to_vec(),
+                                summary: Some(format!(
+                                    "Normalized {updated} speech clip(s) toward {target:.1} LUFS"
+                                )),
+                            },
+                            meta.clone(),
+                        )
+                        .await?;
                 }
             }
             Ok(ToolOutput {
@@ -1823,24 +1954,34 @@ pub async fn execute_tool(
                 .and_then(|v| v.as_f64())
                 .unwrap_or(-18.0);
             let proj = backend.get_project(pid).await?;
-            let mut updated = 0usize;
+            let mut batch_cmds: Vec<TimelineCommand> = Vec::new();
             if let Some(a2) = proj.tracks.iter().find(|t| t.id == "a2") {
                 for clip in &a2.clips {
                     let mut next = clip.audio.clone();
                     next.ducking_enabled = true;
                     next.duck_target_db = duck_target_db;
+                    batch_cmds.push(TimelineCommand::SetAudioSettings {
+                        track_id: "a2".to_string(),
+                        clip_id: clip.id.clone(),
+                        audio: next,
+                    });
+                }
+            }
+            let updated = batch_cmds.len();
+            if !batch_cmds.is_empty() {
+                for chunk in batch_cmds.chunks(256) {
                     backend
                         .apply_op(
                             pid,
-                            TimelineCommand::SetAudioSettings {
-                                track_id: "a2".to_string(),
-                                clip_id: clip.id.clone(),
-                                audio: next,
+                            TimelineCommand::Batch {
+                                commands: chunk.to_vec(),
+                                summary: Some(format!(
+                                    "Enabled {duck_target_db:.1} dB ducking on {updated} A2 clip(s)"
+                                )),
                             },
                             meta.clone(),
                         )
                         .await?;
-                    updated += 1;
                 }
             }
             Ok(ToolOutput {

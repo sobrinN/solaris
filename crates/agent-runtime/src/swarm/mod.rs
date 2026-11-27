@@ -775,10 +775,40 @@ where
             match tr_res {
                 Ok(words) if !words.is_empty() => {
                     transcribed_any = true;
+                    emit_swarm_log(
+                        backend.as_ref(),
+                        LogLevel::Info,
+                        "swarm",
+                        &project_id,
+                        &run_id,
+                        Some("director-01"),
+                        format!("Transcribed {} word(s) for media {mid}", words.len()),
+                        None,
+                    );
                 }
-                Ok(_) => {}
+                Ok(_) => {
+                    emit_swarm_log(
+                        backend.as_ref(),
+                        LogLevel::Info,
+                        "swarm",
+                        &project_id,
+                        &run_id,
+                        Some("director-01"),
+                        format!("Transcription returned 0 spoken words for media {mid}"),
+                        None,
+                    );
+                }
                 Err(err) => {
-                    tracing::debug!(media_id = %mid, "stage-1 auto-transcribe skipped: {err}");
+                    emit_swarm_log(
+                        backend.as_ref(),
+                        LogLevel::Warn,
+                        "swarm",
+                        &project_id,
+                        &run_id,
+                        Some("director-01"),
+                        format!("Stage-1 auto-transcribe failed for {mid}: {err}"),
+                        None,
+                    );
                 }
             }
             tracker.advance(lerp_progress(0.07, 0.12, idx + 1, total_speech), None);
@@ -1008,115 +1038,45 @@ where
 
     let max_turns = req.max_turns_per_worker.unwrap_or(6).clamp(1, 14);
     let mut specialist_errors: Vec<String> = Vec::new();
-    let mut wave1_grade_done = false;
 
-    // Wave 1 (Footage/Audio Mode): Run razor-01 (V1/A1) IN PARALLEL with grade-01 (FX).
-    // mix-01 (A2) runs in Wave 2 after razor-01 commits the V1/A1 spine and releases its locks
-    // so mix-01 sees the real spine duration and can normalize speech LUFS without lock collisions.
+    // Wave 1 (Footage/Audio Mode): Run razor-01 (V1/A1) first so Wave 2 specialists
+    // (including grade-01, broll-01, caps-01, gfx-01, mix-01) see the placed V1/A1 spine
+    // and can capture real video frames for color grading and timing.
     if has_visual_media || has_audio_media {
-        let mut wave1_roles = vec![AgentRole::Razor];
-        if has_visual_media {
-            wave1_roles.push(AgentRole::Grade);
-            wave1_grade_done = true;
-        }
-        let wave1_total = if has_visual_media { 2 } else { 1 };
-        let wave1_done = Arc::new(AtomicUsize::new(0));
         tracker.update(|s| {
             s.state = SwarmRunState::ExecutingSpine;
             s.progress = 0.20;
             s.phase_label = if has_visual_media {
-                "Wave 1: Razor (V1/A1) & Grade (FX) editing in parallel".to_string()
+                "Wave 1: Razor (V1/A1) assembling primary cut".to_string()
             } else {
                 "Wave 1: Razor (A1) assembling voiceover spine".to_string()
             };
-            s.active_roles = wave1_roles;
+            s.active_roles = vec![AgentRole::Razor];
         });
 
         let use_llm_wave1 = use_openrouter && !openrouter_unrecoverable;
-        let grade_cancel = cancel.child_token();
-        let spine_grade_cancel = grade_cancel.clone();
-        let (spine_res, r_grade_w1) = tokio::join!(
-            async {
-                let res = run_spine_stage(
-                    &backend,
-                    &openrouter,
-                    use_llm_wave1,
-                    req.allow_local_fallback,
-                    &worker_model,
-                    &worker_fallbacks,
-                    worker_supports_reasoning,
-                    &run_id,
-                    programmatic_visuals,
-                    &project,
-                    &brand,
-                    &assets,
-                    &plan,
-                    max_turns,
-                    &cancel,
-                    &ops_counter,
-                )
-                .await;
-                if res.is_err() {
-                    spine_grade_cancel.cancel();
-                } else {
-                    let done = wave1_done.fetch_add(1, Ordering::Relaxed) + 1;
-                    tracker.complete_role(
-                        Some(AgentRole::Razor),
-                        lerp_progress(0.20, 0.35, done, wave1_total),
-                        None,
-                    );
-                }
-                res
-            },
-            async {
-                if has_visual_media {
-                    let res = run_specialist_with_lock(
-                        backend.clone(),
-                        openrouter.clone(),
-                        use_llm_wave1,
-                        req.allow_local_fallback,
-                        worker_model.clone(),
-                        worker_fallbacks.clone(),
-                        worker_supports_reasoning,
-                        run_id.clone(),
-                        programmatic_visuals,
-                        req.prompt.clone(),
-                        project.clone(),
-                        brand.clone(),
-                        assets.clone(),
-                        plan.clone(),
-                        "fx",
-                        "grade-01",
-                        AgentRole::Grade,
-                        max_turns,
-                        grade_cancel,
-                        ops_counter.clone(),
-                    )
-                    .await;
-                    let done = wave1_done.fetch_add(1, Ordering::Relaxed) + 1;
-                    tracker.complete_role(
-                        Some(AgentRole::Grade),
-                        lerp_progress(0.20, 0.35, done, wave1_total),
-                        None,
-                    );
-                    res
-                } else {
-                    (false, false, None)
-                }
-            }
-        );
-
-        let (fb, fatal, err) = r_grade_w1;
-        if fb {
-            tracker.update(|s| {
-                s.used_local_fallback = true;
-            });
-        }
-        if fatal {
-            openrouter_unrecoverable = true;
-        }
-        if let Some(e) = err {
-            specialist_errors.push(e);
+        let spine_res = run_spine_stage(
+            &backend,
+            &openrouter,
+            use_llm_wave1,
+            req.allow_local_fallback,
+            &worker_model,
+            &worker_fallbacks,
+            worker_supports_reasoning,
+            &run_id,
+            programmatic_visuals,
+            &req.prompt,
+            &project,
+            &brand,
+            &assets,
+            &plan,
+            max_turns,
+            &cancel,
+            &ops_counter,
+        )
+        .await;
+        if spine_res.is_ok() {
+            tracker.complete_role(Some(AgentRole::Razor), 0.35, None);
         }
 
         match spine_res {
@@ -1222,9 +1182,7 @@ where
     let mut active_roles = Vec::new();
     if has_visual_media {
         active_roles.push(AgentRole::BRoll);
-        if !wave1_grade_done {
-            active_roles.push(AgentRole::Grade);
-        }
+        active_roles.push(AgentRole::Grade);
     }
     if narrated {
         active_roles.push(AgentRole::Caps);
@@ -1243,11 +1201,7 @@ where
     let wave2_total: usize = if programmatic_visuals {
         programmatic_scenes.len().max(1) + usize::from(narrated) + usize::from(has_audio_media)
     } else {
-        usize::from(has_visual_media)
-            + usize::from(has_visual_media && !wave1_grade_done)
-            + usize::from(narrated)
-            + 1
-            + usize::from(has_audio_media)
+        usize::from(has_visual_media) * 2 + usize::from(narrated) + 1 + usize::from(has_audio_media)
     };
     let wave2_done = Arc::new(AtomicUsize::new(0));
     let scene_units_reported = Arc::new(AtomicUsize::new(0));
@@ -1365,7 +1319,7 @@ where
             }
         },
         async {
-            if has_visual_media && !wave1_grade_done {
+            if has_visual_media {
                 let res = run_specialist_with_lock(
                     backend.clone(),
                     openrouter.clone(),
@@ -1942,6 +1896,7 @@ async fn run_spine_stage(
     low_reasoning: bool,
     run_id: &str,
     programmatic_visuals: bool,
+    prompt: &str,
     project: &solaris_core_ir::Project,
     brand: &BrandPlaybook,
     assets: &[SavedCodeAsset],
@@ -2000,8 +1955,8 @@ async fn run_spine_stage(
             AgentRole::Razor,
             &["v1", "a1"],
             &format!(
-                "You own tracks v1 and a1. Plan: {}. Place A-roll video/voice clips, trim dead silences (>0.25s with 0.12s breath pad), and add a subtle 1.08x punch-in on the hook.",
-                plan.spine_notes
+                "You own tracks v1 and a1. User request: \"{}\". Plan: {}. Place A-roll video/voice clips from media_pool; follow the user's pacing/cut intent (keep musical performances or continuous moments intact unless asked to trim silences or punch in).",
+                prompt, plan.spine_notes
             ),
             max_turns,
             SwarmRunMode::Generate,
@@ -2409,8 +2364,14 @@ async fn run_specialist_with_lock(
         .await;
 
     let instruction = match role {
-        AgentRole::BRoll => format!("You own v2 (B-ROLL). {}", plan.broll_notes),
-        AgentRole::Grade => format!("You own fx (GRADE). {}", plan.grade_notes),
+        AgentRole::BRoll => format!(
+            "You own v2 (B-ROLL). User request: \"{}\". Plan: {}",
+            prompt, plan.broll_notes
+        ),
+        AgentRole::Grade => format!(
+            "You own fx (GRADE). User request: \"{}\". Plan: {}",
+            prompt, plan.grade_notes
+        ),
         AgentRole::Caps => format!(
             "You own t1 (TEXT). User request: \"{}\". Plan: {}",
             prompt, plan.captions_notes
@@ -2419,7 +2380,10 @@ async fn run_specialist_with_lock(
             "You own g1 (GFX). User request: \"{}\". Plan: {}",
             prompt, plan.gfx_notes
         ),
-        AgentRole::Mix => format!("You own a2 (MUSIC). {}", plan.mix_notes),
+        AgentRole::Mix => format!(
+            "You own a2 (MUSIC). User request: \"{}\". Plan: {}",
+            prompt, plan.mix_notes
+        ),
         _ => String::new(),
     };
 
@@ -2450,25 +2414,10 @@ async fn run_specialist_with_lock(
         )
         .await
         {
-            Ok(0) if allow_local_fallback => {
-                let fallback_ops = execute_deterministic_specialist(
-                    &backend,
-                    &project,
-                    &brand,
-                    &assets,
-                    &plan,
-                    &prompt,
-                    role,
-                    &cancel,
-                    &ops_counter,
-                )
-                .await;
-                if fallback_ops > 0 {
-                    tracing::warn!(
-                        "{agent_id} LLM loop committed 0 ops; local specialist fallback committed {fallback_ops} op(s)"
-                    );
-                    used_fallback = true;
-                }
+            Ok(0) => {
+                tracing::debug!(
+                    "{agent_id} LLM loop deliberately committed 0 ops; skipping deterministic fallback"
+                );
             }
             Ok(_) | Err(AgentError::Cancelled) => {}
             Err(err) if allow_local_fallback => {

@@ -8,6 +8,7 @@ pub struct MediaToolchain {
     pub ffmpeg_path: Option<PathBuf>,
     pub ffprobe_path: Option<PathBuf>,
     pub chromium_path: Option<PathBuf>,
+    pub whisper_cli_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,6 +19,10 @@ pub struct ToolchainCapabilities {
     pub ffmpeg_version: Option<String>,
     pub hw_encoders: Vec<String>,
     pub has_whisper_filter: bool,
+    #[serde(default)]
+    pub whisper_cli_available: bool,
+    #[serde(default)]
+    pub whisper_model_ready: bool,
 }
 
 impl MediaToolchain {
@@ -25,10 +30,12 @@ impl MediaToolchain {
         let ffmpeg_path = resolve_binary("SOLARIS_FFMPEG_PATH", "ffmpeg");
         let ffprobe_path = resolve_binary("SOLARIS_FFPROBE_PATH", "ffprobe");
         let chromium_path = detect_chromium_binary();
+        let whisper_cli_path = resolve_whisper_cli_binary();
         Self {
             ffmpeg_path,
             ffprobe_path,
             chromium_path,
+            whisper_cli_path,
         }
     }
 
@@ -37,6 +44,7 @@ impl MediaToolchain {
             ffmpeg_path: ffmpeg,
             ffprobe_path: ffprobe,
             chromium_path: detect_chromium_binary(),
+            whisper_cli_path: None,
         }
     }
 
@@ -90,6 +98,9 @@ impl MediaToolchain {
             .and_then(|p| Command::new(p).arg("-version").output().ok())
             .is_some_and(|o| o.status.success());
 
+        let whisper_cli_available = self.whisper_cli_path.is_some();
+        let whisper_model_ready = crate::transcribe::discover_whisper_model(None).is_some();
+
         ToolchainCapabilities {
             ffmpeg_available,
             ffprobe_available,
@@ -97,6 +108,8 @@ impl MediaToolchain {
             ffmpeg_version,
             hw_encoders,
             has_whisper_filter,
+            whisper_cli_available,
+            whisper_model_ready,
         }
     }
 }
@@ -176,6 +189,21 @@ pub fn detect_chromium_binary() -> Option<PathBuf> {
                     }
                 }
             }
+        }
+    }
+    None
+}
+
+fn resolve_whisper_cli_binary() -> Option<PathBuf> {
+    if let Ok(val) = std::env::var("SOLARIS_WHISPER_PATH") {
+        let path = PathBuf::from(val.trim());
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    for name in ["whisper-cli", "whisper-cpp", "whisper"] {
+        if let Some(found) = resolve_binary("__SOLARIS_NO_ENV__", name) {
+            return Some(found);
         }
     }
     None

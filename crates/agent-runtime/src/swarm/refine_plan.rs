@@ -11,8 +11,8 @@ use crate::advisor::{ModelAdvisor, ModelRoleKind};
 use crate::backend::SolarisBackend;
 use crate::error::AgentError;
 use crate::openrouter::{
-    ChatMessage, ChatRequest, MessageContent, OpenRouterClient, ProviderPreferences,
-    ReasoningConfig,
+    ChatMessage, ChatRequest, ContentPart, MediaUrlRef, MessageContent, OpenRouterClient,
+    ProviderPreferences, ReasoningConfig,
 };
 
 pub(super) struct RefineModels {
@@ -73,9 +73,41 @@ pub(super) async fn build_refinement_plan(
     cancel: &CancellationToken,
 ) -> Result<RefinementPlan, AgentError> {
     let cut = json!({ "request": request, "cut": snapshot }).to_string();
+    let mut user_parts = vec![ContentPart::text(cut)];
+    if let Some(playhead) = snapshot["playhead_sec"].as_f64()
+        && let Ok(frame) = backend
+            .capture_preview_frame(project_id, playhead.max(0.0))
+            .await
+    {
+        user_parts.push(ContentPart::ImageUrl {
+            image_url: MediaUrlRef {
+                url: format!("data:image/png;base64,{}", frame.png_base64),
+            },
+        });
+    } else if let Some(first_vid) = snapshot["media_pool"]
+        .as_array()
+        .and_then(|arr| arr.iter().find(|m| m["kind"] == "video"))
+        && let Some(mid) = first_vid["id"].as_str()
+    {
+        let dur = first_vid["duration_sec"].as_f64().unwrap_or(1.0).max(1.0);
+        let ts = vec![
+            0.4,
+            (dur * 0.45).min(dur - 0.1),
+            (dur * 0.85).min(dur - 0.1),
+        ];
+        if let Ok(frames) = backend.extract_keyframes(project_id, mid, ts).await {
+            for kf in frames.into_iter().take(3) {
+                user_parts.push(ContentPart::ImageUrl {
+                    image_url: MediaUrlRef {
+                        url: format!("data:image/png;base64,{}", kf.png_base64),
+                    },
+                });
+            }
+        }
+    }
     let mut messages = vec![
         ChatMessage::system(REFINEMENT_SYSTEM_PROMPT),
-        ChatMessage::user_text(cut),
+        ChatMessage::user_parts(user_parts),
     ];
     let first = request_plan(
         backend, openrouter, models, run_id, project_id, &messages, 1, cancel,

@@ -25,15 +25,37 @@ pub struct AgentStatusResponse {
     pub openrouter_configured: bool,
     pub default_model: Option<String>,
     pub has_whisper_filter: bool,
+    pub whisper_cli_available: bool,
+    pub whisper_model_ready: bool,
+    pub stt_ready: bool,
+    pub stt_backend: &'static str,
     pub mcp_http_path: &'static str,
     pub skills_count: usize,
 }
 
 pub async fn get_agent_status(State(state): State<AppState>) -> Json<AgentStatusResponse> {
+    let model_ready =
+        solaris_media_engine::discover_whisper_model(Some(&state.inner.workspace_dir)).is_some();
+    let cli_ready = state.inner.capabilities.whisper_cli_available;
+    let filter_ready = state.inner.capabilities.has_whisper_filter;
+    let or_ready = state.inner.openrouter.is_configured();
+    let stt_backend = if cli_ready && model_ready {
+        "whisper_cli"
+    } else if filter_ready && model_ready {
+        "ffmpeg_whisper"
+    } else if or_ready {
+        "openrouter_stt"
+    } else {
+        "none"
+    };
     Json(AgentStatusResponse {
-        openrouter_configured: state.inner.openrouter.is_configured(),
+        openrouter_configured: or_ready,
         default_model: state.inner.openrouter.config().default_model,
-        has_whisper_filter: state.inner.capabilities.has_whisper_filter,
+        has_whisper_filter: filter_ready,
+        whisper_cli_available: cli_ready,
+        whisper_model_ready: model_ready,
+        stt_ready: stt_backend != "none",
+        stt_backend,
         mcp_http_path: "/mcp",
         skills_count: list_skills().len(),
     })
@@ -523,12 +545,62 @@ pub async fn transcribe_media_route(
     let words = state
         .transcribe_media(&id, &media_id, lang)
         .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            let code = if msg.contains("not found") {
+                StatusCode::NOT_FOUND
+            } else if msg.contains("Transcription requires") {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (code, msg)
+        })?;
     Ok(Json(TranscribeResponse {
         media_id,
         word_count: words.len(),
         words,
     }))
+}
+
+#[derive(Deserialize, Default)]
+pub struct GenerateCaptionsRequest {
+    #[serde(default)]
+    pub media_id: Option<String>,
+    #[serde(default)]
+    pub preset: Option<solaris_core_ir::CaptionPreset>,
+    #[serde(default)]
+    pub words_per_burst: Option<usize>,
+}
+
+pub async fn generate_captions_route(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    body: Option<Json<GenerateCaptionsRequest>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    validate_safe_id(&id)?;
+    let req = body.map(|b| b.0).unwrap_or_default();
+    let mut args = serde_json::json!({
+        "project_id": id,
+    });
+    if let Some(mid) = req.media_id {
+        args["media_id"] = serde_json::Value::String(mid);
+    }
+    if let Some(preset) = req.preset {
+        args["preset"] = serde_json::to_value(preset).unwrap_or(serde_json::Value::Null);
+    }
+    if let Some(wpb) = req.words_per_burst {
+        args["words_per_burst"] = serde_json::json!(wpb);
+    }
+    let out = solaris_agent_runtime::tools::execute_tool(
+        &state,
+        "captions.generate_from_transcript",
+        args,
+        solaris_core_ir::CommandMeta::default(),
+    )
+    .await
+    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(out.structured))
 }
 
 #[derive(Deserialize, Default)]

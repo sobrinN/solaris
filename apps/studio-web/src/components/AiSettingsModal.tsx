@@ -292,20 +292,37 @@ export function AiSettingsModal({
                   OpenRouter API Key (BYOK)
                 </span>
               </div>
-              <span
-                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[10px] font-medium ${
-                  agentStatus?.openrouter_configured
-                    ? "border-amarelo-ideias/45 bg-amarelo-ideias/15 text-amarelo-ideias"
-                    : "border-areia/15 bg-grafite/70 text-areia/65"
-                }`}
-              >
-                <ShieldCheck className="h-3 w-3" />
-                {agentStatus?.openrouter_configured
-                  ? desktopKeychain
-                    ? "Connected · OS Keychain"
-                    : "Connected · Local Vault"
-                  : "Not Configured (Local Fallback)"}
-              </span>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[10px] font-medium ${
+                    agentStatus?.openrouter_configured
+                      ? "border-amarelo-ideias/45 bg-amarelo-ideias/15 text-amarelo-ideias"
+                      : "border-areia/15 bg-grafite/70 text-areia/65"
+                  }`}
+                >
+                  <ShieldCheck className="h-3 w-3" />
+                  {agentStatus?.openrouter_configured
+                    ? desktopKeychain
+                      ? "Connected · OS Keychain"
+                      : "Connected · Local Vault"
+                    : "Not Configured (Local Fallback)"}
+                </span>
+                <span
+                  className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[10px] font-medium ${
+                    agentStatus?.stt_ready
+                      ? "border-amarelo-ideias/35 bg-carbono text-amarelo-ideias"
+                      : "border-areia/15 bg-carbono text-areia/65"
+                  }`}
+                >
+                  {agentStatus?.stt_backend === "whisper_cli"
+                    ? "STT · Local whisper.cpp"
+                    : agentStatus?.stt_backend === "ffmpeg_whisper"
+                      ? "STT · FFmpeg Whisper"
+                      : agentStatus?.stt_backend === "openrouter_stt"
+                        ? "STT · OpenRouter Audio"
+                        : "STT · Configure OpenRouter or Whisper"}
+                </span>
+              </div>
             </div>
 
             <p className="text-[11px] leading-relaxed text-areia/65">

@@ -182,6 +182,7 @@ pub async fn delete_project(
 
     let project_file = state.project_file_path(&id);
     let uploads_dir = state.inner.workspace_dir.join("uploads").join(&id);
+    let proxies_dir = state.inner.workspace_dir.join("proxies").join(&id);
     // Serialize project JSON removal against any in-flight persist_project_locked
     {
         let mut revs = state.inner.persist_revisions.lock().await;
@@ -204,6 +205,15 @@ pub async fn delete_project(
                     project_id = %project_id,
                     path = %uploads_dir.display(),
                     "failed to remove project uploads directory on delete: {err}"
+                );
+            }
+            if proxies_dir.is_dir()
+                && let Err(err) = std::fs::remove_dir_all(&proxies_dir)
+            {
+                tracing::warn!(
+                    project_id = %project_id,
+                    path = %proxies_dir.display(),
+                    "failed to remove project proxies directory on delete: {err}"
                 );
             }
         })

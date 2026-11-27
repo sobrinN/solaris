@@ -118,6 +118,7 @@ pub fn build_export_plan_with_options(
     let mut current_v = "[base0]".to_string();
     let mut v_idx = 0usize;
     let mut a_roll_audio_sources: Vec<(usize, &Clip, bool)> = Vec::new();
+    let mut b_roll_audio_sources: Vec<(usize, &Clip, bool)> = Vec::new();
 
     // Respect track.solo across visual tracks (V1, V2)
     let any_visual_solo = project
@@ -183,13 +184,13 @@ pub fn build_export_plan_with_options(
                     inputs.extend(["-i".into(), asset.path.clone()]);
                 }
                 let gain_db = sanitize_f64(clip.audio.gain_db, 0.0, -120.0, 36.0);
-                if track_kind == TrackKind::ARoll
-                    && gain_db > -90.0
-                    && (asset.intelligence.has_audio
-                        || !asset.intelligence.waveform_peaks.is_empty()
-                        || asset.intelligence.integrated_lufs.is_some())
-                {
+                let has_audio_stream = asset.intelligence.has_audio
+                    || !asset.intelligence.waveform_peaks.is_empty()
+                    || asset.intelligence.integrated_lufs.is_some();
+                if track_kind == TrackKind::ARoll && gain_db > -80.0 && has_audio_stream {
                     a_roll_audio_sources.push((input_idx, clip, pre_trimmed));
+                } else if track_kind == TrackKind::BRoll && gain_db > -80.0 && has_audio_stream {
+                    b_roll_audio_sources.push((input_idx, clip, pre_trimmed));
                 }
             }
 
@@ -435,22 +436,39 @@ pub fn build_export_plan_with_options(
     let mut voice_labels: Vec<String> = Vec::new();
     let mut ducked_music_labels: Vec<String> = Vec::new();
     let mut unducked_music_labels: Vec<String> = Vec::new();
-    let mut duck_target_db = -18.0_f64;
+    let mut duck_target_db: Option<f64> = None;
     let mut a_idx = 0usize;
 
-    let any_audio_solo = project
-        .tracks
-        .iter()
-        .any(|t| matches!(t.kind, TrackKind::Voice | TrackKind::Music) && t.solo);
+    let any_audio_solo = project.tracks.iter().any(|t| {
+        matches!(
+            t.kind,
+            TrackKind::ARoll | TrackKind::Voice | TrackKind::Music
+        ) && t.solo
+    });
+    let a_roll_track = project.tracks.iter().find(|t| t.kind == TrackKind::ARoll);
     let voice_track = project.tracks.iter().find(|t| t.kind == TrackKind::Voice);
     let voice_muted = voice_track.is_some_and(|t| t.muted);
-    let has_explicit_voice_clips = voice_track.is_some_and(|t| !t.clips.is_empty());
+    let voice_clips: &[Clip] = voice_track.map(|t| t.clips.as_slice()).unwrap_or(&[]);
 
-    if !voice_muted
-        && !has_explicit_voice_clips
-        && (!any_audio_solo || voice_track.is_some_and(|t| t.solo))
+    // Include V1 embedded audio whenever V1 is unmuted and solo permits, skipping individual V1
+    // clips whose timeline span is substantially overlapped (>= 50%) by an explicit A1 clip.
+    if !a_roll_track.is_some_and(|t| t.muted)
+        && (!any_audio_solo
+            || a_roll_track.is_some_and(|t| t.solo)
+            || voice_track.is_some_and(|t| t.solo))
     {
         for (aroll_input_idx, clip, pre_trimmed) in a_roll_audio_sources {
+            let clip_start = clip.start_sec;
+            let clip_end = clip.start_sec + clip.duration_sec;
+            let overlapped_by_a1 = voice_clips.iter().any(|vc| {
+                let ov = (clip_end.min(vc.start_sec + vc.duration_sec)
+                    - clip_start.max(vc.start_sec))
+                .max(0.0);
+                ov >= clip.duration_sec * 0.5
+            });
+            if overlapped_by_a1 && (voice_muted || !voice_clips.is_empty()) {
+                continue;
+            }
             a_idx += 1;
             let tag = format!("[a{a_idx}]");
             filters.push(build_audio_clip_chain(
@@ -460,6 +478,24 @@ pub fn build_export_plan_with_options(
                 pre_trimmed,
             ));
             voice_labels.push(tag);
+        }
+    }
+
+    // Include unmuted V2 (B-Roll) video clips with audio (gain_db > -80.0).
+    let b_roll_track = project.tracks.iter().find(|t| t.kind == TrackKind::BRoll);
+    if !b_roll_track.is_some_and(|t| t.muted)
+        && (!any_audio_solo || b_roll_track.is_some_and(|t| t.solo))
+    {
+        for (broll_input_idx, clip, pre_trimmed) in b_roll_audio_sources {
+            a_idx += 1;
+            let tag = format!("[a{a_idx}]");
+            filters.push(build_audio_clip_chain(
+                broll_input_idx,
+                clip,
+                &tag,
+                pre_trimmed,
+            ));
+            unducked_music_labels.push(tag);
         }
     }
 
@@ -497,7 +533,8 @@ pub fn build_export_plan_with_options(
             if is_voice {
                 voice_labels.push(tag);
             } else if clip.audio.ducking_enabled {
-                duck_target_db = sanitize_f64(clip.audio.duck_target_db, -18.0, -60.0, 0.0);
+                let target = sanitize_f64(clip.audio.duck_target_db, -18.0, -60.0, 0.0);
+                duck_target_db = Some(duck_target_db.map_or(target, |cur| cur.min(target)));
                 ducked_music_labels.push(tag);
             } else {
                 unducked_music_labels.push(tag);
@@ -527,7 +564,7 @@ pub fn build_export_plan_with_options(
             "[amusic]".to_string()
         };
 
-        let ratio = ((-duck_target_db) / 3.0).clamp(2.0, 12.0);
+        let ratio = ((-duck_target_db.unwrap_or(-18.0)) / 3.0).clamp(2.0, 12.0);
         let mut final_inputs = vec!["[vmain]".to_string(), "[mducked]".to_string()];
         final_inputs.extend(unducked_music_labels);
         let final_joined = final_inputs.join("");
@@ -579,8 +616,8 @@ pub fn build_color_grade_core_filters(
     g: &ColorGrade,
     enable_expr: Option<&str>,
 ) -> (String, String) {
-    let exposure = sanitize_f64(g.exposure, 0.0, -5.0, 5.0);
-    let brightness = (exposure * 0.15).clamp(-0.5, 0.5);
+    let exposure = sanitize_f64(g.exposure, 0.0, -3.0, 3.0);
+    let brightness = sanitize_f64(g.brightness, 0.0, -0.5, 0.5);
     let contrast = sanitize_f64(g.contrast, 1.0, 0.4, 2.0);
     let sat = sanitize_f64(g.saturation, 1.0, 0.0, 3.0);
     let temp = sanitize_f64(g.temp, 0.0, -5.0, 5.0);
@@ -588,9 +625,9 @@ pub fn build_color_grade_core_filters(
     let rs = sanitize_f64(g.lift.r, 0.0, -1.0, 1.0);
     let gs = sanitize_f64(g.lift.g, 0.0, -1.0, 1.0);
     let bs = sanitize_f64(g.lift.b, 0.0, -1.0, 1.0);
-    let rm = (sanitize_f64(g.gamma.r, 0.0, -1.0, 1.0) + temp * 0.18).clamp(-1.0, 1.0);
-    let gm = (sanitize_f64(g.gamma.g, 0.0, -1.0, 1.0) + tint * 0.16).clamp(-1.0, 1.0);
-    let bm = (sanitize_f64(g.gamma.b, 0.0, -1.0, 1.0) - temp * 0.18).clamp(-1.0, 1.0);
+    let rm = (sanitize_f64(g.gamma.r, 0.0, -1.0, 1.0) + temp * 0.16).clamp(-1.0, 1.0);
+    let gm = (sanitize_f64(g.gamma.g, 0.0, -1.0, 1.0) + tint * 0.14).clamp(-1.0, 1.0);
+    let bm = (sanitize_f64(g.gamma.b, 0.0, -1.0, 1.0) - temp * 0.16).clamp(-1.0, 1.0);
     let rh = sanitize_f64(g.gain.r, 0.0, -1.0, 1.0);
     let gh = sanitize_f64(g.gain.g, 0.0, -1.0, 1.0);
     let bh = sanitize_f64(g.gain.b, 0.0, -1.0, 1.0);
@@ -602,9 +639,14 @@ pub fn build_color_grade_core_filters(
     let cb = format!(
         "colorbalance=rs={rs:.3}:gs={gs:.3}:bs={bs:.3}:rm={rm:.3}:gm={gm:.3}:bm={bm:.3}:rh={rh:.3}:gh={gh:.3}:bh={bh:.3}{enable_suffix}"
     );
-    let eq = format!(
+    let eq_base = format!(
         "eq=contrast={contrast:.3}:saturation={sat:.3}:brightness={brightness:.3}{enable_suffix}"
     );
+    let eq = if exposure.abs() > 0.001 {
+        format!("exposure=exposure={exposure:.3}{enable_suffix},{eq_base}")
+    } else {
+        eq_base
+    };
     (cb, eq)
 }
 
@@ -1574,5 +1616,144 @@ mod tests {
         assert!(rendered.is_file());
         assert!(std::fs::metadata(&rendered).unwrap().len() > 1000);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preserves_v1_audio_outside_partial_a1_and_mixes_unmuted_v2_audio() {
+        let mut p = Project::new_default("v1_a1_v2_audio", AspectPreset::Vertical9x16);
+        p.media_pool.push(MediaAsset {
+            id: "m_v1".into(),
+            name: "v1.mp4".into(),
+            kind: MediaKind::Video,
+            role_hint: "a_roll".into(),
+            path: "/tmp/v1.mp4".into(),
+            added_at: Utc::now(),
+            intelligence: MediaIntelligenceManifest {
+                has_audio: true,
+                duration_sec: 10.0,
+                ..MediaIntelligenceManifest::default()
+            },
+        });
+        p.media_pool.push(MediaAsset {
+            id: "m_v2_sound".into(),
+            name: "v2_sound.mp4".into(),
+            kind: MediaKind::Video,
+            role_hint: "b_roll".into(),
+            path: "/tmp/v2_sound.mp4".into(),
+            added_at: Utc::now(),
+            intelligence: MediaIntelligenceManifest {
+                has_audio: true,
+                duration_sec: 3.0,
+                ..MediaIntelligenceManifest::default()
+            },
+        });
+        p.media_pool.push(MediaAsset {
+            id: "m_v2_muted".into(),
+            name: "v2_muted.mp4".into(),
+            kind: MediaKind::Video,
+            role_hint: "b_roll".into(),
+            path: "/tmp/v2_muted.mp4".into(),
+            added_at: Utc::now(),
+            intelligence: MediaIntelligenceManifest {
+                has_audio: true,
+                duration_sec: 2.0,
+                ..MediaIntelligenceManifest::default()
+            },
+        });
+        p.media_pool.push(MediaAsset {
+            id: "m_vo".into(),
+            name: "vo.wav".into(),
+            kind: MediaKind::Audio,
+            role_hint: "voice".into(),
+            path: "/tmp/vo.wav".into(),
+            added_at: Utc::now(),
+            intelligence: MediaIntelligenceManifest::default(),
+        });
+
+        // Two V1 clips: 0..4s (no A1 overlap) and 4..8s (overlapped by A1 4..8s)
+        p.tracks[3].clips.push(Clip {
+            id: "v1_1".into(),
+            label: "V1 1".into(),
+            start_sec: 0.0,
+            duration_sec: 4.0,
+            source_in_sec: 0.0,
+            transform: Transform2D::default(),
+            audio: AudioSettings::default(),
+            payload: ClipKind::Media {
+                media_id: "m_v1".into(),
+                ken_burns: false,
+            },
+        });
+        p.tracks[3].clips.push(Clip {
+            id: "v1_2".into(),
+            label: "V1 2".into(),
+            start_sec: 4.0,
+            duration_sec: 4.0,
+            source_in_sec: 4.0,
+            transform: Transform2D::default(),
+            audio: AudioSettings::default(),
+            payload: ClipKind::Media {
+                media_id: "m_v1".into(),
+                ken_burns: false,
+            },
+        });
+        // Two V2 clips: one unmuted (gain 0), one muted (gain -99)
+        p.tracks[2].clips.push(Clip {
+            id: "v2_1".into(),
+            label: "V2 Sound".into(),
+            start_sec: 1.0,
+            duration_sec: 2.0,
+            source_in_sec: 0.0,
+            transform: Transform2D::default(),
+            audio: AudioSettings::default(),
+            payload: ClipKind::Media {
+                media_id: "m_v2_sound".into(),
+                ken_burns: false,
+            },
+        });
+        p.tracks[2].clips.push(Clip {
+            id: "v2_2".into(),
+            label: "V2 Muted".into(),
+            start_sec: 5.0,
+            duration_sec: 2.0,
+            source_in_sec: 0.0,
+            transform: Transform2D::default(),
+            audio: AudioSettings {
+                gain_db: -99.0,
+                ..AudioSettings::default()
+            },
+            payload: ClipKind::Media {
+                media_id: "m_v2_muted".into(),
+                ken_burns: false,
+            },
+        });
+        // A1 voiceover covering only 4..8s
+        p.tracks[5].clips.push(Clip {
+            id: "a1_1".into(),
+            label: "VO".into(),
+            start_sec: 4.0,
+            duration_sec: 4.0,
+            source_in_sec: 0.0,
+            transform: Transform2D::default(),
+            audio: AudioSettings::default(),
+            payload: ClipKind::Media {
+                media_id: "m_vo".into(),
+                ken_burns: false,
+            },
+        });
+
+        let req = ExportRequest {
+            format: ExportFormat::Mp4,
+            quality: ExportQuality::Standard,
+            target_lufs: -14.0,
+            output_name: None,
+        };
+        let plan = build_export_plan(&p, &req, Path::new("/tmp/out.mp4"), None, &[]).unwrap();
+        // Input 0 (v1_1) kept, input 1 (v1_2) skipped due to A1 overlap, input 2 (v2_1) kept, input 3 (v2_2) muted, input 4 (a1_1) kept
+        assert!(plan.filter_complex.contains("[0:a]"));
+        assert!(!plan.filter_complex.contains("[1:a]"));
+        assert!(plan.filter_complex.contains("[2:a]"));
+        assert!(!plan.filter_complex.contains("[3:a]"));
+        assert!(plan.filter_complex.contains("[4:a]"));
     }
 }

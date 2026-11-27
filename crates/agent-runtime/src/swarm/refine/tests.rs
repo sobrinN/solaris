@@ -308,20 +308,20 @@ fn refinement_tools_keep_the_edit_tools_for_each_target_role() {
 }
 
 #[test]
-fn refinement_tools_never_offer_placement_or_asset_tools() {
+fn refinement_tools_never_offer_asset_save_or_cross_role_tools() {
     let gfx: Vec<String> = tools_for_refinement(AgentRole::Gfx)
         .into_iter()
         .map(|def| def.function.name)
         .collect();
-    assert!(!gfx.iter().any(|n| n == "gfx_place" || n == "assets_save"));
+    assert!(gfx.iter().any(|n| n == "gfx_place"));
+    assert!(!gfx.iter().any(|n| n == "assets_save"));
     assert!(!gfx.iter().any(|n| n == "captions_update_clip"));
     let caps: Vec<String> = tools_for_refinement(AgentRole::Caps)
         .into_iter()
         .map(|def| def.function.name)
         .collect();
     assert!(
-        !caps
-            .iter()
+        caps.iter()
             .any(|n| n == "captions_generate_from_transcript")
     );
 }

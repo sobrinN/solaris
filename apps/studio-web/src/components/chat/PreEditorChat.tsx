@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { inferCanvasFromVideo } from "../../lib/canvasMatch";
 import {
   ArrowUp,
   Clock,
@@ -97,9 +98,26 @@ export function PreEditorChat({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const recentMenuRef = useRef<HTMLDivElement | null>(null);
+  const userLockedAspectRef = useRef(false);
+  const autoMatchedDraftVideoIdRef = useRef<string | null>(null);
 
   const indexedMedia = draftProject?.media_pool ?? [];
   const hasAttachments = files.length > 0;
+
+  useEffect(() => {
+    if (userLockedAspectRef.current || selectedTemplateId) return;
+    const firstAnalyzedVideo = indexedMedia.find(
+      (m) => m.kind === "video" && m.intelligence.analyzed && (m.intelligence.width ?? 0) > 0,
+    );
+    if (!firstAnalyzedVideo || autoMatchedDraftVideoIdRef.current === firstAnalyzedVideo.id) {
+      return;
+    }
+    const inferred = inferCanvasFromVideo(firstAnalyzedVideo);
+    if (inferred) {
+      autoMatchedDraftVideoIdRef.current = firstAnalyzedVideo.id;
+      setAspect(inferred.aspect_preset);
+    }
+  }, [indexedMedia, selectedTemplateId]);
 
   const indexingStats = useMemo(() => {
     let analyzed = 0;
@@ -413,8 +431,10 @@ export function PreEditorChat({
                 <Sparkles className="h-3.5 w-3.5 text-amarelo-ideias" />
               )}
               <span className="tabular-nums">
-                Indexed {indexingStats.analyzed}/{Math.max(indexingStats.total, files.length)} clips ·
-                Transcribed {indexingStats.words} words · Found {indexingStats.silences} silences
+                Indexed {indexingStats.analyzed}/{Math.max(indexingStats.total, files.length)} clips
+                {indexingStats.words > 0 ? ` · ${indexingStats.words} words` : ""}
+                {indexingStats.silences > 0 ? ` · ${indexingStats.silences} silences` : ""}
+                {!draftUploading && indexingStats.analyzed >= indexingStats.total ? " · Ready" : ""}
               </span>
             </div>
           )}
@@ -588,7 +608,10 @@ export function PreEditorChat({
 
                   <SolarSelect
                     value={aspect}
-                    onChange={(e) => setAspect(e.target.value as AspectPreset)}
+                    onChange={(e) => {
+                      userLockedAspectRef.current = true;
+                      setAspect(e.target.value as AspectPreset);
+                    }}
                     aria-label="Aspect Ratio"
                   >
                     {ASPECT_OPTIONS.map((opt) => (
