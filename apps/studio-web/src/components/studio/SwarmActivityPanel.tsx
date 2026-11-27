@@ -23,6 +23,7 @@ import {
   type DirectorTurn,
 } from "../../lib/directorHistory";
 import { REFINEMENT_CHIPS } from "../../lib/refinementChips";
+import { resolveSwarmProgress } from "../../lib/swarmProgress";
 import type { SelectedClip } from "../../lib/timelineSelection";
 
 export interface ActivityEntry {
@@ -176,6 +177,8 @@ export function SwarmActivityPanel({
       activeSwarmRun.state === "executing_specialists" ||
       activeSwarmRun.state === "running_qa");
 
+  const swarmProgress = activeSwarmRun ? resolveSwarmProgress(activeSwarmRun) : null;
+
   const effectiveMode: SwarmRunMode = hasTimelineClips ? "refine" : "generate";
 
   const handleRun = async () => {
@@ -215,12 +218,12 @@ export function SwarmActivityPanel({
   }, [activityLog.length, assetsTabContent, assetsCount]);
 
   return (
-    <div className="solaris-panel flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl">
+    <div className="@container solaris-panel flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl">
       {/* Unified Single-Row NLE Panel Header (h-9) */}
       <div className="flex h-9 shrink-0 items-center justify-between gap-1.5 border-b border-areia/[0.08] px-2.5">
         <div className="flex min-w-0 items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-areia/75">
           <Sparkles className="h-3 w-3 shrink-0 text-amarelo-ideias" />
-          <span className="truncate">Director</span>
+          <span className="hidden truncate @[345px]:inline">Director</span>
         </div>
 
         <div className="flex shrink-0 items-center gap-1.5">
@@ -272,18 +275,36 @@ export function SwarmActivityPanel({
               {isRunning && (
                 <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-laranja-criacao solar-pulse-dot" />
               )}
-              <span className="truncate font-medium text-amarelo-ideias">
+              <span
+                className="truncate font-medium text-amarelo-ideias"
+                title={activeSwarmRun.phase_label}
+              >
                 {activeSwarmRun.phase_label}
               </span>
             </div>
-            <span className="tabular-nums shrink-0 text-areia/60">
-              {activeSwarmRun.ops_committed} ops
-            </span>
+            <div className="flex shrink-0 items-center gap-1.5 tabular-nums">
+              {isRunning && swarmProgress && (
+                <span className="font-semibold text-amarelo-ideias">
+                  {swarmProgress.percent}%
+                </span>
+              )}
+              <span className="text-areia/60">{activeSwarmRun.ops_committed} ops</span>
+            </div>
           </div>
-          {isRunning && (
+          {isRunning && swarmProgress && (
             <div className="mt-1.5 flex items-center gap-1.5">
-              <div className="h-0.5 flex-1 overflow-hidden rounded-full bg-grafite">
-                <div className="h-full w-2/3 origin-left rounded-full bg-gradient-to-r from-laranja-criacao to-amarelo-ideias solar-pulse-dot" />
+              <div
+                role="progressbar"
+                aria-label="Video build progress"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={swarmProgress.percent}
+                className="h-1.5 flex-1 overflow-hidden rounded-full bg-grafite"
+              >
+                <div
+                  className="h-full w-full origin-left rounded-full bg-gradient-to-r from-laranja-criacao to-amarelo-ideias transition-transform duration-300 ease-out motion-reduce:transition-none"
+                  style={{ transform: `scaleX(${swarmProgress.ratio})` }}
+                />
               </div>
               {activeSwarmRun.active_roles.slice(0, 4).map((role) => (
                 <span

@@ -1,5 +1,6 @@
 mod deterministic;
 mod llm;
+mod progress;
 mod qa;
 mod refine;
 mod refine_plan;
@@ -13,7 +14,7 @@ pub use qa::{QaPassOptions, run_qa_pass, run_qa_pass_with_options};
 pub use request::{SwarmChatRole, SwarmChatTurn, SwarmRunMode, prepare_swarm_request};
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,7 @@ use llm::{
     run_programmatic_scene_worker,
 };
 pub(crate) use llm::{route_models, strip_json_fence};
+use progress::{SwarmProgressTracker, lerp_progress};
 use request::timeline_has_clips;
 use speech::{is_music_or_sfx_asset, narrated_transcript_present, narration_expected};
 
@@ -613,11 +615,13 @@ where
 {
     let started_at = Utc::now();
     let ops_counter = Arc::new(AtomicU32::new(0));
-    let mut status = SwarmRunStatus {
+    let on_status: Arc<dyn Fn(SwarmRunStatus) + Send + Sync> = Arc::new(on_status);
+    let initial_status = SwarmRunStatus {
         run_id: run_id.clone(),
         project_id: project_id.clone(),
         state: SwarmRunState::Planning,
         phase_label: "Director inspecting media intelligence & brand playbook".to_string(),
+        progress: 0.04,
         model_used: None,
         used_local_fallback: false,
         active_roles: vec![AgentRole::Director],
@@ -629,7 +633,12 @@ where
         started_at,
         updated_at: started_at,
     };
-    on_status(status.clone());
+    let tracker = Arc::new(SwarmProgressTracker::new(
+        initial_status,
+        ops_counter.clone(),
+        on_status,
+    ));
+    tracker.emit_current();
 
     let _ = backend
         .emit_cursor_pulse(
@@ -644,7 +653,7 @@ where
     let mut project = match backend.get_project(&project_id).await {
         Ok(p) => p,
         Err(err) => {
-            return finish_failed(status, err.to_string(), &ops_counter, &on_status);
+            return tracker.finish_failed(err.to_string());
         }
     };
     let brand = backend
@@ -654,7 +663,7 @@ where
     let assets = backend.list_assets().await.unwrap_or_default();
 
     if cancel.is_cancelled() {
-        return finish_cancelled(status, &ops_counter, &on_status);
+        return tracker.finish_cancelled();
     }
 
     let use_openrouter = openrouter.is_configured();
@@ -671,14 +680,11 @@ where
             cancel: &cancel,
             ops_counter: &ops_counter,
         };
-        return refine_run::run_refinement(run, status, &on_status).await;
+        return refine_run::run_refinement(run, &tracker).await;
     }
     if !use_openrouter && !req.allow_local_fallback {
-        return finish_failed(
-            status,
+        return tracker.finish_failed(
             "OPENROUTER_API_KEY is not configured on the server. Set OPENROUTER_API_KEY or pass allow_local_fallback=true.".to_string(),
-            &ops_counter,
-            &on_status,
         );
     }
 
@@ -691,14 +697,14 @@ where
         })
     };
     if needs_analysis(&project) {
-        status.phase_label =
-            "Waiting for media intelligence analysis to finish before planning".to_string();
-        status.updated_at = Utc::now();
-        on_status(status.clone());
+        tracker.advance(
+            0.06,
+            Some("Waiting for media intelligence analysis to finish before planning".to_string()),
+        );
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
         while needs_analysis(&project) && tokio::time::Instant::now() < deadline {
             tokio::select! {
-                _ = cancel.cancelled() => return finish_cancelled(status, &ops_counter, &on_status),
+                _ = cancel.cancelled() => return tracker.finish_cancelled(),
                 _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
             }
             if let Ok(updated) = backend.get_project(&project_id).await {
@@ -749,20 +755,21 @@ where
         .collect();
 
     if !untranscribed_speech.is_empty() {
-        status.phase_label = format!(
-            "Transcribing {} speech asset(s) before Director planning",
-            untranscribed_speech.len()
+        let total_speech = untranscribed_speech.len();
+        tracker.advance(
+            0.07,
+            Some(format!(
+                "Transcribing {total_speech} speech asset(s) before Director planning"
+            )),
         );
-        status.updated_at = Utc::now();
-        on_status(status.clone());
 
         let mut transcribed_any = false;
-        for mid in untranscribed_speech {
+        for (idx, mid) in untranscribed_speech.into_iter().enumerate() {
             if cancel.is_cancelled() {
-                return finish_cancelled(status, &ops_counter, &on_status);
+                return tracker.finish_cancelled();
             }
             let tr_res = tokio::select! {
-                _ = cancel.cancelled() => return finish_cancelled(status, &ops_counter, &on_status),
+                _ = cancel.cancelled() => return tracker.finish_cancelled(),
                 r = backend.transcribe_media(&project_id, &mid, None) => r,
             };
             match tr_res {
@@ -774,6 +781,7 @@ where
                     tracing::debug!(media_id = %mid, "stage-1 auto-transcribe skipped: {err}");
                 }
             }
+            tracker.advance(lerp_progress(0.07, 0.12, idx + 1, total_speech), None);
         }
         if transcribed_any && let Ok(updated) = backend.get_project(&project_id).await {
             project = updated;
@@ -781,7 +789,7 @@ where
     }
 
     if cancel.is_cancelled() {
-        return finish_cancelled(status, &ops_counter, &on_status);
+        return tracker.finish_cancelled();
     }
 
     let has_visual_media = project
@@ -838,13 +846,13 @@ where
             .recommend_with_cancel(ModelRoleKind::DirectorMultimodal, Some(&cancel))
             .await;
         if cancel.is_cancelled() {
-            return finish_cancelled(status, &ops_counter, &on_status);
+            return tracker.finish_cancelled();
         }
         let wrk_rec = advisor
             .recommend_with_cancel(ModelRoleKind::SpecialistToolWorker, Some(&cancel))
             .await;
         if cancel.is_cancelled() {
-            return finish_cancelled(status, &ops_counter, &on_status);
+            return tracker.finish_cancelled();
         }
         let primary_dir = req
             .model_override
@@ -912,18 +920,19 @@ where
         )
     };
 
-    status.model_used = Some(director_model.clone());
-    status.used_local_fallback = !use_openrouter;
     let mut openrouter_unrecoverable = !use_openrouter;
 
     // Stage 1b: Director Plan
-    status.phase_label = if programmatic_visuals {
-        "Director designing programmatic scene storyboard & script".to_string()
-    } else {
-        "Director inspecting media intelligence & brand playbook".to_string()
-    };
-    status.updated_at = Utc::now();
-    on_status(status.clone());
+    tracker.update(|s| {
+        s.model_used = Some(director_model.clone());
+        s.used_local_fallback = !use_openrouter;
+        s.progress = 0.12;
+        s.phase_label = if programmatic_visuals {
+            "Director designing programmatic scene storyboard & script".to_string()
+        } else {
+            "Director inspecting media intelligence & brand playbook".to_string()
+        };
+    });
 
     let plan = if use_openrouter {
         match build_openrouter_director_plan(
@@ -951,7 +960,7 @@ where
         {
             Ok(p) => p,
             Err(AgentError::Cancelled) => {
-                return finish_cancelled(status, &ops_counter, &on_status);
+                return tracker.finish_cancelled();
             }
             Err(err) if req.allow_local_fallback => {
                 if is_unrecoverable_openrouter_error(&err) {
@@ -970,7 +979,9 @@ where
                     format!("Director failed; falling back to local plan: {err}"),
                     None,
                 );
-                status.used_local_fallback = true;
+                tracker.update(|s| {
+                    s.used_local_fallback = true;
+                });
                 build_deterministic_plan(&project, &brand, &req.prompt)
             }
             Err(err) => {
@@ -984,7 +995,7 @@ where
                     format!("Swarm aborted during Director planning: {err}"),
                     None,
                 );
-                return finish_failed(status, err.to_string(), &ops_counter, &on_status);
+                return tracker.finish_failed(err.to_string());
             }
         }
     } else {
@@ -992,7 +1003,7 @@ where
     };
 
     if cancel.is_cancelled() {
-        return finish_cancelled(status, &ops_counter, &on_status);
+        return tracker.finish_cancelled();
     }
 
     let max_turns = req.max_turns_per_worker.unwrap_or(6).clamp(1, 14);
@@ -1008,15 +1019,18 @@ where
             wave1_roles.push(AgentRole::Grade);
             wave1_grade_done = true;
         }
-        status.state = SwarmRunState::ExecutingSpine;
-        status.phase_label = if has_visual_media {
-            "Wave 1: Razor (V1/A1) & Grade (FX) editing in parallel".to_string()
-        } else {
-            "Wave 1: Razor (A1) assembling voiceover spine".to_string()
-        };
-        status.active_roles = wave1_roles;
-        status.updated_at = Utc::now();
-        on_status(status.clone());
+        let wave1_total = if has_visual_media { 2 } else { 1 };
+        let wave1_done = Arc::new(AtomicUsize::new(0));
+        tracker.update(|s| {
+            s.state = SwarmRunState::ExecutingSpine;
+            s.progress = 0.20;
+            s.phase_label = if has_visual_media {
+                "Wave 1: Razor (V1/A1) & Grade (FX) editing in parallel".to_string()
+            } else {
+                "Wave 1: Razor (A1) assembling voiceover spine".to_string()
+            };
+            s.active_roles = wave1_roles;
+        });
 
         let use_llm_wave1 = use_openrouter && !openrouter_unrecoverable;
         let grade_cancel = cancel.child_token();
@@ -1044,12 +1058,19 @@ where
                 .await;
                 if res.is_err() {
                     spine_grade_cancel.cancel();
+                } else {
+                    let done = wave1_done.fetch_add(1, Ordering::Relaxed) + 1;
+                    tracker.complete_role(
+                        Some(AgentRole::Razor),
+                        lerp_progress(0.20, 0.35, done, wave1_total),
+                        None,
+                    );
                 }
                 res
             },
             async {
                 if has_visual_media {
-                    run_specialist_with_lock(
+                    let res = run_specialist_with_lock(
                         backend.clone(),
                         openrouter.clone(),
                         use_llm_wave1,
@@ -1071,7 +1092,14 @@ where
                         grade_cancel,
                         ops_counter.clone(),
                     )
-                    .await
+                    .await;
+                    let done = wave1_done.fetch_add(1, Ordering::Relaxed) + 1;
+                    tracker.complete_role(
+                        Some(AgentRole::Grade),
+                        lerp_progress(0.20, 0.35, done, wave1_total),
+                        None,
+                    );
+                    res
                 } else {
                     (false, false, None)
                 }
@@ -1080,7 +1108,9 @@ where
 
         let (fb, fatal, err) = r_grade_w1;
         if fb {
-            status.used_local_fallback = true;
+            tracker.update(|s| {
+                s.used_local_fallback = true;
+            });
         }
         if fatal {
             openrouter_unrecoverable = true;
@@ -1092,14 +1122,16 @@ where
         match spine_res {
             Ok((used_fallback, fatal)) => {
                 if used_fallback {
-                    status.used_local_fallback = true;
+                    tracker.update(|s| {
+                        s.used_local_fallback = true;
+                    });
                 }
                 if fatal {
                     openrouter_unrecoverable = true;
                 }
             }
             Err(AgentError::Cancelled) => {
-                return finish_cancelled(status, &ops_counter, &on_status);
+                return tracker.finish_cancelled();
             }
             Err(err) => {
                 emit_swarm_log(
@@ -1112,7 +1144,7 @@ where
                     format!("Spine stage failed: {err}"),
                     None,
                 );
-                return finish_failed(status, err.to_string(), &ops_counter, &on_status);
+                return tracker.finish_failed(err.to_string());
             }
         }
     } else {
@@ -1129,7 +1161,7 @@ where
     }
 
     if cancel.is_cancelled() {
-        return finish_cancelled(status, &ops_counter, &on_status);
+        return tracker.finish_cancelled();
     }
 
     let refreshed = backend.get_project(&project_id).await.unwrap_or(project);
@@ -1202,17 +1234,35 @@ where
         active_roles.push(AgentRole::Mix);
     }
 
-    status.state = SwarmRunState::ExecutingSpecialists;
-    status.phase_label = wave2_label(
-        programmatic_visuals,
-        has_audio_media,
-        programmatic_scenes.len(),
-        narrated,
-    );
-    status.active_roles = active_roles;
-    status.ops_committed = ops_counter.load(Ordering::Relaxed);
-    status.updated_at = Utc::now();
-    on_status(status.clone());
+    let wave2_start: f32 = if has_visual_media || has_audio_media {
+        0.35
+    } else {
+        0.20
+    };
+    let wave2_end: f32 = if req.skip_qa { 0.96 } else { 0.76 };
+    let wave2_total: usize = if programmatic_visuals {
+        programmatic_scenes.len().max(1) + usize::from(narrated) + usize::from(has_audio_media)
+    } else {
+        usize::from(has_visual_media)
+            + usize::from(has_visual_media && !wave1_grade_done)
+            + usize::from(narrated)
+            + 1
+            + usize::from(has_audio_media)
+    };
+    let wave2_done = Arc::new(AtomicUsize::new(0));
+    let scene_units_reported = Arc::new(AtomicUsize::new(0));
+
+    tracker.update(|s| {
+        s.state = SwarmRunState::ExecutingSpecialists;
+        s.progress = wave2_start;
+        s.phase_label = wave2_label(
+            programmatic_visuals,
+            has_audio_media,
+            programmatic_scenes.len(),
+            narrated,
+        );
+        s.active_roles = active_roles;
+    });
 
     let use_llm_workers = use_openrouter && !openrouter_unrecoverable;
     let gfx_turns = if programmatic_visuals {
@@ -1255,10 +1305,32 @@ where
         worker_fallbacks.clone()
     };
 
+    let on_scene_done: Arc<dyn Fn(usize, usize) + Send + Sync> = {
+        let tracker = tracker.clone();
+        let wave2_done = wave2_done.clone();
+        let scene_units_reported = scene_units_reported.clone();
+        Arc::new(move |scenes_done, total_scenes| {
+            let prev = scene_units_reported.swap(scenes_done, Ordering::Relaxed);
+            let delta = scenes_done.saturating_sub(prev);
+            let done_total = wave2_done.fetch_add(delta, Ordering::Relaxed) + delta;
+            let progress = lerp_progress(wave2_start, wave2_end, done_total, wave2_total);
+            let label = if scenes_done < total_scenes {
+                format!("Building G1 scenes ({scenes_done}/{total_scenes} complete)")
+            } else {
+                format!("Built {total_scenes}/{total_scenes} G1 scenes")
+            };
+            if scenes_done >= total_scenes {
+                tracker.complete_role(Some(AgentRole::Gfx), progress, Some(label));
+            } else {
+                tracker.advance(progress, Some(label));
+            }
+        })
+    };
+
     let (r_broll, r_grade, r_caps, r_gfx, r_mix) = tokio::join!(
         async {
             if has_visual_media {
-                run_specialist_with_lock(
+                let res = run_specialist_with_lock(
                     backend.clone(),
                     openrouter.clone(),
                     use_llm_workers,
@@ -1280,14 +1352,21 @@ where
                     cancel.clone(),
                     ops_counter.clone(),
                 )
-                .await
+                .await;
+                let done = wave2_done.fetch_add(1, Ordering::Relaxed) + 1;
+                tracker.complete_role(
+                    Some(AgentRole::BRoll),
+                    lerp_progress(wave2_start, wave2_end, done, wave2_total),
+                    None,
+                );
+                res
             } else {
                 (false, false, None)
             }
         },
         async {
             if has_visual_media && !wave1_grade_done {
-                run_specialist_with_lock(
+                let res = run_specialist_with_lock(
                     backend.clone(),
                     openrouter.clone(),
                     use_llm_workers,
@@ -1309,14 +1388,21 @@ where
                     cancel.clone(),
                     ops_counter.clone(),
                 )
-                .await
+                .await;
+                let done = wave2_done.fetch_add(1, Ordering::Relaxed) + 1;
+                tracker.complete_role(
+                    Some(AgentRole::Grade),
+                    lerp_progress(wave2_start, wave2_end, done, wave2_total),
+                    None,
+                );
+                res
             } else {
                 (false, false, None)
             }
         },
         async {
             if narrated {
-                run_specialist_with_lock(
+                let res = run_specialist_with_lock(
                     backend.clone(),
                     openrouter.clone(),
                     use_llm_workers,
@@ -1338,7 +1424,14 @@ where
                     cancel.clone(),
                     ops_counter.clone(),
                 )
-                .await
+                .await;
+                let done = wave2_done.fetch_add(1, Ordering::Relaxed) + 1;
+                tracker.complete_role(
+                    Some(AgentRole::Caps),
+                    lerp_progress(wave2_start, wave2_end, done, wave2_total),
+                    None,
+                );
+                res
             } else {
                 (false, false, None)
             }
@@ -1365,10 +1458,11 @@ where
                     programmatic_scenes.clone(),
                     cancel.clone(),
                     ops_counter.clone(),
+                    on_scene_done.clone(),
                 )
                 .await
             } else {
-                run_specialist_with_lock(
+                let res = run_specialist_with_lock(
                     backend.clone(),
                     openrouter.clone(),
                     use_llm_workers,
@@ -1390,12 +1484,19 @@ where
                     cancel.clone(),
                     ops_counter.clone(),
                 )
-                .await
+                .await;
+                let done = wave2_done.fetch_add(1, Ordering::Relaxed) + 1;
+                tracker.complete_role(
+                    Some(AgentRole::Gfx),
+                    lerp_progress(wave2_start, wave2_end, done, wave2_total),
+                    None,
+                );
+                res
             }
         },
         async {
             if has_audio_media {
-                run_specialist_with_lock(
+                let res = run_specialist_with_lock(
                     backend.clone(),
                     openrouter.clone(),
                     use_llm_workers,
@@ -1417,7 +1518,14 @@ where
                     cancel.clone(),
                     ops_counter.clone(),
                 )
-                .await
+                .await;
+                let done = wave2_done.fetch_add(1, Ordering::Relaxed) + 1;
+                tracker.complete_role(
+                    Some(AgentRole::Mix),
+                    lerp_progress(wave2_start, wave2_end, done, wave2_total),
+                    None,
+                );
+                res
             } else {
                 (false, false, None)
             }
@@ -1425,12 +1533,14 @@ where
     );
 
     if cancel.is_cancelled() {
-        return finish_cancelled(status, &ops_counter, &on_status);
+        return tracker.finish_cancelled();
     }
 
     let specialist_results = [r_broll, r_grade, r_caps, r_gfx, r_mix];
     if specialist_results.iter().any(|(fb, _, _)| *fb) {
-        status.used_local_fallback = true;
+        tracker.update(|s| {
+            s.used_local_fallback = true;
+        });
     }
     if specialist_results.iter().any(|(_, fatal, _)| *fatal) {
         openrouter_unrecoverable = true;
@@ -1463,11 +1573,11 @@ where
                 ),
                 None,
             );
-            status.phase_label =
-                "Recovering programmatic G1 scenes with Director model".to_string();
-            status.active_roles = vec![AgentRole::Gfx];
-            status.updated_at = Utc::now();
-            on_status(status.clone());
+            tracker.update(|s| {
+                s.progress = wave2_end.min(0.74);
+                s.phase_label = "Recovering programmatic G1 scenes with Director model".to_string();
+                s.active_roles = vec![AgentRole::Gfx];
+            });
 
             let (rec_fb, rec_fatal, rec_err) = run_specialist_with_lock(
                 backend.clone(),
@@ -1493,7 +1603,9 @@ where
             )
             .await;
             if rec_fb {
-                status.used_local_fallback = true;
+                tracker.update(|s| {
+                    s.used_local_fallback = true;
+                });
             }
             if rec_fatal {
                 openrouter_unrecoverable = true;
@@ -1528,17 +1640,20 @@ where
             msg.clone(),
             None,
         );
-        return finish_failed(status, msg, &ops_counter, &on_status);
+        return tracker.finish_failed(msg);
     }
 
+    let mut qa_report: Option<QaReport> = None;
     if !req.skip_qa && !cancel.is_cancelled() {
-        status.state = SwarmRunState::RunningQa;
-        status.phase_label =
-            "Director running Stage-3 playback QA (frames, -14 LUFS & safe zones)".to_string();
-        status.active_roles = vec![AgentRole::Director];
-        status.ops_committed = ops_counter.load(Ordering::Relaxed);
-        status.updated_at = Utc::now();
-        on_status(status.clone());
+        const QA_START: f32 = 0.76;
+        const QA_END: f32 = 0.98;
+        tracker.update(|s| {
+            s.state = SwarmRunState::RunningQa;
+            s.progress = QA_START;
+            s.phase_label =
+                "Director running Stage-3 playback QA (frames, -14 LUFS & safe zones)".to_string();
+            s.active_roles = vec![AgentRole::Director];
+        });
 
         let qa_client = if openrouter.is_configured() && !openrouter_unrecoverable {
             Some(&openrouter)
@@ -1546,6 +1661,12 @@ where
             None
         };
         let vision = Some((director_model.as_str(), director_fallbacks.as_slice()));
+        let qa_cb = |frac: f32, label: String| {
+            tracker.advance(
+                QA_START + (QA_END - QA_START) * frac.clamp(0.0, 1.0),
+                Some(label),
+            );
+        };
         let qa = qa::run_qa_pass_with_options(
             backend.as_ref(),
             qa_client,
@@ -1557,6 +1678,7 @@ where
             qa::QaPassOptions {
                 specialist_errors: &specialist_errors,
                 director_supports_reasoning,
+                on_progress: Some(&qa_cb),
             },
         )
         .await;
@@ -1580,46 +1702,39 @@ where
                 qa.multimodal_summary.clone(),
             );
         }
-        status.qa_report = Some(qa);
+        tracker.update(|s| {
+            s.qa_report = Some(qa.clone());
+        });
+        qa_report = Some(qa);
     }
 
     if cancel.is_cancelled() {
-        return finish_cancelled(status, &ops_counter, &on_status);
+        return tracker.finish_cancelled();
     }
 
-    let has_issues =
-        !specialist_errors.is_empty() || status.qa_report.as_ref().is_some_and(|q| !q.passed);
-    status.state = SwarmRunState::Completed;
-    status.active_roles = Vec::new();
-    status.ops_committed = ops_counter.load(Ordering::Relaxed);
-    status.phase_label = if let Some(ref qa) = status.qa_report {
+    let has_issues = !specialist_errors.is_empty() || qa_report.as_ref().is_some_and(|q| !q.passed);
+    let final_ops = ops_counter.load(Ordering::Relaxed);
+    let final_phase_label = if let Some(ref qa) = qa_report {
         if has_issues {
             format!(
-                "Swarm finished with issues ({} ops committed · QA {}/100)",
-                status.ops_committed, qa.score
+                "Swarm finished with issues ({final_ops} ops committed · QA {}/100)",
+                qa.score
             )
         } else {
             format!(
-                "Swarm complete ({} ops committed · QA {}/100)",
-                status.ops_committed, qa.score
+                "Swarm complete ({final_ops} ops committed · QA {}/100)",
+                qa.score
             )
         }
     } else if !specialist_errors.is_empty() {
-        format!(
-            "Swarm finished with issues ({} ops committed)",
-            status.ops_committed
-        )
+        format!("Swarm finished with issues ({final_ops} ops committed)")
     } else {
-        format!("Swarm complete ({} ops committed)", status.ops_committed)
+        format!("Swarm complete ({final_ops} ops committed)")
     };
-    status.summary = Some(plan.hook_summary);
-    if !specialist_errors.is_empty() {
-        status.error = Some(specialist_errors.join("; "));
-    }
-    status.updated_at = Utc::now();
+    let final_error = (!specialist_errors.is_empty()).then(|| specialist_errors.join("; "));
     let final_log_details = match (
-        status.error.clone(),
-        status.qa_report.as_ref().and_then(format_qa_diagnostics),
+        final_error.clone(),
+        qa_report.as_ref().and_then(format_qa_diagnostics),
     ) {
         (Some(err), Some(qa_diag)) => Some(format!("{err} | {qa_diag}")),
         (Some(err), None) => Some(err),
@@ -1637,11 +1752,15 @@ where
         &project_id,
         &run_id,
         Some("director-01"),
-        status.phase_label.clone(),
+        final_phase_label.clone(),
         final_log_details,
     );
-    on_status(status.clone());
-    status
+    tracker.finish_completed(|s| {
+        s.phase_label = final_phase_label;
+        s.summary = Some(plan.hook_summary);
+        s.error = final_error;
+        s.qa_report = qa_report;
+    })
 }
 
 pub(crate) fn format_qa_diagnostics(qa: &QaReport) -> Option<String> {
@@ -1764,36 +1883,6 @@ fn wave2_label(
         label.push_str(" · No narration detected: captions skipped");
     }
     label
-}
-
-fn finish_failed(
-    mut status: SwarmRunStatus,
-    err: String,
-    ops_counter: &AtomicU32,
-    on_status: &impl Fn(SwarmRunStatus),
-) -> SwarmRunStatus {
-    status.state = SwarmRunState::Failed;
-    status.active_roles = Vec::new();
-    status.ops_committed = ops_counter.load(Ordering::Relaxed);
-    status.phase_label = "Swarm failed".to_string();
-    status.error = Some(err);
-    status.updated_at = Utc::now();
-    on_status(status.clone());
-    status
-}
-
-fn finish_cancelled(
-    mut status: SwarmRunStatus,
-    ops_counter: &AtomicU32,
-    on_status: &impl Fn(SwarmRunStatus),
-) -> SwarmRunStatus {
-    status.state = SwarmRunState::Cancelled;
-    status.active_roles = Vec::new();
-    status.ops_committed = ops_counter.load(Ordering::Relaxed);
-    status.phase_label = "Swarm cancelled".to_string();
-    status.updated_at = Utc::now();
-    on_status(status.clone());
-    status
 }
 
 pub(crate) fn build_deterministic_plan(
@@ -1972,6 +2061,7 @@ async fn run_programmatic_gfx_scene_fanout(
     scenes: Vec<SceneSpec>,
     cancel: CancellationToken,
     ops_counter: Arc<AtomicU32>,
+    on_scene_done: Arc<dyn Fn(usize, usize) + Send + Sync>,
 ) -> (bool, bool, Option<String>) {
     if cancel.is_cancelled() {
         return (false, false, None);
@@ -2030,6 +2120,8 @@ async fn run_programmatic_gfx_scene_fanout(
         )
         .await;
         lock_guard.release().await;
+        let scene_count = scenes.len().max(1);
+        on_scene_done(scene_count, scene_count);
         return (true, false, None);
     }
 
@@ -2184,6 +2276,7 @@ async fn run_programmatic_gfx_scene_fanout(
 
     let mut fatal_any = false;
     let mut scene_errors: Vec<String> = Vec::new();
+    let mut scenes_done = 0usize;
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -2207,6 +2300,8 @@ async fn run_programmatic_gfx_scene_fanout(
                         scene_errors.push(format!("gfx-scene-task: {join_err}"));
                     }
                 }
+                scenes_done += 1;
+                on_scene_done(scenes_done, total_scenes);
             }
         }
     }
@@ -2979,5 +3074,64 @@ mod tests {
         assert!(!diag.contains("gfx-lint-clean"));
         assert!(diag.contains("[ISSUE] vision-issue-0: Headline overlaps card"));
         assert!(diag.contains("[WARN] vision-warn-0: Tight margin"));
+    }
+
+    #[tokio::test]
+    async fn run_swarm_emits_monotonic_progress_reaching_one() {
+        let project = Project::new_default("prog", AspectPreset::Vertical9x16);
+        let pid = project.id.clone();
+        let backend = InMemBackend::new(project, Vec::new());
+        let client = test_support::offline_client();
+        let advisor = Arc::new(ModelAdvisor::new(client.clone()));
+        let emitted = Arc::new(std::sync::Mutex::new(Vec::<SwarmRunStatus>::new()));
+        let sink = emitted.clone();
+
+        let final_status = run_swarm(
+            backend,
+            client,
+            advisor,
+            pid,
+            "run-progress".to_string(),
+            SwarmRunRequest {
+                prompt: "Create a 12s explainer".to_string(),
+                model_override: None,
+                allow_local_fallback: true,
+                max_turns_per_worker: Some(4),
+                skip_qa: true,
+                approved_plan: None,
+                mode: SwarmRunMode::Generate,
+                selected_clip_ids: Vec::new(),
+                playhead_sec: None,
+                conversation_history: Vec::new(),
+            },
+            CancellationToken::new(),
+            move |status| {
+                sink.lock().unwrap().push(status);
+            },
+        )
+        .await;
+
+        assert_eq!(final_status.state, SwarmRunState::Completed);
+        assert!((final_status.progress - 1.0).abs() < 1e-6);
+
+        let updates = emitted.lock().unwrap();
+        assert!(
+            updates.len() >= 3,
+            "expected multiple progress updates, got {}",
+            updates.len()
+        );
+        for window in updates.windows(2) {
+            assert!(
+                window[1].progress >= window[0].progress,
+                "progress regressed from {} to {}",
+                window[0].progress,
+                window[1].progress
+            );
+        }
+        assert!(
+            updates.iter().any(|s| s.progress > 0.0 && s.progress < 1.0),
+            "expected intermediate fractional progress updates"
+        );
+        assert!((updates.last().unwrap().progress - 1.0).abs() < 1e-6);
     }
 }

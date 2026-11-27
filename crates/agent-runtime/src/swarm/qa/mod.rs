@@ -20,10 +20,24 @@ use checks::{
 use repair::repair_gfx_clips_from_vision;
 use vision::inspect_playback_frames;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Default)]
 pub struct QaPassOptions<'a> {
     pub specialist_errors: &'a [String],
     pub director_supports_reasoning: bool,
+    pub on_progress: Option<&'a (dyn Fn(f32, String) + Send + Sync)>,
+}
+
+impl std::fmt::Debug for QaPassOptions<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QaPassOptions")
+            .field("specialist_errors", &self.specialist_errors)
+            .field(
+                "director_supports_reasoning",
+                &self.director_supports_reasoning,
+            )
+            .field("has_on_progress", &self.on_progress.is_some())
+            .finish()
+    }
 }
 
 pub async fn run_qa_pass(
@@ -103,6 +117,16 @@ pub async fn run_qa_pass_with_options(
     let brand = backend.get_brand(&project.brand_playbook_id).await.ok();
     let assets = backend.list_assets().await.unwrap_or_default();
 
+    let report_progress = |frac: f32, label: &str| {
+        if let Some(cb) = options.on_progress {
+            cb(frac.clamp(0.0, 1.0), label.to_string());
+        }
+    };
+    report_progress(
+        0.05,
+        "Director running Stage-3 playback QA (checks & -14 LUFS)",
+    );
+
     // 1. Timeline completeness, gaps & Log-to-Rec.709 recovery
     if !cancel.is_cancelled() {
         let total_clips: usize = project.tracks.iter().map(|t| t.clips.len()).sum();
@@ -175,6 +199,12 @@ pub async fn run_qa_pass_with_options(
     }
 
     // 5. Playback frame capture & optional OpenRouter multimodal vision critique
+    if !cancel.is_cancelled() {
+        report_progress(
+            0.25,
+            "Director capturing playback frames & running Vision QA",
+        );
+    }
     let mut vision_res = inspect_playback_frames(
         backend,
         openrouter,
@@ -187,6 +217,9 @@ pub async fn run_qa_pass_with_options(
     )
     .await;
     let mut total_frames_inspected = vision_res.frames_inspected;
+    if !cancel.is_cancelled() {
+        report_progress(0.60, "Director reviewing Vision QA findings");
+    }
 
     // 6. Closed-loop visual auto-repair: when Enhance/auto_fix is enabled and Vision QA
     // identified fixable G1 clips, patch their HTML in place and re-verify ONLY the repaired
@@ -211,6 +244,13 @@ pub async fn run_qa_pass_with_options(
             if active_fixes.is_empty() {
                 break;
             }
+
+            let (repair_frac, repair_label) = if repair_round == 1 {
+                (0.65, "Director QA repairing visual defects (round 1)")
+            } else {
+                (0.86, "Director QA repairing remaining issues (round 2)")
+            };
+            report_progress(repair_frac, repair_label);
 
             let round_repaired_ids = repair_gfx_clips_from_vision(
                 backend,
@@ -237,6 +277,13 @@ pub async fn run_qa_pass_with_options(
                 break;
             };
             project = updated;
+
+            let (verify_frac, verify_label) = if repair_round == 1 {
+                (0.80, "Director QA re-verifying repaired scenes (round 1)")
+            } else {
+                (0.94, "Director QA re-verifying repaired scenes (round 2)")
+            };
+            report_progress(verify_frac, verify_label);
 
             let round_set: HashSet<String> = round_repaired_ids.into_iter().collect();
             let mut verify_checks = Vec::new();
@@ -306,6 +353,8 @@ pub async fn run_qa_pass_with_options(
             time_sec: None,
             auto_fixed: false,
         });
+    } else {
+        report_progress(1.0, "Director finalizing Stage-3 QA report");
     }
 
     finalize_report(
@@ -971,6 +1020,7 @@ mod tests {
             QaPassOptions {
                 specialist_errors: &errs,
                 director_supports_reasoning: false,
+                on_progress: None,
             },
         )
         .await;

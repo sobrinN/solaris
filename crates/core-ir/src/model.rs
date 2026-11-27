@@ -503,6 +503,8 @@ pub struct SwarmRunStatus {
     pub state: SwarmRunState,
     pub phase_label: String,
     #[serde(default)]
+    pub progress: f32,
+    #[serde(default)]
     pub model_used: Option<String>,
     pub used_local_fallback: bool,
     #[serde(default)]

@@ -332,6 +332,7 @@ pub async fn start_swarm_run(
         project_id: id.clone(),
         state: SwarmRunState::Queued,
         phase_label: "Queued for Solaris Swarm".to_string(),
+        progress: 0.0,
         model_used: None,
         used_local_fallback: !state.inner.openrouter.is_configured(),
         active_roles: Vec::new(),
@@ -583,6 +584,7 @@ pub async fn run_project_qa(
         QaPassOptions {
             specialist_errors: &[],
             director_supports_reasoning,
+            on_progress: None,
         },
     )
     .await;

@@ -26,6 +26,7 @@ import type {
 } from "@solaris/engine-client";
 import { escapeHtml } from "@solaris/gfx-runtime";
 import { SolarisAudioEngine } from "../../lib/audioEngine";
+import { computeStudioGridLayout } from "../../lib/studioLayout";
 import {
   buildBatchDelete,
   buildBatchSplitAtPlayhead,
@@ -225,7 +226,8 @@ export function StudioWorkspace({
     if (!el || typeof ResizeObserver === "undefined") return;
     const measure = () => {
       const rect = el.getBoundingClientRect();
-      const w = Math.floor(rect.width);
+      // Subtract px-2 horizontal padding (16px) so gridTemplateColumns fits the content box
+      const w = Math.max(0, Math.floor(rect.width) - 16);
       const h = Math.floor(rect.height);
       if (w <= 0 || h <= 0) return;
       setStudioGridSize((prev) => (prev.w === w && prev.h === h ? prev : { w, h }));
@@ -1231,39 +1233,16 @@ export function StudioWorkspace({
   const canvasAspect = project.canvas.width / Math.max(1, project.canvas.height);
 
   // Adapt the center Program Monitor column width to the project's actual aspect ratio
-  // (9:16, 1:1, or 16:9) so the rendered video maximizes height with zero wasted black sidebars.
+  // (9:16, 1:1, or 16:9) so the rendered video maximizes height and stays centered.
   const studioGridStyle = useMemo(() => {
-    if (studioGridSize.w < 1024 || studioGridSize.h <= 0) return undefined;
-    if (viewerMode === "source" || canvasAspect > 1.2) return undefined;
-
-    const isXl = studioGridSize.w >= 1280;
-    const showScopes = isXl && scopesOpen;
-    const stageInnerH = Math.max(240, studioGridSize.h - 46);
-    const idealProgramPx = Math.round(stageInnerH * canvasAspect + 16);
-    const minProgramPx = canvasAspect < 0.85 ? 280 : 360;
-    const otherMin = showScopes
-      ? 268 + 200 + 260 + 40
-      : isXl
-        ? 290 + 272 + 32
-        : 260 + 252 + 32;
-    const maxProgramPx = Math.max(minProgramPx, studioGridSize.w - otherMin);
-    const programColPx = Math.round(
-      Math.max(minProgramPx, Math.min(idealProgramPx, maxProgramPx)),
-    );
-
-    if (showScopes) {
-      return {
-        gridTemplateColumns: `minmax(268px, 1.05fr) ${programColPx}px minmax(200px, 0.65fr) minmax(260px, 0.95fr)`,
-      };
-    }
-    if (isXl) {
-      return {
-        gridTemplateColumns: `minmax(290px, 1.05fr) ${programColPx}px minmax(272px, 0.95fr)`,
-      };
-    }
-    return {
-      gridTemplateColumns: `minmax(260px, 1.05fr) ${programColPx}px minmax(252px, 0.95fr)`,
-    };
+    const layout = computeStudioGridLayout({
+      width: studioGridSize.w,
+      height: studioGridSize.h,
+      canvasAspect,
+      scopesOpen,
+      viewerMode,
+    });
+    return layout ? { gridTemplateColumns: layout.gridTemplateColumns } : undefined;
   }, [studioGridSize.w, studioGridSize.h, viewerMode, canvasAspect, scopesOpen]);
 
   // Show active swarm tracks live as agents work on them so channels appear dynamically.
@@ -1436,7 +1415,7 @@ export function StudioWorkspace({
         style={studioGridStyle}
         className={`grid min-h-0 flex-1 grid-cols-1 gap-2 px-2 pt-2 ${
           scopesOpen
-            ? "lg:grid-cols-[minmax(300px,340px)_minmax(340px,1fr)_minmax(276px,308px)] xl:grid-cols-[minmax(330px,375px)_minmax(400px,1fr)_212px_minmax(288px,320px)]"
+            ? "lg:grid-cols-[minmax(300px,340px)_minmax(340px,1fr)_minmax(276px,308px)] xl:grid-cols-[minmax(320px,380px)_minmax(400px,1fr)_204px_minmax(280px,320px)]"
             : "lg:grid-cols-[minmax(320px,360px)_minmax(420px,1fr)_minmax(290px,324px)] xl:grid-cols-[minmax(350px,390px)_minmax(500px,1fr)_minmax(310px,340px)]"
         }`}
       >

@@ -254,6 +254,7 @@ mod tests {
             project_id: "project".to_string(),
             state: SwarmRunState::Queued,
             phase_label: "Queued".to_string(),
+            progress: 0.0,
             model_used: None,
             used_local_fallback: false,
             active_roles: Vec::new(),
@@ -267,5 +268,6 @@ mod tests {
         };
         let json = serde_json::to_value(&status).expect("serialize");
         assert!(json["refinement_summary"].is_null());
+        assert_eq!(json["progress"], 0.0);
     }
 }

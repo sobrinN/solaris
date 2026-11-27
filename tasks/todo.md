@@ -55,3 +55,4 @@
 - [2026-11-27] §6 — Polished `BroadcastScopes.tsx` with `h-9` header, higher-res Waveform/Vectorscope canvases, phosphor cloud fallback, and `-14 LUFS` loudness meter.
 - [2026-11-27] §7 — Upgraded `ColorWheelControl.tsx`, `InspectorPanel.tsx` (dynamic slider fills, double-click reset, 6-card Look Presets), and `BatchInspector.tsx`.
 - [2026-11-27] §8 — Updated `tasks/lessons.md`, `DESIGN.md`, and ran full Rust + TypeScript + static guard verification.
+- [2026-11-27] Director Build Progress Bar — Added `SwarmRunStatus.progress` (`0.0..=1.0`), `SwarmProgressTracker` (`crates/agent-runtime/src/swarm/progress.rs`), QA sub-step progress callback, granular Generate/Refine progress emission, `resolveSwarmProgress` helper + unit tests, and an accessible percentage loading bar in `SwarmActivityPanel.tsx`.

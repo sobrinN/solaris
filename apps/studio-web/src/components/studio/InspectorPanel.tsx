@@ -422,7 +422,7 @@ export function InspectorPanel({
         )}
       </div>
 
-      <div className="solaris-scroll flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto p-2.5">
+      <div className="solaris-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-2">
       {activeTab === "clip" && (
         <>
       {/* Contextual Selected GFX Prop Editor */}
@@ -759,7 +759,7 @@ export function InspectorPanel({
           </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-1.5 rounded-lg border border-areia/[0.07] bg-void/70 px-1.5 py-2.5 text-center">
+        <div className="grid grid-cols-3 gap-1.5 rounded-lg border border-areia/[0.07] bg-void/70 px-1.5 py-2 text-center">
           <ColorWheelControl
             label="LIFT"
             value={grade.lift}
@@ -780,7 +780,7 @@ export function InspectorPanel({
           />
         </div>
 
-        <div className="space-y-2 rounded-lg border border-areia/[0.07] bg-void/55 p-2.5">
+        <div className="space-y-1.5 rounded-lg border border-areia/[0.07] bg-void/55 p-2">
           {(
             [
               ["temp", "Temp", -1, 1, 0.02, 0],
@@ -912,7 +912,7 @@ export function InspectorPanel({
                     onPreviewGrade(next);
                     onCommitGrade(next);
                   }}
-                  className={`flex items-center gap-2 rounded-lg border px-2 py-1.5 text-left transition-colors motion-reduce:transition-none ${
+                  className={`flex items-center gap-2 rounded-lg border px-2 py-1 text-left transition-colors motion-reduce:transition-none ${
                     active
                       ? "border-amarelo-ideias/55 bg-accent text-areia"
                       : "border-areia/[0.08] bg-void/65 text-areia/75 hover:border-laranja-criacao/40 hover:bg-accent hover:text-areia"

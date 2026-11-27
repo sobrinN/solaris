@@ -1,7 +1,6 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-use chrono::Utc;
 use futures_util::future::join_all;
 use serde_json::{Value, json};
 use solaris_core_ir::{
@@ -10,6 +9,7 @@ use solaris_core_ir::{
 use tokio_util::sync::CancellationToken;
 
 use super::llm::{emit_swarm_log, run_llm_worker_loop};
+use super::progress::{SwarmProgressTracker, lerp_progress};
 use super::qa::{QaPassOptions, run_qa_pass_with_options};
 use super::refine::{
     RefineFocus, RefinementPlan, RefinementTarget, build_refine_snapshot, no_change_summary,
@@ -17,10 +17,7 @@ use super::refine::{
 };
 use super::refine_plan::{RefineModels, build_refinement_plan, resolve_refine_models};
 use super::request::{NOTHING_TO_REFINE, SwarmRunMode, timeline_has_clips};
-use super::{
-    SwarmRunRequest, TrackLockGuard, finish_cancelled, finish_failed,
-    is_unrecoverable_openrouter_error,
-};
+use super::{SwarmRunRequest, TrackLockGuard, is_unrecoverable_openrouter_error};
 use crate::advisor::ModelAdvisor;
 use crate::backend::SolarisBackend;
 use crate::error::AgentError;
@@ -65,8 +62,7 @@ struct RoleOutcome {
 
 pub(super) async fn run_refinement(
     run: RefineRun<'_>,
-    mut status: SwarmRunStatus,
-    on_status: &impl Fn(SwarmRunStatus),
+    tracker: &Arc<SwarmProgressTracker>,
 ) -> SwarmRunStatus {
     let RefineRun {
         backend,
@@ -81,28 +77,18 @@ pub(super) async fn run_refinement(
         ops_counter,
     } = run;
     if !timeline_has_clips(project) {
-        return finish_failed(
-            status,
-            NOTHING_TO_REFINE.to_string(),
-            ops_counter,
-            on_status,
-        );
+        return tracker.finish_failed(NOTHING_TO_REFINE.to_string());
     }
     if !openrouter.is_configured() {
-        return finish_failed(
-            status,
-            REFINE_NEEDS_MODEL.to_string(),
-            ops_counter,
-            on_status,
-        );
+        return tracker.finish_failed(REFINE_NEEDS_MODEL.to_string());
     }
     if cancel.is_cancelled() {
-        return finish_cancelled(status, ops_counter, on_status);
+        return tracker.finish_cancelled();
     }
 
     let models = resolve_refine_models(advisor, req, cancel).await;
     if cancel.is_cancelled() {
-        return finish_cancelled(status, ops_counter, on_status);
+        return tracker.finish_cancelled();
     }
     let snapshot = build_refine_snapshot(
         project,
@@ -113,12 +99,13 @@ pub(super) async fn run_refinement(
         },
     );
 
-    status.state = SwarmRunState::Planning;
-    status.model_used = Some(models.director.clone());
-    status.active_roles = vec![AgentRole::Director];
-    status.phase_label = "Director reviewing the cut against your request".to_string();
-    status.updated_at = Utc::now();
-    on_status(status.clone());
+    tracker.update(|s| {
+        s.state = SwarmRunState::Planning;
+        s.model_used = Some(models.director.clone());
+        s.active_roles = vec![AgentRole::Director];
+        s.progress = 0.10;
+        s.phase_label = "Director reviewing the cut against your request".to_string();
+    });
 
     let plan = match build_refinement_plan(
         backend,
@@ -133,8 +120,8 @@ pub(super) async fn run_refinement(
     .await
     {
         Ok(plan) => plan,
-        Err(AgentError::Cancelled) => return finish_cancelled(status, ops_counter, on_status),
-        Err(err) => return finish_failed(status, err.to_string(), ops_counter, on_status),
+        Err(AgentError::Cancelled) => return tracker.finish_cancelled(),
+        Err(err) => return tracker.finish_failed(err.to_string()),
     };
     emit_swarm_log(
         backend.as_ref(),
@@ -149,7 +136,7 @@ pub(super) async fn run_refinement(
 
     if plan.targets.is_empty() {
         let summary = no_change_summary(&plan.summary);
-        return complete_refinement(status, summary, None, ops_counter, on_status);
+        return complete_refinement(tracker, summary, None);
     }
 
     let mut locked: Vec<&str> = Vec::new();
@@ -166,21 +153,22 @@ pub(super) async fn run_refinement(
     }
     if dispatch.is_empty() {
         let summary = with_locked_note(no_change_summary(&plan.summary), &locked);
-        return complete_refinement(status, summary, None, ops_counter, on_status);
+        return complete_refinement(tracker, summary, None);
     }
 
-    status.state = SwarmRunState::ExecutingSpecialists;
-    status.active_roles = dispatch.iter().map(|(target, _)| target.role).collect();
-    status.phase_label = format!(
-        "Refining {}",
-        dispatch
-            .iter()
-            .map(|(target, _)| refinement_agent_id(target.role))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    status.updated_at = Utc::now();
-    on_status(status.clone());
+    let spec_start: f32 = 0.25;
+    let spec_end: f32 = if req.skip_qa { 0.96 } else { 0.75 };
+    let role_names = dispatch
+        .iter()
+        .map(|(target, _)| refinement_agent_id(target.role))
+        .collect::<Vec<_>>()
+        .join(", ");
+    tracker.update(|s| {
+        s.state = SwarmRunState::ExecutingSpecialists;
+        s.active_roles = dispatch.iter().map(|(target, _)| target.role).collect();
+        s.progress = spec_start;
+        s.phase_label = format!("Refining {role_names}");
+    });
 
     let ctx = RefineContext {
         backend,
@@ -196,34 +184,55 @@ pub(super) async fn run_refinement(
         cancel,
         ops_counter,
     };
-    let outcomes = join_all(
-        dispatch
-            .iter()
-            .map(|(target, tracks)| run_refine_role(&ctx, target, tracks)),
-    )
+    let dispatch_total = dispatch.len();
+    let dispatch_done = Arc::new(AtomicUsize::new(0));
+    let ctx_ref = &ctx;
+    let outcomes = join_all(dispatch.iter().map(|(target, tracks)| {
+        let tracker = tracker.clone();
+        let dispatch_done = dispatch_done.clone();
+        async move {
+            let outcome = run_refine_role(ctx_ref, target, tracks).await;
+            let done_now = dispatch_done.fetch_add(1, Ordering::Relaxed) + 1;
+            tracker.complete_role(
+                Some(target.role),
+                lerp_progress(spec_start, spec_end, done_now, dispatch_total),
+                None,
+            );
+            outcome
+        }
+    }))
     .await;
     if cancel.is_cancelled() {
-        return finish_cancelled(status, ops_counter, on_status);
+        return tracker.finish_cancelled();
     }
 
     let fatal = outcomes.iter().any(|o| o.fatal);
     let errors: Vec<String> = outcomes.iter().filter_map(|o| o.error.clone()).collect();
     if fatal || outcomes.iter().all(|o| o.error.is_some()) {
-        return finish_failed(status, errors.join("; "), ops_counter, on_status);
+        return tracker.finish_failed(errors.join("; "));
     }
 
     if !req.skip_qa {
-        status.state = SwarmRunState::RunningQa;
-        status.phase_label =
-            "Director running Stage-3 playback QA (frames, -14 LUFS & safe zones)".to_string();
-        status.active_roles = vec![AgentRole::Director];
-        status.updated_at = Utc::now();
-        on_status(status.clone());
+        const QA_START: f32 = 0.75;
+        const QA_END: f32 = 0.98;
+        tracker.update(|s| {
+            s.state = SwarmRunState::RunningQa;
+            s.progress = QA_START;
+            s.phase_label =
+                "Director running Stage-3 playback QA (frames, -14 LUFS & safe zones)".to_string();
+            s.active_roles = vec![AgentRole::Director];
+        });
 
         let vision = Some((
             models.director.as_str(),
             models.director_fallbacks.as_slice(),
         ));
+        let qa_cb = |frac: f32, label: String| {
+            tracker.advance(
+                QA_START + (QA_END - QA_START) * frac.clamp(0.0, 1.0),
+                Some(label),
+            );
+        };
         let qa = run_qa_pass_with_options(
             backend.as_ref(),
             Some(openrouter),
@@ -235,13 +244,16 @@ pub(super) async fn run_refinement(
             QaPassOptions {
                 specialist_errors: &errors,
                 director_supports_reasoning: models.director_low_reasoning,
+                on_progress: Some(&qa_cb),
             },
         )
         .await;
-        status.qa_report = Some(qa);
+        tracker.update(|s| {
+            s.qa_report = Some(qa);
+        });
     }
     if cancel.is_cancelled() {
-        return finish_cancelled(status, ops_counter, on_status);
+        return tracker.finish_cancelled();
     }
 
     let mut summary = plan.summary.clone();
@@ -250,25 +262,19 @@ pub(super) async fn run_refinement(
     }
     let summary = with_locked_note(summary, &locked);
     let error = (!errors.is_empty()).then(|| errors.join("; "));
-    complete_refinement(status, summary, error, ops_counter, on_status)
+    complete_refinement(tracker, summary, error)
 }
 
 fn complete_refinement(
-    mut status: SwarmRunStatus,
+    tracker: &SwarmProgressTracker,
     summary: String,
     error: Option<String>,
-    ops_counter: &AtomicU32,
-    on_status: &impl Fn(SwarmRunStatus),
 ) -> SwarmRunStatus {
-    status.state = SwarmRunState::Completed;
-    status.active_roles = Vec::new();
-    status.ops_committed = ops_counter.load(Ordering::Relaxed);
-    status.phase_label = summary.clone();
-    status.refinement_summary = Some(summary);
-    status.error = error;
-    status.updated_at = Utc::now();
-    on_status(status.clone());
-    status
+    tracker.finish_completed(|s| {
+        s.phase_label = summary.clone();
+        s.refinement_summary = Some(summary);
+        s.error = error;
+    })
 }
 
 fn with_locked_note(summary: String, locked: &[&str]) -> String {

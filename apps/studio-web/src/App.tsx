@@ -141,7 +141,12 @@ export function App() {
       const prevRank = SWARM_STATE_RANK[prev.state];
       const nextRank = SWARM_STATE_RANK[next.state];
       if (nextRank < prevRank) return prev;
-      if (nextRank === prevRank && next.ops_committed < prev.ops_committed) return prev;
+      if (nextRank === prevRank) {
+        const prevProg = Number.isFinite(prev.progress) ? prev.progress : 0;
+        const nextProg = Number.isFinite(next.progress) ? next.progress : 0;
+        if (nextProg < prevProg) return prev;
+        if (nextProg === prevProg && next.ops_committed < prev.ops_committed) return prev;
+      }
       return next;
     });
   }, []);

@@ -830,37 +830,31 @@ export function TimelinePanel({
             <div
               key={track.id}
               data-cursor-anchor={`timeline.track.${track.id}`}
-              className={`flex shrink-0 items-stretch ${
-                isPopulated ? "h-[44px]" : "h-[26px]"
-              }`}
+              className="flex h-[26px] shrink-0 items-stretch"
             >
               {/* Track Header */}
               <div className="sticky left-0 z-20 flex w-44 shrink-0 items-center justify-between border-r border-areia/10 bg-void/95 pr-2 pl-0 backdrop-blur-sm">
-                <div className="flex min-w-0 items-center gap-2">
+                <div
+                  className="flex min-w-0 items-center gap-2"
+                  title={`${track.code} ${track.name} · ${track.subtitle}`}
+                >
                   <span
                     className={`w-[3px] self-stretch ${
                       isPopulated ? "opacity-100" : "opacity-45"
                     } ${TRACK_STRIP_COLORS[track.kind]}`}
                   />
-                  <div className="min-w-0 py-0.5">
-                    <div className="flex items-center gap-1.5">
-                      <span
-                        className={`text-[10px] font-semibold tracking-[0.08em] ${
-                          isPopulated ? "text-areia" : "text-areia/65"
-                        }`}
-                      >
-                        {track.code} {track.name}
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <span
+                      className={`truncate text-[10px] font-semibold tracking-[0.08em] ${
+                        isPopulated ? "text-areia" : "text-areia/65"
+                      }`}
+                    >
+                      {track.code} {track.name}
+                    </span>
+                    {track.clips.length > 0 && (
+                      <span className="tabular-nums shrink-0 rounded bg-grafite/90 px-1 text-[9px] font-medium text-areia/60">
+                        {track.clips.length}
                       </span>
-                      {track.clips.length > 0 && (
-                        <span className="tabular-nums rounded bg-grafite/90 px-1 text-[9px] font-medium text-areia/60">
-                          {track.clips.length}
-                        </span>
-                      )}
-                    </div>
-                    {isPopulated && (
-                      <div className="truncate text-[9px] text-areia/45">
-                        {track.subtitle}
-                      </div>
                     )}
                   </div>
                 </div>
@@ -1027,8 +1021,6 @@ export function TimelinePanel({
                     (track.kind === "a_roll" ||
                       track.kind === "voice" ||
                       track.kind === "music");
-                  const captionWordCount =
-                    payload.kind === "caption" ? payload.caption.words.length : 0;
 
                   return (
                     <div
@@ -1050,7 +1042,7 @@ export function TimelinePanel({
                         }
                       }}
                       title={`${clip.label} (${effectiveStart.toFixed(2)}s · ${effectiveDur.toFixed(2)}s)`}
-                      className={`group absolute top-1 bottom-1 flex flex-col justify-between overflow-hidden rounded-md border px-2 py-1 text-left text-[10px] text-areia/95 transition-colors motion-reduce:transition-none ${
+                      className={`group absolute top-[2px] bottom-[2px] flex items-center justify-between gap-1.5 overflow-hidden rounded-[5px] border px-2 text-left text-[10px] text-areia/95 transition-colors motion-reduce:transition-none ${
                         track.locked
                           ? "cursor-not-allowed opacity-75"
                           : "cursor-grab active:cursor-grabbing"
@@ -1076,7 +1068,7 @@ export function TimelinePanel({
                           title="Drag to trim clip start"
                           className="absolute top-0 bottom-0 left-0 z-10 flex w-2 cursor-ew-resize items-center justify-center"
                         >
-                          <span className="h-4 w-[3px] rounded-full bg-amarelo-ideias/0 transition-colors group-hover:bg-amarelo-ideias/75 motion-reduce:transition-none" />
+                          <span className="h-3 w-[2.5px] rounded-full bg-amarelo-ideias/0 transition-colors group-hover:bg-amarelo-ideias/75 motion-reduce:transition-none" />
                         </div>
                       )}
                       {!track.locked && onTrimOrMoveClip && (
@@ -1088,13 +1080,13 @@ export function TimelinePanel({
                           title="Drag to trim clip duration"
                           className="absolute top-0 right-0 bottom-0 z-10 flex w-2 cursor-ew-resize items-center justify-center"
                         >
-                          <span className="h-4 w-[3px] rounded-full bg-amarelo-ideias/0 transition-colors group-hover:bg-amarelo-ideias/75 motion-reduce:transition-none" />
+                          <span className="h-3 w-[2.5px] rounded-full bg-amarelo-ideias/0 transition-colors group-hover:bg-amarelo-ideias/75 motion-reduce:transition-none" />
                         </div>
                       )}
                       {showWave && (
                         <div
                           aria-hidden="true"
-                          className="pointer-events-none absolute inset-x-1 bottom-0.5 flex h-4 items-end gap-[1px] opacity-50"
+                          className="pointer-events-none absolute inset-x-1 bottom-0 flex h-3 items-end gap-[1px] opacity-35"
                         >
                           {slicedPeaks.map((peak, i) => (
                             <span
@@ -1107,32 +1099,12 @@ export function TimelinePanel({
                           ))}
                         </div>
                       )}
-                      <div className="relative flex items-center justify-between gap-1.5">
-                        <span className="truncate font-semibold leading-tight">
-                          {clip.label}
-                        </span>
-                        <span className="tabular-nums shrink-0 text-[9px] text-areia/55">
-                          {formatCompactDuration(effectiveDur)}
-                        </span>
-                      </div>
-                      {!showWave && (
-                        <div className="relative flex items-center gap-1.5">
-                          {payload.kind === "gfx" && (
-                            <span className="rounded bg-track-g1/20 px-1 text-[8px] font-semibold uppercase tracking-wider text-areia/75">
-                              GFX
-                            </span>
-                          )}
-                          {payload.kind === "caption" && captionWordCount > 0 && (
-                            <span className="tabular-nums text-[8px] text-areia/55">
-                              {captionWordCount}w
-                            </span>
-                          )}
-                          <span
-                            aria-hidden="true"
-                            className={`h-[1.5px] flex-1 rounded-full opacity-25 ${TRACK_STRIP_COLORS[track.kind]}`}
-                          />
-                        </div>
-                      )}
+                      <span className="relative truncate font-medium leading-none">
+                        {clip.label}
+                      </span>
+                      <span className="relative tabular-nums shrink-0 text-[9px] leading-none text-areia/55">
+                        {formatCompactDuration(effectiveDur)}
+                      </span>
                     </div>
                   );
                 })}

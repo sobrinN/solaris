@@ -299,6 +299,7 @@ export interface SwarmRunStatus {
   project_id: string;
   state: SwarmRunState;
   phase_label: string;
+  progress: number;
   model_used?: string | null;
   used_local_fallback: boolean;
   active_roles: AgentRole[];
