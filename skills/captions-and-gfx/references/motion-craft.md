@@ -1,24 +1,12 @@
-# Solaris Motion Craft, Visual Worlds & Kinetic Choreography
+# Solaris Motion Craft, Choreography & Kinetic Physics
 
 Read this before authoring any custom HTML/CSS/SVG/GSAP scene or motion-graphic overlay on `G1`. Every rule and numeric value here is adapted specifically for Solaris's offline deterministic sandbox (`window.gsap`, `--brand-*` CSS tokens, `window.__timelines["main"]`, zero external URLs, zero `Math.random`).
 
 ---
 
-## 1. The 9 Visual Worlds (Choose One Cohesive Language Per Film)
+## 1. Visual Worlds & Core CSS Layer
 
-Never mix incompatible visual languages across scenes. Pick **one** world for the entire video in `art_direction`, then feed the active Brand Playbook's `--brand-*` tokens into it:
-
-| World ID | Best For | Ground & Material Numbers | Motion Signature |
-| --- | --- | --- | --- |
-| **`glass`** | SaaS/AI launches, data proof, channel intros | Dark ground (`--brand-bg`) + layered radial silk glows (`filter: blur(80px)`) + frosted glass panes (`rgba(255,255,255,.16→.04)`, `backdrop-filter: blur(22px) saturate(160%)`, `1px` top rim `45%`, `1px` hairline `12%`, drop `0 40px 90px -30px rgba(0,0,0,.45)`, accent glow `35%`) + `5%` SVG grain + `22%` vignette | One 3D `perspective: 1600px` camera rig, `expo.out` fly-ins from `z: -900`, specular `--sheen` sweep on landing, rack-focus DOF (`blur(7–9px)` off-focus) |
-| **`studio`** | Bold product reveals, single-color brands | Glowing radial brand-color stage (`--brand-accent` / `--brand-bg`), subtle sunburst rays, glass hero object, designer cursor + dashed selection marquee | Snappy `back.out(1.6)` hero pop, cursor-triggered state changes, punchy camera pushes |
-| **`monochrome`** | Founder pitches, agencies, technical authority | Neutral dark or warm-grey architectural dot-grid canvas (`radial-gradient`), giant soft typographic asterisks/crosshairs, dashed selection boxes, `--brand-accent` reserved strictly for ONE focal element | Crisp `power3.inOut` cursor drags, high-contrast typographic cuts, zero clutter |
-| **`product-ui`** | Software demos, AI prompts, command bars | Dot-grid canvas, stroke-drawn SVG mark (`stroke-dashoffset`), interactive prompt/search bar typing + click trigger, dark disc scale wipe into UI showcase | Character-by-character typing (`28 cps`), cursor click (`scale: 0.82→1`) triggering instant next-frame response |
-| **`logo-build`** | Brand intros, AI/software teasers | Dark obsidian stage, geometric particles/dots whipping into mark, 3D card carousel, prompt send, stroke resolution | Continuous camera flow, `expo.out` convergence from seeded scatter, zero hard cuts |
-| **`retro-print`** | Newsletters, creator drops, square/social loops | Warm cream paper (`#F5EFE4`) + inline SVG `feTurbulence` grain, bold 2-tone sunburst, thick `2.5–3px` ink outlines, hard offset drop shadows (`4px 4px 0 #141210`), extruded display type | **On-twos stepped motion** (`steps(Math.max(1, Math.round(dur * 12)))`) at 12fps feel, crisp mechanical stamps |
-| **`editorial-paper`** | Documentaries, myth-busting, evidence/receipts | Textured paper cards, highlighter sweeps (`scaleX: 0→1`), red strike-through corrections, rubber approval stamps, torn/notched SVG edges, crisp tabular mono | Tactile card flips, stamp slams (`scale: 1.4→1` + slight rotation settle), marker wipes |
-| **`glass-folder`** | Vertical openers, creator/agency portfolios | Dark lit stage with a 3D tilted brand-colored glass container/folder; drawn cursor clicks it, folder turns 3/4 and fans real content cards out in a 3D arc | Cursor click → `back.out(1.4)` fan-out with `0.06s` stagger + specular sweep |
-| **`kinetic-type`** | High-energy hooks, manifestos, rhythmic reels | Giant display typography (`9–21%` of frame height), bold color-field switches on the beat, slot-machine word rolls, counter stamps | `zoom` slams (`scale: 2.4, blur: 16px → 1`), descender-safe `mask` rises, zero filler cards |
+Pick **one** cohesive world for the entire video in `art_direction` (`glass`, `studio`, `glass-folder`, `monochrome`, `product-ui`, `logo-build`, `retro-print`, `editorial-paper`, or `kinetic-type`) and feed `--brand-*` tokens into it. See [`visual-worlds.md`](./visual-worlds.md) for the full 9-world selection matrix, pure-web recipes, `color-mix()` grounds, and 3-mode surface adaptation.
 
 ### Core World CSS Layer (Drop Into Any Full-Canvas Scene)
 
@@ -53,58 +41,65 @@ Never mix incompatible visual languages across scenes. Pick **one** world for th
 
 ---
 
-## 2. Motion Physics & Role-Based Easing Rules
+## 2. Motion Personality, Physics & Choreography Budgets
 
-Never put the same ease on everything. Every motion role has a distinct physical curve:
+### Motion Personality Archetypes (90/10 Brand Rule)
+Lock **ONE** archetype for `90%+` of a project; reserve the remaining `10%` for intentional climax/warning breaks:
 
-| Role | Duration | Ease | Hard Rule |
+| Archetype | Micro / Standard / Macro | Primary Ease | Overshoot & Squash-Stretch |
 | --- | --- | --- | --- |
-| **Primary arrival** (hero card, headline) | `0.45–0.90s` | `expo.out` or `power4.out` | Arrive on a long, silky decelerating tail. |
-| **Spring / stamp / badge pop** | `0.45–0.75s` | `back.out(1.25–2.4)` | **TRANSFORMS ONLY (`x/y/scale/rotation`)!** NEVER tween `filter: blur()` or `opacity` on `back` or `elastic`—overshoot below 0 produces invalid `blur(-0.5px)` and freezes stale blur! |
-| **Exit / dismissal** | `0.22–0.38s` | `power3.in` or `power2.in` | **40–50% shorter** than entrance; accelerate cleanly out; always set `immediateRender: false`. |
-| **Camera move** (`.rig` pan/push/orbit) | `0.55–0.75s` | `power2.inOut` or `power3.inOut` | Ease both ways; tween `.rig`, NEVER the root `.clip`. |
-| **Continuous drift / ambient** | Full scene span | `sine.inOut` | Move the ambient field or whole rig as **ONE body**—never per-item wobble or breathing titles. |
-| **Progress bar / rotation / scrub** | Span | `none` (linear) | Linear ONLY for continuous progress, counters, or rotation. |
-| **Retro / paper on-twos** | Any `d` | `steps(Math.max(1, Math.round(d * 12)))` | Authentic 12fps editorial stop-motion feel. |
+| **`Playful`** | `150 / 250 / 400ms` | `back.out(1.6–2.2)` | `10–20%` overshoot; squash-stretch `[1.06, 0.94]` |
+| **`Premium`** | `350 / 500 / 800ms` | `power3.out` / `cubic-bezier(0.4, 0, 0.2, 1)` | `0%` overshoot; **never** squash-stretch |
+| **`Corporate`** | `200 / 300 / 450ms` | `power2.out` / `cubic-bezier(0.2, 0, 0, 1)` | `0–3%` overshoot; crisp settle |
+| **`Energetic`** | `100 / 180 / 300ms` | `expo.out` | `15–30%` impact slam + recoil |
 
-### Overlap, Stagger & Reading-Time Discipline
-- **30–50% Overlap**: Start the next element when the previous is 30–50% done (fully sequential feels robotic; simultaneous feels cheap).
-- **Staggers**: Letters `12–35ms`, words `60–90ms`, list items/cards `40–80ms`.
-- **One Hero Move Per Shot**: Secondary elements travel `50–70%` as far and start `100–200ms` later.
-- **Landed Title = Dead Still**: Once a headline lands, freeze it; shift motion to the diagram, specular sheen, camera drift, or next beat.
-- **Reading-Time Budget**: Hold any line the viewer must read for **`0.5s + 0.3s × word_count`**; hold the final end card **`2.0–3.5s`**. Cut words before shrinking hold time.
-- **No Pixel-Snapping Tweens**: NEVER tween `letter-spacing`, `width`, `top`, or `left` (they snap to whole pixels and judder). Use `x`, `y`, `scale`, `scaleX`, `scaleY`, `rotation`, `z`.
-- **Typography Floors**: Tracking **never tighter than `-0.025em`** (tighter causes glyph overlap seams); readable body/SVG labels `>= 2.6%` of short side (`>= 28px` at `1080p`, or `>= 14–16px` responsive `clamp`); **no em dashes (`—`) or en dashes (`–`)** in on-screen copy (use a comma, colon, or period).
-- **Semantic State Colors**: Success/up/check/paid states ALWAYS use semantic green (`#2BD67B`), negative/down/error states use semantic red (`#FF5A5F`)—never hijack `--brand-accent` for a green checkmark.
+### Role-Based Curves, 3-Layer Energy & 4-Act Micro-Story
+- **3-Layer Motion Energy**: `Primary (100%)` hero arrival → `Secondary (30–50%)` `+50–100ms` delayed with a distinct ease → `Ambient (10–20%)` continuous drift/shimmer.
+- **4-Act Micro-Story**: Anticipation (`10–15%`) → Action (`35–50%`) → Reaction (`10–20%`) → Resolution (`25–30%` + `100–200ms` stillness).
+- **Hard Choreography Budgets**:
+  - **1/3 Distance Rule**: Travel `<= 1/3` of viewport or element span with a `10–20px` midpoint arc.
+  - **1/3 Density Rule**: Max `1/3` of elements (or `2–3` items) moving simultaneously.
+  - **Total Stagger `< 500ms`**: `20–40ms` micro, `50–100ms` standard, `30–60ms` wave.
+  - **Counter-Motion (`15–30%`)**: When a hero enters left→right, nudge its sibling/container `15–30%` opposite.
+  - **Depth-Through-Speed Parallax**: FG `1.0x`, Mid `0.5x`, BG `0.2x`, Deep `0.1x`.
+  - **Simplicity Threshold**: `2` animated properties is the sweet spot; **NEVER** use opacity-only fades for major state changes.
+  - **Material Modifiers**: `Rigid` (`1.2x` duration, `0%` overshoot), `Paper` (`1.0x`, `3–5%`), `Glass` (`0.9x`, `0%`), `Elastic` (`0.8x`, `15–25%`), `Fluid` (`1.5x`, `5%`).
+  - **Emotion → Path & Color Semantics**: Success transitions TO `#2BD67B`; Error flashes `#FF5A5F` + `±10–15px` horizontal shake with `0%` overshoot.
+- **Safety & Reading Discipline**:
+  - **NEVER** tween `filter: blur()` or `opacity` on `back` or `elastic` eases (negative overshoot freezes stale blur). Put `back.out` on transforms only; use `power2.out` / `expo.out` on `blur`/`opacity`.
+  - **NEVER** tween `letter-spacing`, `width`, `top`, or `left`. Exits are `40–50%` shorter (`0.22–0.38s` `power3.in`) with `immediateRender: false`.
+  - **Reading-Time Budget**: `0.5s + 0.3s × word_count`; hold end cards `2.0–3.5s`. Landed titles stay dead still.
+  - **Typography Floors**: Tracking `>= -0.025em`; readable body/SVG labels `>= 2.6%` of short side; **no em dashes (`—`) or en dashes (`–`)** in on-screen copy.
 
 ---
 
-## 3. 12 Kinetic Typography Entrances & 8 Exits (Pure Solaris GSAP)
+## 3. 15 Kinetic Typography Entrances & 8 Exits (Pure Solaris GSAP)
 
-Vary entrances across scenes; never fade-and-slide-up every line. All snippets assume `const tl = gsap.timeline({ paused: true });` and `window.__timelines = { main: tl };`:
+Vary entrances across scenes. All snippets assume `const tl = gsap.timeline({ paused: true });` and `window.__timelines = { main: tl };`:
 
 | Kind | Solaris GSAP Recipe | Best Use |
 | --- | --- | --- |
+| **`present`** | `tl.set(el, { opacity: 1 }, 0)` (already visible at `t = 0`, optionally paired with subtle `scale: 1.03 → 1`) | Frame-0 hooks & logos |
+| **`pop`** | `tl.fromTo(words, { scale: 0.2, y: 50 }, { scale: 1, y: 0, duration: 0.42, stagger: 0.06, ease: "back.out(2)" }, t)` + `tl.fromTo(words, { opacity: 0 }, { opacity: 1, duration: 0.22, stagger: 0.06, ease: "power2.out" }, t)` | Playful/energetic word pops |
 | **`words`** | `tl.fromTo(words, { opacity: 0, filter: "blur(6px)" }, { opacity: 1, filter: "blur(0px)", duration: 0.16, stagger: 0.067, ease: "power2.out" }, t)` | Crisp editorial body/sub-lines |
-| **`ink`** | `tl.fromTo(words, { opacity: 0.16 }, { opacity: 1, duration: 0.12, stagger: 0.085, ease: "none" }, t)` | Quiet supporting lines, subtitles |
+| **`ink`** | `tl.fromTo(words, { opacity: 0.16 }, { opacity: 1, duration: 0.12, stagger: 0.085, ease: "none" }, t)` | Quiet supporting lines |
 | **`letters`** | `tl.fromTo(chars, { opacity: 0, filter: "blur(4px)" }, { opacity: 1, filter: "blur(0px)", duration: 0.14, stagger: 0.03, ease: "power2.out" }, t)` | Brand names, wordmarks |
-| **`rise`** | Wrap inner span inside `.mask` (`0.42em` bottom floor): `tl.fromTo(inner, { yPercent: 150 }, { yPercent: 0, duration: 0.55, ease: "expo.out" }, t)` | Heavyweight headlines (no box-shadow clipping!) |
-| **`mask`** | Wrap each `.w` word in `.mask`: `tl.fromTo(words, { yPercent: 160, filter: "blur(6px)" }, { yPercent: 0, filter: "blur(0px)", duration: 0.6, stagger: 0.06, ease: "expo.out" }, t)` | Signature multi-word reveals |
-| **`zoom`** | `tl.fromTo(words, { opacity: 0, scale: 2.4, filter: "blur(16px)" }, { opacity: 1, scale: 1, filter: "blur(0px)", duration: 0.45, stagger: 0.09, ease: "expo.out" }, t)` | Frame-0 kinetic hook slams |
+| **`rise`** | Wrap inner span inside `.mask` (`0.42em` bottom floor): `tl.fromTo(inner, { yPercent: 150 }, { yPercent: 0, duration: 0.55, ease: "expo.out" }, t)` | Heavyweight headlines |
+| **`mask`** | Wrap each `.w` in `.mask`: `tl.fromTo(words, { yPercent: 160, filter: "blur(6px)" }, { yPercent: 0, filter: "blur(0px)", duration: 0.6, stagger: 0.06, ease: "expo.out" }, t)` | Multi-word reveals |
+| **`zoom`** | `tl.fromTo(words, { opacity: 0, scale: 2.4, filter: "blur(16px)" }, { opacity: 1, scale: 1, filter: "blur(0px)", duration: 0.45, stagger: 0.09, ease: "expo.out" }, t)` | Kinetic hook slams |
 | **`split`** | Using `mulberry32` `r`: `tl.fromTo(chars, { opacity: 0, x: () => (r()-0.5)*260, y: () => (r()-0.5)*180, rotation: () => (r()-0.5)*40, filter: "blur(8px)" }, { opacity: 1, x: 0, y: 0, rotation: 0, filter: "blur(0px)", duration: 0.7, stagger: 0.012, ease: "expo.out" }, t)` | Dramatic title assembly |
 | **`line`** | `tl.fromTo(el, { opacity: 0, filter: "blur(8px)" }, { opacity: 1, filter: "blur(0px)", duration: 0.2, ease: "power3.out" }, t)` | Short punchy callouts |
 | **`scale`** | `tl.fromTo(el, { opacity: 0, scale: 1.18, filter: "blur(10px)" }, { opacity: 1, scale: 1, filter: "blur(0px)", duration: 0.5, ease: "expo.out" }, t)` | Hero word or big stat |
-| **`wipe`** | `tl.fromTo(el, { clipPath: "inset(-40% 100% -40% -10%)" }, { clipPath: "inset(-40% -10% -40% -10%)", duration: 0.45, ease: "power3.inOut" }, t)` | Labels, UI bars (negative insets preserve shadows & descenders!) |
-| **`type`** | `chars.forEach((c, i) => tl.set(c, { opacity: 1 }, t + i / 28))` + finite caret `tl.set(caret, ...)` toggles every `0.5s` | Prompts, terminal commands, AI inputs |
-| **`slot`** | Stack option `<span>`s; toggle each with `tl.set(s, { opacity: 0 }, 0)` + `tl.fromTo(s, { opacity: 1, yPercent: -60, filter: "blur(4px)" }, { opacity: 1, yPercent: 0, filter: "blur(0px)", duration: 0.09, ease: "power2.out", immediateRender: false }, t + i*0.1)` | Cycling pill / "a word that opens worlds" |
-| **`count`** | Hide until `t` (`tl.set(el, { opacity: 0 }, 0); tl.set(el, { opacity: 1 }, t)` — NEVER pre-print `$0`!), tween `{ v: from } -> { v: to }` with `power3.out` + `onUpdate`, then **stamp**: `tl.fromTo(el, { scale: 1.12 }, { scale: 1, duration: 0.35, ease: "expo.out", immediateRender: false }, t + dur)` | Sourced numbers, KPIs, revenue, timers |
+| **`wipe`** | `tl.fromTo(el, { clipPath: "inset(-40% 100% -40% -10%)" }, { clipPath: "inset(-40% -10% -40% -10%)", duration: 0.45, ease: "power3.inOut" }, t)` | Labels, UI bars |
+| **`type`** | `chars.forEach((c, i) => tl.set(c, { opacity: 1 }, t + i / 28))` + finite caret toggle every `0.5s` | Prompts, terminal inputs |
+| **`slot`** | Stack option `<span>`s; `tl.set(s, { opacity: 0 }, 0)` + `tl.fromTo(s, { opacity: 1, yPercent: -60, filter: "blur(4px)" }, { opacity: 1, yPercent: 0, filter: "blur(0px)", duration: 0.09, ease: "power2.out", immediateRender: false }, t + i*0.1)` | Cycling pill options |
+| **`count`** | Hide until `t` (`tl.set(el, { opacity: 0 }, 0); tl.set(el, { opacity: 1 }, t)`), tween `{ v: from } -> { v: to }` with `power3.out` + `onUpdate`, then **stamp** (`scale: 1.12 -> 1`, `0.35s expo.out`) | Sourced KPIs, timers |
 
-**Exits** (always `immediateRender: false` so seeking backwards never corrupts early frames):
-- `zoom` (`scale: 1.7, blur: 14px, opacity: 0, 0.25s power3.in`), `blur` (`blur: 8px, opacity: 0, 0.18s power2.in`), `words` (stagger `0.035s`), `up` (`yPercent: -40, blur: 6px, opacity: 0, 0.28s power3.in`), `down` (`yPercent: 150` into `.mask`, `0.30s power3.in`), `wipe` (`inset(-40% -10% -40% 100%)`), `scale` (`scale: 1.08, blur: 10px, opacity: 0, 0.25s`), `cut` (`tl.set(el, { opacity: 0 }, t)`).
+**8 Exits** (always `immediateRender: false`): `zoom` (`scale: 1.7, blur: 14px, opacity: 0, 0.25s power3.in`), `blur` (`blur: 8px, opacity: 0, 0.18s power2.in`), `words` (stagger `0.035s`), `up` (`yPercent: -40, blur: 6px, opacity: 0, 0.28s power3.in`), `down` (`yPercent: 150` into `.mask`, `0.30s power3.in`), `wipe` (`inset(-40% -10% -40% 100%)`), `scale` (`scale: 1.08, blur: 10px, opacity: 0, 0.25s`), `cut` (`tl.set(el, { opacity: 0 }, t)`).
 
 ---
 
-## 4. World & Camera Choreography Primitives
+## 4. 14 World & Camera Choreography Primitives
 
 ```js
 // 1. Deterministic Seeded PRNG (NEVER use Math.random!)
@@ -133,7 +128,7 @@ const focusPlate = (plates, on, at) => plates.forEach((p, i) => tl.to(p, {
 tl.to("#cursor", { x: tx, y: ty, duration: 0.45, ease: "power3.inOut" }, clickAt - 0.45);
 tl.fromTo("#cursor", { scale: 0.82 }, { scale: 1, duration: 0.16, ease: "power2.out", immediateRender: false }, clickAt);
 
-// 6. SVG sparkline / path draw with riding dot + expanding pulse ring
+// 6. SVG sparkline / path draw with riding dot (use style.strokeDashoffset ONLY, never GSAP attr)
 const L = pathEl.getTotalLength();
 pathEl.style.strokeDasharray = L; pathEl.style.strokeDashoffset = L;
 const prog = { p: 0 };
@@ -149,10 +144,10 @@ tl.fromTo("#rig", { scale: 1.04 }, { scale: 1, duration: 0.32, ease: "expo.out",
 // 8. Centered SVG orbital rotation (ALWAYS pass svgOrigin matching viewBox center!)
 tl.to("#globe-rings", { rotation: 24, svgOrigin: "270 270", duration: 4.0, ease: "none" }, 0);
 
-// 9. Continuous SVG edge data-packet pulse (eliminates 3-6s dead holds on graph scenes)
-tl.fromTo(".edge-pulse", { strokeDashoffset: 180 }, { strokeDashoffset: 0, duration: 2.2, ease: "none", repeat: 2 }, 1.0);
+// 9. Continuous SVG edge data-packet pulse (total span <= data-duration; immediateRender: false)
+tl.fromTo(".edge-pulse", { strokeDashoffset: 180 }, { strokeDashoffset: 0, duration: 1.4, ease: "none", repeat: 2, immediateRender: false }, 0.8);
 
-// 10. Text fitter (measures actual text Range width, never over-shrinks flex/block boxes)
+// 10. Measure-Before-Tween Text Fitter (call BEFORE gsap.from/fromTo on flat un-transformed DOM!)
 function fitText(el, maxW, minPx = 14) {
   let fs = parseFloat(getComputedStyle(el).fontSize);
   el.style.whiteSpace = "nowrap";
@@ -160,4 +155,25 @@ function fitText(el, maxW, minPx = 14) {
   const w = () => { r.selectNodeContents(el); return r.getBoundingClientRect().width; };
   while (w() > maxW && fs > minPx) { fs -= 2; el.style.fontSize = fs + "px"; }
 }
+
+// 11. Single-Clock Deterministic Driver (parametric arcs, Canvas2D silk, boil seeds)
+const clock = { t: 0 };
+tl.to(clock, { t: D, duration: D, ease: "none", onUpdate: () => drive(clock.t) }, 0);
+
+// 12. Signature Impact Climax Stack (slam -> recoil -> shockwave -> rig kick -> sheen -> dim)
+tl.fromTo("#hero", { scale: 1.6, y: -40 }, { scale: 0.96, y: 0, duration: 0.14, ease: "power4.in" }, tHit);
+tl.to("#hero", { scale: 1, duration: 0.32, ease: "back.out(3)", immediateRender: false }, tHit + 0.14);
+tl.fromTo("#shockwave", { scale: 1, opacity: 0.75 }, { scale: 2.6, opacity: 0, duration: 0.45, ease: "expo.out", immediateRender: false }, tHit + 0.14);
+tl.fromTo("#rig", { scale: 1.025 }, { scale: 1, duration: 0.28, ease: "expo.out", immediateRender: false }, tHit + 0.14);
+tl.fromTo("#hero", { "--sheen": "-40%" }, { "--sheen": "140%", duration: 0.65, ease: "power2.inOut", immediateRender: false }, tHit + 0.18);
+tl.to(".sibling", { opacity: 0.55, duration: 0.25, ease: "power2.out" }, tHit + 0.14);
+
+// 13. 12fps On-Twos + Conflict-Free CSS Boil (CSS: .boil { translate: var(--bx,0px) var(--by,0px); rotate: var(--br,0deg); })
+const twos = (d, ease = "power2.out") => { const e = gsap.parseEase(ease), n = Math.max(1, Math.round(d * 12)); return (p) => Math.ceil(e(p) * n) / n; };
+// In drive(t): const step = Math.floor(t * 6); el.style.setProperty("--bx", ((step % 3) - 1) * 1.2 + "px");
+
+// 14. Directional SVG Motion Blur + Zero-Stray-Cap Stroke Wipe + Running Conic Rim
+// Motion blur: <filter id="mb"><feGaussianBlur id="mb-std" stdDeviation="0 0"/></filter> -> set stdDeviation=`${vx} 0`
+// Zero-stray-cap wipe: stroke-linecap="round"; opacity 0 -> 1 at drawStart, 1 -> 0 at drawEnd
+// Running conic rim: @property --ang { syntax: "<angle>"; inherits: false; initial-value: 0deg; } + conic-gradient(from var(--ang), ...)
 ```

@@ -450,7 +450,7 @@ pub(crate) async fn build_openrouter_director_plan(
     let require_params = (attached_native_video || attached_native_audio).then_some(true);
 
     let (req_model, req_models) = route_models(model, active_fallbacks);
-    let mut messages = vec![ChatMessage::system(sys), user_msg];
+    let mut messages = vec![ChatMessage::system_cached(sys), user_msg];
 
     for attempt in 1..=2usize {
         if cancel.is_cancelled() {
@@ -1366,6 +1366,7 @@ pub(crate) async fn run_programmatic_scene_worker(
     let craft_refs: String = [
         "skill://captions-and-gfx/references/gfx-contract.md",
         "skill://captions-and-gfx/references/motion-craft.md",
+        "skill://captions-and-gfx/references/visual-worlds.md",
     ]
     .iter()
     .filter_map(|uri| get_skill_resource(uri))

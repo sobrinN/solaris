@@ -9,8 +9,9 @@ Solaris renders `G1` (GFX) under `T1` (Captions) in both the Studio sandboxed if
 
 ## Deep References (Read Before Custom Authoring)
 
-- **Motion Physics, 9 Visual Worlds & Kinetic Choreography** (glass/studio/monochrome/retro-print/editorial recipes, role-based eases, 12 kinetic type entrances, 3D camera/DOF/SVG primitives): [references/motion-craft.md](references/motion-craft.md)
-- **10-Category Move Playbook & Blueprints** (266 spoken-cue → visual-move archetypes + copy-pasteable lint-clean Solaris HTML/CSS/GSAP blueprints): [references/move-playbook.md](references/move-playbook.md)
+- **Motion Physics & Kinetic Choreography** (role-based eases, 12 kinetic type entrances, 3D camera/DOF/SVG primitives): [references/motion-craft.md](references/motion-craft.md)
+- **9 Visual Worlds & Surface Recipes** (glass, studio, monochrome, retro-print, editorial, terminal, blueprint, brutalist, chroma-key): [references/visual-worlds.md](references/visual-worlds.md)
+- **10-Category Move Playbook & Blueprints** (curated 10-category spoken-cue → visual-move taxonomy + 8 lint-clean Solaris HTML/CSS/GSAP blueprints): [references/move-playbook.md](references/move-playbook.md)
 - **Seekable HTML/CSS/GSAP Sandbox Contract** (4 seek hooks, bundled Sora/GSAP, `{{prop}}` escaping, hard lint rules & seek gotchas): [references/gfx-contract.md](references/gfx-contract.md)
 - **Built-In Starter GFX Catalog** (exact `props_schema` of all 5 built-in assets): [references/starter-assets.md](references/starter-assets.md)
 
@@ -27,6 +28,9 @@ Enforced automatically by `project.run_qa`:
 - **`16:9` / `1:1` Safe Bounds**: `x ∈ [-0.35, 0.35]`, `y ∈ [-0.35, 0.35]`.
 - **Mandatory Post-Place Positioning (Floating Overlays Only)**: `gfx.place` ALWAYS initializes `Transform2D` to `x: 0.0, y: 0.0, scale: 1.0`. Whenever a floating `G1` card/badge overlaps `T1` captions (`y: 0.20`), **immediately follow `gfx.place` with `timeline.set_transform`** on `track_id: "g1"` to place it at `y: -0.22` to `-0.28` (avoiding the center face band on talking heads). Maintain **`|gfx.y - cap.y| >= 0.08`** and **never stack two floating overlays within `4.0s`**.
 - **Full-Canvas Programmatic `G1` Scenes**: Full-bleed scenes (`position:fixed;inset:0;width:100vw;height:100vh`) MUST stay at `(0, 0)` (never shift with `timeline.set_transform`). Extend layered ambient gradients/grids/glows across the full `100vh`. In `9:16`, when `T1` captions are active keep foreground cards/diagrams inside **`6vh..62vh`** so `64vh..76vh` stays clear for captions; when **no `T1` captions exist**, use a **3-zone CSS Grid (`grid-template-rows: auto 1fr auto; padding: 7vh 5vw 9vh;`)** spanning **`8vh..84vh`** (Header, Hero visual in `1fr`, Bottom callout/legend) so the bottom half is never a dead void. **NEVER** add unsolicited scene or step counters (`01 / 06`, `2/6`, `ETAPA 02`, `STEP 3`), fake bottom loading/progress bars, or repetitive identical card-deck footers unless the user explicitly requests them.
+- **3-Mode Surface Adaptation**:
+  - **Floating Transparent Overlay vs. Full-Canvas**: Floating overlays over `V1` use zero full-screen grain/vignette and `88–92%` opaque card bodies so text reads over any footage; Full-Canvas scenes fill the full `100vh` world with a 3-zone CSS Grid.
+  - **Chroma-Key Mode**: When rendering for chroma-key compositing, use solid opaque fills and `backdrop-filter: none` so keyed edges stay crisp without haloing.
 
 ## 3. Search Library First, Author Studio-Grade Second
 
@@ -38,7 +42,7 @@ Enforced automatically by `project.run_qa`:
 
 ## 4. Non-Negotiable Motion & Sandbox Craft Rules
 
-- **Root & Offline Assets**: `<div class="clip" data-start="0" data-duration="<sec>">`. **GSAP 3 (`window.gsap`)**, variable **Sora**, and Brand `@font-face` fonts are **already injected offline**—never use `<script src>`, `<link>`, `@import`, external URLs, `<video>`, `<audio>`, or non-deterministic JS (`Date.now`, `Math.random`, `setTimeout`, `setInterval`, `requestAnimationFrame`, `fetch`).
+- **Root & Offline Assets**: `<div class="clip" data-start="0" data-duration="<sec>">`. **GSAP 3 (`window.gsap`)**, variable **Sora**, and Brand `@font-face` fonts are **already injected offline**—never use `<script src>`, `<link>`, `@import`, external URLs, `<video>`, `<audio>`, or non-deterministic JS (`Date.now`, `Math.random`, `setTimeout`, `setInterval`, `requestAnimationFrame`, `fetch`). Chromium exports run with `--disable-gpu`: author with HTML/CSS/SVG or Canvas 2D (`window.__solarisOnSeek`) only—never use WebGL or Three.js.
 - **Role-Based Easing & Living Mid-Scene Motion**: Arrive slow (`expo.out` `0.45–0.9s`), exit 40–50% shorter (`power3.in` `0.25–0.35s` with `immediateRender: false`), cameras `power2.inOut`, springs `back.out(1.25–2.4)` on **transforms ONLY** (NEVER tween `filter: blur()` on `back`/`elastic`!). Every scene `> 3.0s` must include continuous subtle GSAP mid-scene motion (orbital drift, `stroke-dashoffset` signal pulses, or pulsing alerts — never a frozen 3–6s hold) while keeping landed headlines dead still.
 - **SVG & Diagram Anti-Collision**: Use CSS Flex/Grid HTML for multi-word labels, cards, and badges — never hand-place `<text>` over dense SVG node graphs. Keep short SVG node labels cleanly outside circle radii (`>= 14–20px` clearance), keep `>= 32px` inner padding inside enclosing shields/rings, never place dots over text, and never render empty hollow node circles without an icon or glowing core.
 - **Typography & Shadow Hygiene**: Tracking `>= -0.025em`, descender/glow-safe `0.42em` mask floors, shadow-safe negative-inset wipes (`inset(-40% ...)`), zero em/en dashes (`—`/`–`), no pixel-snapping `width`/`top`/`left`/`letter-spacing` tweens, no pre-roll `"$0"` counters, no breathing/floating loops on landed titles.

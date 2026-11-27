@@ -61,6 +61,15 @@ Be the harsh supervising motion director, not the proud author. **Any unresolved
 | **Color & Framing** | Natural skin tones, clean shadow/highlight roll-off, intentional punch-ins, balanced V1/V2 match, hero fills 40%+ of stage | Minor warmth/contrast mismatch on one cutaway | Flat Log footage, 100% LUT crush, or tiny box in empty frame | Clipped highlights, misaligned 9:16 crop cutting face |
 | **Audio & Polish** | Voice `-14 ± 2.5 LUFS`, music `<= -8 dB` + `-18 dB` ducking, click-free fades, shadow-safe clips, all GFX lint-clean, held end card | Minor fade missing or one small blemish | Music too loud, ducking disabled, or several visible blemishes | Severe loudness drift, unmuted clashing B-roll, lint errors, broken frames |
 
+### Motion-Design Quantitative Critique Checks
+Before scoring `Motion & Pacing >= 8`, verify these measurable checks:
+- **No linear spatial movement**: spatial transforms must use role-based eases (`expo.out`, `power3.in`, `back.out`)—linear spatial motion reads as robotic.
+- **No opacity-only major state changes**: major card/state swaps must pair `opacity` with transform/clip or secondary reaction (`feels flat/cheap` otherwise).
+- **Focal discipline (`<= 1/3` concurrent motion)**: never animate `> 1/3` of visible elements simultaneously (`distracting`).
+- **Stagger cap (`<= 500ms`)**: total entrance stagger across a beat must finish within `<= 500ms`.
+- **Secondary layer present**: hero arrivals require a `30–50%` secondary reaction at `+50–100ms` (`--sheen`, shadow lift, ring pulse).
+- **Personality consistency**: all scenes honor the locked Motion Personality (`Playful` / `Premium` / `Corporate` / `Energetic`).
+
 ---
 
 ## 4. Repeated Review Notes → Exact Mechanism Diagnosis
@@ -78,7 +87,7 @@ When one of these real-world defects appears on a captured frame, stop tweaking 
 | **"Earlier frame shows exit state"** | Exit or repeated `fromTo` missing `immediateRender: false`. | Add `immediateRender: false` to all exits and repeated tweens. |
 | **"Counter shows $0 before counting"** | Counter text pre-rendered at `t=0`. | Hide with `tl.set(el, { opacity: 0 }, 0)` until count start `t`, then count + stamp. |
 | **"Boxes move robotically"** | Uniform sequential stagger or per-item wobble loop. | Overlap entrances 30–50%, vary eases by role, freeze landed titles. |
-| **"GFX collides with T1 captions"** | Floating `G1` left at default `y: 0` or full-canvas content spilled below `61vh`. | Offset floating `G1` via `timeline.set_transform(y=-0.24)`; keep 9:16 full-canvas foreground inside `5vh..61vh`. |
+| **"GFX collides with T1 captions"** | Floating `G1` left at default `y: 0` or full-canvas content spilled below `62vh`. | Offset floating `G1` via `timeline.set_transform(y=-0.24)`; keep 9:16 full-canvas foreground inside `6vh..62vh`. |
 | **"Useless progress bars or `01/06` / `ETAPA 02` counters"** | Slide-deck chrome stamped onto video scenes. | Remove unrequested bottom loading/progress bars and scene/step counters (`01/06`, `ETAPA 02`, `STEP 2`) via `gfx.update_clip`; let the visual storytelling carry the frame. |
 | **"Badge/label clipped or overlapping text"** | Absolute-positioned badge with negative `right`/`top` offsets collides with giant 9:16 headline or overflows card padding. | Move the badge out of `position: absolute` into normal CSS Flex/Grid flow (above the headline in the eyebrow row or inline with explicit `gap`) and expand container padding via `gfx.update_clip`. |
 | **"Card icons stretched or floating on top of card text"** | Descendant CSS selector (e.g., `.funnel svg { position: absolute; inset: 0; width: 100%; height: 100%; }`) captures nested icon `<svg>` elements inside GSAP-transformed cards. | Change the backdrop rule to a direct-child selector (`.funnel > svg`) or explicit class (`.funnel-bg`) so nested icon `<svg>` elements stay inside their icon box. |
@@ -86,6 +95,11 @@ When one of these real-world defects appears on a captured frame, stop tweaking 
 | **"Empty placeholder node rings with orphan labels"** | Hollow `<circle>` nodes drawn without icons or inner cores. | Populate every node circle with a crisp linear icon or solid glowing core dot and center-align its label cleanly below/above the ring. |
 | **"Scene freezes dead for > 3s after entrance"** | Timeline ends all tweens at `t=1.0s` on a `5–7s` clip. | Add continuous GSAP mid-scene motion (`stroke-dashoffset` edge pulses, slow orbital drift, or pulsing alert rings) spanning `t=0.8s..duration` while keeping headlines still. |
 | **"Empty space inside card or blank lower stage even though DOM elements exist"** | Delayed GSAP entrances still at `opacity: 0` at the sampled timestamp (e.g. starting at `2.15s–2.75s` on a `4.0s` clip). | Overlap/tighten GSAP start times so all core + footer elements finish entering by `<= 45%` of `duration_sec` (max `~1.8s`) instead of stretching card height. |
+| **"Looks robotic / stiff"** | Linear easing, straight long travel, synchronized starts. | Use role-based eases (`expo.out`/`power3.in`), add `10–20px` midpoint arc on moves `> 1/3` frame, and stagger `+50–100ms` secondary follow-through. |
+| **"Feels flat / cheap"** | Primary-only motion or opacity-only state swap. | Pair `opacity` with transform/clip + add `30–50%` secondary reaction (`--sheen`, shadow lift, shockwave ring) on a different ease. |
+| **"SVG sparkline/path never draws"** | Mixed `path.style.strokeDashoffset = L` with GSAP `attr: { "stroke-dashoffset": 0 }`. | Animate CSS `{ strokeDashoffset: 0 }` directly (never mix inline style and SVG `attr`). |
+| **"WebGL/3D canvas blank in export"** | Chromium runs with `--disable-gpu`. | Replace WebGL/Three.js with HTML/CSS 3D transforms, inline SVG, or Canvas 2D driven by `window.__solarisOnSeek`. |
+| **"Too busy / competing focal points"** | `> 1/3` elements moving at once or ambient energy `> 20%`. | Enforce 1 hero per beat, dim non-hero elements to `45–55%`, and cap total stagger `< 500ms`. |
 
 ---
 
@@ -101,6 +115,7 @@ When one of these real-world defects appears on a captured frame, stop tweaking 
    - *"feels like slides"* → add a continuous rig drift, specular sweep, or object handoff and change nothing else.
    - *"titles move"* → freeze landed titles dead still and change nothing else.
 3. Re-run `project.run_qa` and re-capture only the affected timestamps to confirm the fix resolved the issue without regressions.
-4. If a capture looks worse than before, revert immediately via `project.undo`.
-5. **Hard cap: maximum 3 QA rounds.** After Round 3, deliver the best revision and report transparently any axis still `< 8` plus the exact reason.
-6. **Audio disclosure**: Always note in the final summary that audio loudness (`LUFS`) and ducking were verified via numeric telemetry/mix settings, not listened to by ear.
+4. **Growing BANNED List (Round-2 Escalation)**: Whenever a defect is caught in Round 1, add that specific pattern to an explicit BANNED list for Round 2 so the repair cannot jump to a cousin default (e.g., swapping a fake progress bar for a `01 / 05` step counter).
+5. If a capture looks worse than before, revert immediately via `project.undo`.
+6. **Hard round caps**: Internal automated Visual QA is capped at **max 2 repair rounds** (`MAX_VISUAL_REPAIR_ROUNDS = 2` in `qa/mod.rs`); interactive external MCP critique sessions are capped at **up to 3 rounds**. After the final round, deliver the best revision and report transparently any axis still `< 8` plus the exact reason.
+7. **Audio disclosure**: Always note in the final summary that audio loudness (`LUFS`) and ducking were verified via numeric telemetry/mix settings, not listened to by ear.

@@ -205,7 +205,7 @@ pub fn build_local_creative_plan(input: &CreativePlanInput<'_>) -> CreativePlan 
 
     let (approach, creative_direction, beats, style_notes) = if programmatic {
         let dir = format!(
-            "Programmatic {} motion piece built directly around your prompt using brand '{}' tokens ({}, {}) and responsive HTML/SVG/GSAP scenes paired with synced kinetic captions.",
+            "Programmatic {} motion piece built directly around your prompt using brand '{}' tokens ({}, {}) and responsive HTML/SVG/GSAP scenes (T1 captions are added only if narration audio is present).",
             aspect_label(input.aspect_preset),
             input.brand.name,
             input.brand.tokens.accent,
@@ -216,33 +216,33 @@ pub fn build_local_creative_plan(input: &CreativePlanInput<'_>) -> CreativePlan 
                 title: "Opening Hook".to_string(),
                 time_range: fmt_range(0),
                 visual_direction: format!(
-                    "Full-canvas bold typographic reveal framing \"{title}\" with high-contrast focal geometry in the upper 70% safe zone."
+                    "Full-canvas bold typographic reveal framing \"{title}\" with high-contrast focal geometry across the active stage."
                 ),
-                audio_and_captions: "Punchy opening hook line synced on T1 captions.".to_string(),
+                audio_and_captions: "Visual-only beat (T1 captions generated only if transcribed narration audio is attached).".to_string(),
             },
             CreativePlanBeat {
                 title: "Core Idea & Visual Breakdown".to_string(),
                 time_range: fmt_range(1),
                 visual_direction: "Custom SVG diagram / UI card sequence illustrating the main mechanism with purposeful GSAP choreography.".to_string(),
-                audio_and_captions: "Concise explanatory burst captions timed to each visual reveal.".to_string(),
+                audio_and_captions: "Visual-only beat; motion and kinetic typography carry the explanation without narration.".to_string(),
             },
             CreativePlanBeat {
                 title: "Proof & Contrast Moment".to_string(),
                 time_range: fmt_range(2),
                 visual_direction: "Metric callout, before/after split, or animated comparison highlighting the payoff.".to_string(),
-                audio_and_captions: "Short high-impact phrases emphasizing key takeaway.".to_string(),
+                audio_and_captions: "Visual-only beat; high-contrast on-screen callouts emphasize the key takeaway.".to_string(),
             },
             CreativePlanBeat {
                 title: "Closing Payoff".to_string(),
                 time_range: fmt_range(3),
                 visual_direction: "Clean brand-anchored end frame resolving the motion language with a crisp closing card.".to_string(),
-                audio_and_captions: "Memorable final line clearing the bottom safe zone.".to_string(),
+                audio_and_captions: "Visual-only closing frame (T1 captions generated only when narration audio exists).".to_string(),
             },
         ];
         let notes = vec![
             format!("Canvas: {}", aspect_label(input.aspect_preset)),
             format!("Brand: {} ({})", input.brand.name, input.brand.tokens.font_display),
-            "Programmatic G1 full-canvas GSAP scenes + T1 synced captions (no raw footage required)".to_string(),
+            "Programmatic G1 full-canvas GSAP scenes (no raw footage required; T1 captions added only when transcribed narration audio exists)".to_string(),
             "Connect an OpenRouter API key in AI & Keys to generate bespoke LLM storyboards".to_string(),
         ];
         (
@@ -392,7 +392,7 @@ pub async fn generate_creative_plan(
         "You are Solaris Creative Director in Planning Mode.\n\
          Read the Solaris video-making skills below to ground your craft (hooks, pacing, visual storytelling, color, motion graphics, typography, safe zones, and sound). \
          Do NOT force a generic or rigid pre-made checklist — freely design the best custom video plan tailored specifically to the user's prompt, genre, mood, aspect ratio, brand playbook, and available media.\n\
-         - If no video/image footage is attached, design a cohesive programmatic motion-graphics / visual storytelling film (G1 HTML/CSS/SVG/GSAP + T1 synced captions) that brings the user's prompt to life.\n\
+         - If no video/image footage is attached, design a cohesive programmatic motion-graphics / visual storytelling film (G1 HTML/CSS/SVG/GSAP; T1 captions are generated only when transcribed narration audio exists) that brings the user's prompt to life.\n\
          - If raw clips, voiceover, music, or scripts ARE attached, design an editorial plan grounded in those assets (and omit techniques the user didn't ask for — e.g., don't force silence cuts or neon captions if the user wants a calm cinematic montage).\n\
          - If `previous_plan` and `refinement_note` are supplied, revise the plan cleanly according to the user's feedback.\n\n\
          Output ONLY a single valid raw JSON object (no markdown fences, no commentary) matching:\n\

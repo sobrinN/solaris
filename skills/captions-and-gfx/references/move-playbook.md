@@ -14,7 +14,11 @@ Use this playbook whenever choosing or authoring a `G1` motion-graphic move—ei
 
 ## 1. The 10-Category Spoken-Cue → Visual-Move Taxonomy
 
-Match what the script or speaker says to the exact visual archetype:
+A **curated 10-category taxonomy distilled from 260+ motion moves**. Match what the script or speaker says to the exact visual archetype:
+
+> **Overlay vs Explainer Quick-Pick**
+> - **Talking-Head Overlay Stars** (transparent alpha over `V1`): `notify-stack`, `chapter-tag`, `listicle-number`, `follower-ticker-chip`, `verdict-card`, `strike-correct`, `headline-highlight`, `captions-burn`.
+> - **Full-Canvas Explainer Stars** (`100vw × 100vh` 3-zone grid): `kpi-tiles`, `bar-race`, `waterfall-chart`, `dashboard-assembly`, `exploded-ui`, `spotlight-dim`, `tool-call-trace`, `terminal-run`, `code-diff`.
 
 ### A. Data & Proof (Numbers, Growth, Rankings, Comparisons)
 | Spoken Cue / Script Beat | Visual Move Archetype | Core Solaris SVG/GSAP Mechanic |
@@ -82,7 +86,7 @@ Match what the script or speaker says to the exact visual archetype:
 
 ## 2. Production-Ready Solaris HTML/CSS/GSAP Blueprints
 
-Every blueprint below is **100% Solaris-native**, passes `gfx.lint_html` out of the box, uses `--brand-*` tokens, `window.gsap`, `window.__timelines["main"]`, responsive units, and safe vertical bands (`5vh..61vh` on 9:16). Adapt copy, numbers (only sourced!), and layout to the active scene.
+Every blueprint below is **100% Solaris-native**, passes `lint_gfx_html` with zero errors and zero `descendant_svg_trap` warnings, uses `--brand-*` tokens, `window.gsap`, `window.__timelines["main"]`, responsive units, zero banned slide chrome, and the **3-Zone Full-Stage CSS Grid** on full-canvas scenes (switching to `height: 56vh; padding: 6vh 5vw` when `T1` captions are active). Adapt copy, numbers (only sourced!), and layout to the active scene.
 
 ### Blueprint 1: 3D Glass KPI Tiles (Sparklines + Count-Up + Hero Lift)
 Best for: proving 2–4 real sourced metrics on the drop or payoff beat.
@@ -92,7 +96,8 @@ Best for: proving 2–4 real sourced metrics on the drop or payoff beat.
   <style>
     .amb{position:absolute;inset:-20%;pointer-events:none}
     .amb i{position:absolute;border-radius:50%;filter:blur(90px);opacity:.38;background:radial-gradient(circle,var(--brand-accent,#F05A00) 0%,transparent 68%)}
-    .stage{position:absolute;left:6vw;right:6vw;top:7vh;height:52vh;perspective:1600px;display:flex;flex-direction:column;justify-content:center;gap:2.2vh}
+    /* Use height: 56vh; padding: 6vh 5vw when T1 captions are active */
+    .stage{position:relative;width:100%;height:100vh;display:grid;grid-template-rows:auto 1fr auto;row-gap:2vh;align-items:center;padding:7vh 5vw 9vh;box-sizing:border-box;perspective:1600px}
     .eyebrow{font-size:clamp(12px,2.4vmin,18px);font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:var(--brand-accent-secondary,#F7B733)}
     .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:2.4vmin;transform-style:preserve-3d}
     .tile{position:relative;padding:2.6vmin;border-radius:22px;overflow:hidden;
@@ -109,37 +114,43 @@ Best for: proving 2–4 real sourced metrics on the drop or payoff beat.
     .num{font-family:var(--brand-font-display,Sora),sans-serif;font-size:clamp(26px,6.4vmin,56px);font-weight:800;letter-spacing:-0.025em;line-height:1.05;font-variant-numeric:tabular-nums}
     .sp{width:100%;height:5.5vh;margin-top:1.2vmin;overflow:visible}
     .sp path{fill:none;stroke:var(--brand-accent-secondary,#F7B733);stroke-width:3;stroke-linecap:round}
+    .foot{display:inline-flex;align-items:center;gap:1.2vmin;justify-self:start;padding:1vmin 2vmin;border-radius:999px;font-size:clamp(12px,2.2vmin,16px);font-weight:600;background:rgba(255,255,255,.06);box-shadow:inset 0 0 0 1px rgba(255,255,255,.12)}
   </style>
-  <div class="amb"><i style="width:65vw;height:45vh;left:35%;top:2%"></i><i style="width:70vw;height:45vh;left:-25%;top:55%;opacity:.26"></i></div>
+  <div class="amb"><i id="orb0" style="width:65vw;height:45vh;left:35%;top:2%"></i><i id="orb1" style="width:70vw;height:45vh;left:-25%;top:55%;opacity:.26"></i></div>
   <div class="stage" id="rig">
-    <div class="eyebrow" id="ey">02 / 05 · VERIFIED RESULTS</div>
+    <div class="eyebrow" id="ey">VERIFIED RESULTS</div>
     <div class="grid">
       <div class="tile" id="t0"><span class="hero-ring" id="hr0"></span><div class="top"><span class="lbl">Revenue</span><span class="delta">+32%</span></div><div class="num" id="n0"></div><svg class="sp" viewBox="0 0 200 48"><path id="p0" d="M4,40 C40,36 72,30 110,22 C145,15 170,12 196,6"/></svg></div>
       <div class="tile" id="t1"><div class="top"><span class="lbl">Retention</span><span class="delta">+18%</span></div><div class="num" id="n1"></div><svg class="sp" viewBox="0 0 200 48"><path id="p1" d="M4,38 C45,35 80,28 120,24 C155,20 175,14 196,10"/></svg></div>
     </div>
+    <div class="foot" id="ft">Quarterly cohort benchmark</div>
   </div>
   <script>
     const tl = gsap.timeline({ paused: true });
-    tl.fromTo("#ey", { opacity: 0, filter: "blur(6px)" }, { opacity: 1, filter: "blur(0px)", duration: 0.28, ease: "power2.out" }, 0);
+    tl.fromTo("#ey", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.30, ease: "power2.out" }, 0);
     const items = [
       { id: "#t0", n: "#n0", p: "#p0", to: 48.2, pre: "$", post: "K", dec: 1 },
       { id: "#t1", n: "#n1", p: "#p1", to: 94, pre: "", post: "%", dec: 0 }
     ];
     items.forEach((it, i) => {
       const at = 0.08 + i * 0.14;
-      tl.fromTo(it.id, { y: 48, z: -260, rotationX: 16, opacity: 0 }, { y: 0, z: 0, rotationX: 0, opacity: 1, duration: 0.65, ease: "expo.out" }, at);
-      tl.fromTo(it.id, { "--sheen": "-45%" }, { "--sheen": "145%", duration: 0.8, ease: "power2.inOut", immediateRender: false }, at + 0.25);
+      tl.fromTo(it.id, { y: 44, z: -220, rotationX: 14, opacity: 0 }, { y: 0, z: 0, rotationX: 0, opacity: 1, duration: 0.55, ease: "expo.out" }, at);
+      tl.fromTo(it.id, { "--sheen": "-45%" }, { "--sheen": "145%", duration: 0.75, ease: "power2.inOut", immediateRender: false }, at + 0.22);
       const numEl = document.querySelector(it.n); const o = { v: 0 };
-      tl.set(numEl, { opacity: 0 }, 0); tl.set(numEl, { opacity: 1 }, at + 0.18);
-      tl.to(o, { v: it.to, duration: 1.0, ease: "power3.out", onUpdate: () => { numEl.textContent = it.pre + o.v.toFixed(it.dec) + it.post; } }, at + 0.18);
-      tl.fromTo(numEl, { scale: 1.1 }, { scale: 1, duration: 0.3, ease: "expo.out", immediateRender: false }, at + 1.18);
+      tl.set(numEl, { opacity: 0 }, 0); tl.set(numEl, { opacity: 1 }, at + 0.16);
+      tl.to(o, { v: it.to, duration: 0.85, ease: "power3.out", onUpdate: () => { numEl.textContent = it.pre + o.v.toFixed(it.dec) + it.post; } }, at + 0.16);
+      tl.fromTo(numEl, { scale: 1.08 }, { scale: 1, duration: 0.25, ease: "expo.out", immediateRender: false }, at + 1.02);
       const path = document.querySelector(it.p); const L = path.getTotalLength();
       path.style.strokeDasharray = L; path.style.strokeDashoffset = L;
-      tl.to(path, { attr: { "stroke-dashoffset": 0 }, duration: 1.0, ease: "power3.inOut" }, at + 0.22);
+      tl.to(path, { strokeDashoffset: 0, duration: 0.85, ease: "power3.inOut" }, at + 0.20);
     });
-    tl.to("#t0", { y: -10, scale: 1.04, duration: 0.55, ease: "back.out(1.8)" }, 2.0);
-    tl.to("#hr0", { opacity: 1, duration: 0.4, ease: "power2.out" }, 2.0);
-    tl.to("#t1", { opacity: 0.55, filter: "blur(2px)", duration: 0.45, ease: "power2.inOut" }, 2.0);
+    tl.fromTo("#ft", { y: 14, opacity: 0 }, { y: 0, opacity: 1, duration: 0.35, ease: "power2.out" }, 1.05);
+    tl.to("#t0", { y: -10, scale: 1.04, duration: 0.45, ease: "back.out(1.8)" }, 1.25);
+    tl.to("#hr0", { opacity: 1, duration: 0.35, ease: "power2.out" }, 1.25);
+    tl.to("#t1", { opacity: 0.48, scale: 0.97, duration: 0.40, ease: "power2.inOut" }, 1.25);
+    // Continuous subtle ambient drift through 4.0s while landed elements stay crisp
+    tl.to("#orb0", { x: -30, y: 20, duration: 4.0, ease: "sine.inOut" }, 0);
+    tl.to("#orb1", { x: 26, y: -18, duration: 4.0, ease: "sine.inOut" }, 0);
     window.__timelines = { main: tl };
   </script>
 </div>
@@ -152,31 +163,34 @@ Best for: `0.0–3.0s` opening hook with instant frame-0 ink, bold accent word, 
 <div class="clip" data-start="0" data-duration="3.0" style="position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;background:var(--brand-bg,#080404);color:var(--brand-ink,#F7F5EF);font-family:var(--brand-font-display,Sora),sans-serif;">
   <style>
     .bg{position:absolute;inset:0;background:radial-gradient(80% 55% at 50% 28%,color-mix(in srgb,var(--brand-accent,#F05A00) 28%,transparent),transparent 72%)}
-    .wrap{position:absolute;left:7vw;right:7vw;top:9vh;height:50vh;display:flex;flex-direction:column;justify-content:center;gap:2.8vh}
-    .pill{display:inline-flex;align-items:center;gap:1.4vmin;align-self:flex-start;padding:1.2vmin 2.4vmin;border-radius:999px;
+    /* Use height: 56vh; padding: 6vh 5vw when T1 captions are active */
+    .wrap{position:relative;width:100%;height:100vh;display:grid;grid-template-rows:auto 1fr auto;row-gap:2vh;align-items:center;padding:7vh 5vw 9vh;box-sizing:border-box}
+    .pill{display:inline-flex;align-items:center;gap:1.4vmin;justify-self:start;padding:1.2vmin 2.4vmin;border-radius:999px;
       background:rgba(255,255,255,.08);box-shadow:inset 0 1px 0 rgba(255,255,255,.35),inset 0 0 0 1px rgba(255,255,255,.12);
       font-size:clamp(13px,2.6vmin,20px);font-weight:700;font-variant-numeric:tabular-nums}
     .dot{width:1.4vmin;height:1.4vmin;border-radius:50%;background:var(--brand-accent,#F05A00);box-shadow:0 0 14px var(--brand-accent,#F05A00)}
     .h1{font-size:clamp(36px,9.4vmin,88px);font-weight:800;letter-spacing:-0.025em;line-height:0.96}
     .lit{color:var(--brand-accent-secondary,#F7B733);text-shadow:0 0 28px color-mix(in srgb,var(--brand-accent,#F05A00) 60%,transparent)}
     .w{display:inline-block}
+    .sub{font-family:var(--brand-font-body,Sora),sans-serif;font-size:clamp(14px,2.6vmin,20px);font-weight:600;opacity:.78}
   </style>
   <div class="bg"></div>
   <div class="wrap" id="rig">
-    <div class="pill" id="pill"><span class="dot" id="dot"></span><span>01 / 05</span><span id="tc" style="opacity:.8"></span></div>
+    <div class="pill" id="pill"><span class="dot" id="dot"></span><span>LIVE IMPACT</span><span id="tc" style="opacity:.85"></span></div>
     <div class="h1" id="h1"><span class="w lit">10</span> <span class="w">hours</span><br/><span class="w">saved</span> <span class="w">weekly.</span></div>
+    <div class="sub" id="sub">Automated workflow audit</div>
   </div>
   <script>
     const tl = gsap.timeline({ paused: true });
-    // Frame 0 already has strong ink; words slam cleanly by 0.35s
-    tl.fromTo("#pill", { opacity: 0.85, scale: 1.05 }, { opacity: 1, scale: 1, duration: 0.4, ease: "expo.out" }, 0);
-    tl.fromTo("#h1 .w", { opacity: 0, scale: 1.8, filter: "blur(12px)" }, { opacity: 1, scale: 1, filter: "blur(0px)", duration: 0.35, stagger: 0.06, ease: "expo.out" }, 0);
+    // Frame 0 already has strong ink; headline settles cleanly by 0.35s
+    tl.fromTo("#pill", { opacity: 0.88, scale: 1.04 }, { opacity: 1, scale: 1, duration: 0.35, ease: "expo.out" }, 0);
+    tl.fromTo("#h1 .w", { opacity: 0, y: 20, scale: 1.25 }, { opacity: 1, y: 0, scale: 1, duration: 0.25, stagger: 0.03, ease: "expo.out" }, 0);
     const tc = document.querySelector("#tc"); const o = { v: 0 };
-    tl.to(o, { v: 10, duration: 1.2, ease: "power3.out", onUpdate: () => { tc.textContent = "· " + Math.round(o.v) + " HRS"; } }, 0.15);
+    tl.to(o, { v: 10, duration: 1.0, ease: "power3.out", onUpdate: () => { tc.textContent = "· " + Math.round(o.v) + " HRS"; } }, 0.12);
+    tl.fromTo("#sub", { opacity: 0, y: 12 }, { opacity: 0.78, y: 0, duration: 0.32, ease: "power2.out" }, 0.85);
     [0.5, 1.0, 1.5, 2.0, 2.5].forEach((t) => {
-      tl.fromTo("#dot", { scale: 1.4, opacity: 1 }, { scale: 1, opacity: 0.55, duration: 0.4, ease: "power2.out", immediateRender: false }, t);
+      tl.fromTo("#dot", { scale: 1.45, opacity: 1 }, { scale: 1, opacity: 0.55, duration: 0.42, ease: "power2.out", immediateRender: false }, t);
     });
-    tl.fromTo("#rig", { scale: 1.03 }, { scale: 1, duration: 0.35, ease: "expo.out", immediateRender: false }, 1.5);
     window.__timelines = { main: tl };
   </script>
 </div>
@@ -202,11 +216,301 @@ Best for: myth-busting or sharp verdict over `V1` talking head (pair with `timel
   </div>
   <script>
     const tl = gsap.timeline({ paused: true });
+    tl.fromTo("#card", { y: 24, scale: 0.92, opacity: 0 }, { y: 0, scale: 1, opacity: 1, duration: 0.34, ease: "expo.out" }, 0);
+    tl.to("#st", { scaleX: 1, duration: 0.28, ease: "power3.inOut" }, 0.58);
+    tl.to(".old", { opacity: 0.42, duration: 0.24, ease: "power2.out" }, 0.65);
+    // Keep back.out strictly on transforms; tween opacity with power2.out
+    tl.fromTo("#nw", { y: 14, scale: 1.15 }, { y: 0, scale: 1, duration: 0.38, ease: "back.out(2.0)" }, 0.85);
+    tl.fromTo("#nw", { opacity: 0 }, { opacity: 1, duration: 0.22, ease: "power2.out" }, 0.85);
+    tl.to("#card", { y: -18, scale: 0.96, opacity: 0, duration: 0.30, ease: "power3.in", immediateRender: false }, 2.68);
+    window.__timelines = { main: tl };
+  </script>
+</div>
+```
+
+### Blueprint 4: Bar Race + Winner Impact Stamp & Shockwave Ring
+Best for: comparing options by one number where a clear leader overtakes and stamps.
+
+```html
+<div class="clip" data-start="0" data-duration="4.0" style="position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;background:var(--brand-bg,#080404);color:var(--brand-ink,#F7F5EF);font-family:var(--brand-font-body,Sora),sans-serif;">
+  <style>
+    .amb{position:absolute;inset:-20%;pointer-events:none;background:radial-gradient(55% 45% at 72% 35%,color-mix(in srgb,var(--brand-accent,#F05A00) 22%,transparent),transparent 70%)}
+    /* Use height: 56vh; padding: 6vh 5vw when T1 captions are active */
+    .stage{position:relative;width:100%;height:100vh;display:grid;grid-template-rows:auto 1fr auto;row-gap:2vh;align-items:center;padding:7vh 5vw 9vh;box-sizing:border-box}
+    .hdr{font-family:var(--brand-font-display,Sora),sans-serif;font-size:clamp(22px,5vmin,40px);font-weight:800;letter-spacing:-0.02em}
+    .rows{display:flex;flex-direction:column;gap:2.2vh;border-left:2px solid rgba(255,255,255,.22);padding-left:2.2vw;box-shadow:-12px 0 28px -18px var(--brand-accent,#F05A00)}
+    .row{display:grid;grid-template-columns:1fr auto;align-items:center;gap:1.6vw}
+    .track{position:relative;height:5.4vh;border-radius:12px;background:rgba(255,255,255,.06);overflow:hidden}
+    .bar{position:relative;height:100%;border-radius:12px;transform-origin:left center;transform:scaleX(0);overflow:hidden;
+      background:linear-gradient(90deg,rgba(255,255,255,.16),rgba(255,255,255,.28));box-shadow:inset 0 1px 0 rgba(255,255,255,.35)}
+    .bar.win{background:linear-gradient(90deg,var(--brand-accent,#F05A00),var(--brand-accent-secondary,#F7B733))}
+    .bar.win::after{content:"";position:absolute;inset:0;pointer-events:none;mix-blend-mode:screen;
+      background:linear-gradient(110deg,transparent calc(var(--sheen,-45%) - 18%),rgba(255,255,255,.38) var(--sheen,-45%),transparent calc(var(--sheen,-45%) + 18%))}
+    .lbl{position:absolute;left:1.6vmin;top:50%;transform:translateY(-50%);font-size:clamp(13px,2.4vmin,18px);font-weight:700;z-index:2}
+    .val{font-size:clamp(15px,2.8vmin,22px);font-weight:800;font-variant-numeric:tabular-nums;min-width:4.5ch;text-align:right}
+    .stamp-wrap{position:relative;justify-self:start;display:inline-grid;place-items:center}
+    .stamp{padding:.75vmin 2vmin;border-radius:10px;border:2px solid #2BD67B;color:#2BD67B;font-size:clamp(13px,2.4vmin,18px);font-weight:800;letter-spacing:.12em;opacity:0}
+    .ring{position:absolute;inset:-6px;border-radius:14px;border:2px solid #2BD67B;opacity:0;pointer-events:none}
+  </style>
+  <div class="amb" id="amb"></div>
+  <div class="stage" id="rig">
+    <div class="hdr" id="hdr">Render Speed Benchmark</div>
+    <div class="rows">
+      <div class="row"><div class="track"><span class="lbl">Solaris</span><div class="bar win" id="b0" style="width:94%"></div></div><span class="val" id="v0">3.2×</span></div>
+      <div class="row"><div class="track"><span class="lbl">Legacy A</span><div class="bar" id="b1" style="width:52%"></div></div><span class="val" id="v1">1.4×</span></div>
+      <div class="row"><div class="track"><span class="lbl">Legacy B</span><div class="bar" id="b2" style="width:36%"></div></div><span class="val" id="v2">1.0×</span></div>
+    </div>
+    <div class="stamp-wrap">
+      <div class="ring" id="ring"></div>
+      <div class="stamp" id="stamp">FASTEST · NO. 1</div>
+    </div>
+  </div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    tl.fromTo("#hdr", { opacity: 0, y: 12 }, { opacity: 1, y: 0, duration: 0.30, ease: "power2.out" }, 0);
+    tl.to("#b2", { scaleX: 1, duration: 0.65, ease: "expo.out" }, 0.10);
+    tl.to("#b1", { scaleX: 1, duration: 0.72, ease: "expo.out" }, 0.16);
+    tl.to("#b0", { scaleX: 1, duration: 0.82, ease: "expo.out" }, 0.24);
+    tl.fromTo("#v2, #v1, #v0", { opacity: 0, x: -8 }, { opacity: 1, x: 0, duration: 0.32, stagger: 0.08, ease: "power2.out" }, 0.55);
+    // Impact stamp + shockwave ring + rig recoil + sheen sweep settled <= 1.75s
+    tl.fromTo("#stamp", { scale: 2.2 }, { scale: 1, duration: 0.24, ease: "power4.in" }, 1.15);
+    tl.fromTo("#stamp", { opacity: 0 }, { opacity: 1, duration: 0.16, ease: "power2.out" }, 1.15);
+    tl.to("#stamp", { scale: 1.06, duration: 0.18, ease: "back.out(3)", immediateRender: false }, 1.39);
+    tl.to("#stamp", { scale: 1, duration: 0.16, ease: "power2.out", immediateRender: false }, 1.57);
+    tl.fromTo("#ring", { scale: 0.75, opacity: 0.85 }, { scale: 1.85, opacity: 0, duration: 0.55, ease: "power2.out" }, 1.38);
+    tl.fromTo("#rig", { y: 4 }, { y: 0, duration: 0.28, ease: "back.out(2.2)", immediateRender: false }, 1.38);
+    tl.fromTo("#b0", { "--sheen": "-45%" }, { "--sheen": "145%", duration: 0.75, ease: "power2.inOut", immediateRender: false }, 1.25);
+    tl.to("#amb", { scale: 1.08, opacity: 0.85, duration: 4.0, ease: "sine.inOut" }, 0);
+    window.__timelines = { main: tl };
+  </script>
+</div>
+```
+
+### Blueprint 5: AI Agent Tool-Call Trace / Terminal Run
+Best for: showing an AI agent running a deterministic command, verifying steps, and landing `Done`.
+
+```html
+<div class="clip" data-start="0" data-duration="4.0" style="position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;background:var(--brand-bg,#080404);color:var(--brand-ink,#F7F5EF);font-family:var(--brand-font-body,Sora),sans-serif;">
+  <style>
+    /* Use height: 56vh; padding: 6vh 5vw when T1 captions are active */
+    .stage{position:relative;width:100%;height:100vh;display:grid;grid-template-rows:auto 1fr auto;row-gap:2vh;align-items:center;padding:7vh 5vw 9vh;box-sizing:border-box}
+    .hdr{font-family:var(--brand-font-display,Sora),sans-serif;font-size:clamp(20px,4.6vmin,36px);font-weight:800;letter-spacing:-0.02em}
+    .term{padding:2.6vmin;border-radius:20px;background:rgba(255,255,255,.06);-webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.28),inset 0 0 0 1px rgba(255,255,255,.12),0 24px 55px -20px rgba(0,0,0,.7);display:flex;flex-direction:column;gap:1.8vh}
+    .cmd{font-size:clamp(14px,2.5vmin,19px);font-weight:700;color:var(--brand-accent-secondary,#F7B733);font-variant-numeric:tabular-nums;min-height:1.4em}
+    .step{display:flex;align-items:center;gap:1.4vmin;font-size:clamp(13px,2.3vmin,18px);font-weight:600;opacity:0}
+    .ic{width:24px;height:24px;flex:0 0 24px}
+    .foot{display:inline-flex;align-items:center;gap:1.2vmin;justify-self:start;padding:.9vmin 2vmin;border-radius:999px;background:rgba(43,214,123,.14);color:#2BD67B;font-size:clamp(13px,2.3vmin,18px);font-weight:800;opacity:0}
+    .pulse{width:10px;height:10px;border-radius:50%;background:#2BD67B;box-shadow:0 0 12px #2BD67B}
+  </style>
+  <div class="stage">
+    <div class="hdr" id="hdr">Agent Execution Trace</div>
+    <div class="term" id="term">
+      <div class="cmd" id="cmd"></div>
+      <div class="step" id="s0">
+        <svg class="ic" viewBox="0 0 24 24"><circle id="sp0" cx="12" cy="12" r="9" fill="none" stroke="var(--brand-accent,#F05A00)" stroke-width="2.5" stroke-dasharray="36 20"/><path id="ck0" d="M6 12.5 L10 16.5 L18 8.5" fill="none" stroke="#2BD67B" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>assets.search("kpi-tiles")</span>
+      </div>
+      <div class="step" id="s1">
+        <svg class="ic" viewBox="0 0 24 24"><circle id="sp1" cx="12" cy="12" r="9" fill="none" stroke="var(--brand-accent,#F05A00)" stroke-width="2.5" stroke-dasharray="36 20"/><path id="ck1" d="M6 12.5 L10 16.5 L18 8.5" fill="none" stroke="#2BD67B" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>gfx.place(track="g1")</span>
+      </div>
+    </div>
+    <div class="foot" id="badge"><span class="pulse" id="pulse"></span><span>Done · 0 lint errors</span></div>
+  </div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    tl.fromTo("#hdr", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.28, ease: "power2.out" }, 0);
+    tl.fromTo("#term", { opacity: 0, y: 20, scale: 0.97 }, { opacity: 1, y: 0, scale: 1, duration: 0.40, ease: "expo.out" }, 0.05);
+    const cmdText = "$ solaris run --verify-gfx";
+    const cmdEl = document.querySelector("#cmd");
+    const typer = { n: 0 };
+    tl.to(typer, { n: cmdText.length, duration: 0.55, ease: "none", onUpdate: () => { cmdEl.textContent = cmdText.slice(0, Math.round(typer.n)); } }, 0.12);
+    ["0", "1"].forEach((idx, i) => {
+      const ck = document.querySelector("#ck" + idx);
+      const L = ck.getTotalLength();
+      ck.style.strokeDasharray = L; ck.style.strokeDashoffset = L;
+      const at = 0.65 + i * 0.35;
+      tl.fromTo("#s" + idx, { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.25, ease: "power2.out" }, at);
+      tl.to("#sp" + idx, { rotation: 270, svgOrigin: "12 12", duration: 0.32, ease: "power1.inOut" }, at);
+      tl.to("#sp" + idx, { opacity: 0, duration: 0.12, ease: "power2.out" }, at + 0.26);
+      tl.to(ck, { strokeDashoffset: 0, duration: 0.24, ease: "power2.out" }, at + 0.28);
+    });
+    tl.fromTo("#badge", { scale: 0.85 }, { scale: 1, duration: 0.32, ease: "back.out(1.8)" }, 1.45);
+    tl.fromTo("#badge", { opacity: 0 }, { opacity: 1, duration: 0.20, ease: "power2.out" }, 1.45);
+    [1.9, 2.5, 3.1, 3.6].forEach((t) => {
+      tl.fromTo("#pulse", { scale: 1.5, opacity: 1 }, { scale: 1, opacity: 0.55, duration: 0.45, ease: "power2.out", immediateRender: false }, t);
+    });
+    window.__timelines = { main: tl };
+  </script>
+</div>
+```
+
+### Blueprint 6: Procedural Editorial Paper Headline Highlight (12fps On-Twos + Conflict-Free Boil)
+Best for: editorial/newsprint quote or headline proof with organic 12fps boil and chisel-marker highlight.
+
+```html
+<div class="clip" data-start="0" data-duration="3.5" style="position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;background:#141210;font-family:var(--brand-font-display,Sora),sans-serif;">
+  <style>
+    .grain{position:absolute;inset:0;width:100%;height:100%;opacity:.18;pointer-events:none}
+    /* Use height: 56vh; padding: 6vh 5vw when T1 captions are active */
+    .cam{position:relative;width:100%;height:100vh;display:grid;grid-template-rows:auto 1fr auto;row-gap:2vh;align-items:center;padding:7vh 5vw 9vh;box-sizing:border-box}
+    .kicker{font-size:clamp(12px,2.2vmin,16px);font-weight:700;letter-spacing:.18em;color:#F5EFE2;opacity:.72}
+    .paper{position:relative;padding:4vmin 3.8vmin;border-radius:8px;background:#F5EFE2;color:#141210;box-shadow:0 28px 65px -20px rgba(0,0,0,.85);
+      translate:var(--bx,0px) var(--by,0px);rotate:var(--br,0deg)}
+    .tape{position:absolute;top:-14px;left:50%;transform:translateX(-50%) rotate(-2deg);width:110px;height:28px;background:rgba(247,183,51,.55);box-shadow:0 2px 8px rgba(0,0,0,.18)}
+    .hl-wrap{position:relative;display:inline;font-size:clamp(24px,5.6vmin,48px);font-weight:800;line-height:1.18;letter-spacing:-0.02em}
+    .mark{position:relative;display:inline-block;padding:0 .16em}
+    .mark::before{content:"";position:absolute;inset:8% -2% 4%;background:var(--brand-accent-secondary,#F7B733);mix-blend-mode:multiply;
+      transform-origin:left center;transform:scaleX(var(--hl,0));border-radius:4px}
+    .src{font-family:var(--brand-font-body,Sora),sans-serif;font-size:clamp(12px,2.2vmin,16px);font-weight:600;color:#F5EFE2;opacity:.7}
+  </style>
+  <svg class="grain" viewBox="0 0 200 200" preserveAspectRatio="none">
+    <filter id="gf"><feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" stitchTiles="stitch"/></filter>
+    <rect width="100%" height="100%" filter="url(#gf)"/>
+  </svg>
+  <div class="cam" id="cam">
+    <div class="kicker" id="kicker">EDITORIAL BRIEF</div>
+    <div class="paper boil" id="paper">
+      <div class="tape"></div>
+      <div class="hl-wrap">Small teams ship <span class="mark" id="mark">3× faster</span> with automated QA.</div>
+    </div>
+    <div class="src" id="src">2026 Engineering Productivity Index</div>
+  </div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    tl.fromTo("#kicker", { opacity: 0, y: 8 }, { opacity: 0.72, y: 0, duration: 0.28, ease: "power2.out" }, 0);
+    tl.fromTo("#paper", { opacity: 0, y: 24, scale: 0.96 }, { opacity: 1, y: 0, scale: 1, duration: 0.42, ease: "expo.out" }, 0.05);
+    // 12fps quantized chisel-marker sweep (steps(10) over ~0.8s)
+    tl.to("#mark", { "--hl": 1, duration: 0.80, ease: "steps(10)" }, 0.45);
+    tl.fromTo("#src", { opacity: 0, y: 10 }, { opacity: 0.7, y: 0, duration: 0.30, ease: "power2.out" }, 1.15);
+    // Conflict-free 12fps boil via CSS translate/rotate vars while #cam pushes smoothly
+    const boil = [{ x: "0px", y: "0px", r: "0deg" }, { x: "0.7px", y: "-0.6px", r: "0.22deg" }, { x: "-0.6px", y: "0.5px", r: "-0.18deg" }, { x: "0.4px", y: "0.4px", r: "0.14deg" }];
+    for (let f = 0; f < 42; f++) {
+      const b = boil[f % boil.length];
+      tl.set("#paper", { "--bx": b.x, "--by": b.y, "--br": b.r }, f / 12);
+    }
+    tl.fromTo("#cam", { scale: 1 }, { scale: 1.05, duration: 3.5, ease: "power1.inOut" }, 0);
+    window.__timelines = { main: tl };
+  </script>
+</div>
+```
+
+### Blueprint 7: Pure CSS 3D Extruded Listicle Ordinal Overlay
+Best for: crisp listicle chapter/number callout over `V1` talking head (zero WebGL; pair with `timeline.set_transform(track_id="g1", y=-0.24)`).
+
+```html
+<div class="clip" data-start="0" data-duration="3.5" style="display:grid;place-items:center;width:100vw;height:100vh;background:transparent;font-family:var(--brand-font-display,Sora),sans-serif;">
+  <style>
+    .wrap{display:flex;align-items:center;gap:22px;padding:18px 28px;border-radius:22px;perspective:900px;
+      background:color-mix(in srgb,var(--brand-surface,#1A0E0E) 90%,transparent);
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.32),inset 0 0 0 1px rgba(255,255,255,.14),0 24px 55px -18px rgba(0,0,0,.8)}
+    .ext{position:relative;width:82px;height:82px;transform-style:preserve-3d;transform:rotateY(-18deg) rotateX(10deg)}
+    .slice{position:absolute;inset:0;display:grid;place-items:center;font-size:58px;font-weight:800;line-height:1;color:color-mix(in srgb,var(--brand-accent,#F05A00) 45%,#000)}
+    .face{position:relative;z-index:2;width:100%;height:100%;display:grid;place-items:center;font-size:58px;font-weight:800;line-height:1;
+      color:var(--brand-ink,#F7F5EF);border-radius:16px;overflow:hidden;
+      background:linear-gradient(145deg,var(--brand-accent,#F05A00),var(--brand-accent-secondary,#F7B733));
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.55)}
+    .face::after{content:"";position:absolute;inset:0;mix-blend-mode:screen;
+      background:linear-gradient(110deg,transparent calc(var(--sheen,-45%) - 18%),rgba(255,255,255,.45) var(--sheen,-45%),transparent calc(var(--sheen,-45%) + 18%))}
+    .meta{display:flex;flex-direction:column;gap:8px}
+    .rule{height:3px;width:48px;border-radius:3px;background:var(--brand-accent-secondary,#F7B733);box-shadow:0 0 12px var(--brand-accent,#F05A00);transform-origin:left center;transform:scaleX(0)}
+    .title{font-size:clamp(22px,4.6vmin,36px);font-weight:800;color:var(--brand-ink,#F7F5EF);clip-path:inset(-40% 100% -40% -10%)}
+  </style>
+  <div class="wrap" id="card">
+    <div class="ext" id="ext"><div class="face" id="face">03</div></div>
+    <div class="meta">
+      <div class="rule" id="rule"></div>
+      <div class="title" id="title">Batch Your Hooks</div>
+    </div>
+  </div>
+  <script>
+    const ext = document.querySelector("#ext");
+    for (let i = 1; i <= 16; i++) {
+      const s = document.createElement("div");
+      s.className = "slice";
+      s.textContent = "03";
+      s.style.transform = "translateZ(" + (-i * 1.5) + "px)";
+      ext.insertBefore(s, ext.firstChild);
+    }
+    const tl = gsap.timeline({ paused: true });
     tl.fromTo("#card", { y: 24, scale: 0.92, opacity: 0 }, { y: 0, scale: 1, opacity: 1, duration: 0.35, ease: "expo.out" }, 0);
-    tl.to("#st", { scaleX: 1, duration: 0.28, ease: "power3.inOut" }, 0.65);
-    tl.to(".old", { opacity: 0.42, duration: 0.25, ease: "power2.out" }, 0.72);
-    tl.fromTo("#nw", { y: 14, scale: 1.15, opacity: 0 }, { y: 0, scale: 1, opacity: 1, duration: 0.4, ease: "back.out(2.0)" }, 0.95);
-    tl.to("#card", { y: -18, opacity: 0, filter: "blur(8px)", duration: 0.3, ease: "power3.in", immediateRender: false }, 2.68);
+    tl.fromTo("#ext", { rotationY: -38, rotationX: 18 }, { rotationY: -16, rotationX: 8, duration: 0.55, ease: "expo.out" }, 0.08);
+    tl.fromTo("#face", { "--sheen": "-45%" }, { "--sheen": "145%", duration: 0.70, ease: "power2.inOut", immediateRender: false }, 0.25);
+    tl.to("#rule", { scaleX: 1, duration: 0.30, ease: "power3.out" }, 0.22);
+    tl.to("#title", { clipPath: "inset(-40% -10% -40% -10%)", duration: 0.40, ease: "power3.out" }, 0.28);
+    tl.to("#ext", { rotationY: -10, duration: 2.2, ease: "sine.inOut" }, 0.7);
+    tl.to("#card", { y: -16, scale: 0.96, opacity: 0, duration: 0.30, ease: "power3.in", immediateRender: false }, 3.18);
+    window.__timelines = { main: tl };
+  </script>
+</div>
+```
+
+### Blueprint 8: Feathered SVG Spotlight Dim + 3D Focus Lift
+Best for: isolating one critical UI module by dimming surroundings with a feathered SVG spotlight mask.
+
+```html
+<div class="clip" data-start="0" data-duration="4.0" style="position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;background:var(--brand-bg,#080404);color:var(--brand-ink,#F7F5EF);font-family:var(--brand-font-body,Sora),sans-serif;">
+  <style>
+    /* Use height: 56vh; padding: 6vh 5vw when T1 captions are active */
+    .stage{position:relative;width:100%;height:100vh;display:grid;grid-template-rows:auto 1fr auto;row-gap:2vh;align-items:center;padding:7vh 5vw 9vh;box-sizing:border-box;perspective:1400px}
+    .hdr{font-family:var(--brand-font-display,Sora),sans-serif;font-size:clamp(22px,5vmin,38px);font-weight:800;letter-spacing:-0.02em;z-index:3}
+    .board{position:relative;display:grid;grid-template-columns:repeat(2,1fr);gap:2vmin;transform-style:preserve-3d}
+    .mod{padding:2.6vmin;border-radius:18px;background:rgba(255,255,255,.07);box-shadow:inset 0 0 0 1px rgba(255,255,255,.12);font-size:clamp(14px,2.5vmin,19px);font-weight:700}
+    .mod.focal{position:relative;z-index:4;overflow:hidden;background:linear-gradient(155deg,rgba(255,255,255,.18),rgba(255,255,255,.06));
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.5),inset 0 0 0 2px color-mix(in srgb,var(--brand-accent,#F05A00) 75%,white),0 28px 65px -20px rgba(0,0,0,.8)}
+    .mod.focal::after{content:"";position:absolute;inset:0;pointer-events:none;mix-blend-mode:screen;
+      background:linear-gradient(110deg,transparent calc(var(--sheen,-45%) - 18%),rgba(255,255,255,.35) var(--sheen,-45%),transparent calc(var(--sheen,-45%) + 18%))}
+    .spot-svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:2}
+    .pill{justify-self:start;z-index:3;padding:1vmin 2vmin;border-radius:999px;background:color-mix(in srgb,var(--brand-accent,#F05A00) 18%,transparent);box-shadow:inset 0 0 0 1px var(--brand-accent,#F05A00);font-size:clamp(13px,2.3vmin,17px);font-weight:700}
+  </style>
+  <div class="stage">
+    <svg class="spot-svg" viewBox="0 0 1000 1000" preserveAspectRatio="none">
+      <defs>
+        <filter id="sf"><feGaussianBlur stdDeviation="36"/></filter>
+        <mask id="sm">
+          <rect width="1000" height="1000" fill="white"/>
+          <circle id="hole" cx="720" cy="480" r="380" fill="black" filter="url(#sf)"/>
+        </mask>
+      </defs>
+      <rect id="dim" width="1000" height="1000" fill="rgba(8,4,4,0)" mask="url(#sm)"/>
+    </svg>
+    <div class="hdr" id="hdr">Critical Bottleneck</div>
+    <div class="board">
+      <div class="mod">Ingest Queue</div>
+      <div class="mod focal" id="focal">Export Worker · 98% Load</div>
+      <div class="mod">Audio Mix</div>
+      <div class="mod">Caption Sync</div>
+    </div>
+    <div class="pill" id="pill">Isolate worker pool to cut latency</div>
+  </div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    const hole = document.querySelector("#hole");
+    const dim = document.querySelector("#dim");
+    const focal = document.querySelector("#focal");
+    const pill = document.querySelector("#pill");
+    const hdr = document.querySelector("#hdr");
+    const clock = { t: 0 };
+    tl.to(clock, {
+      t: 1, duration: 4.0, ease: "none",
+      onUpdate: () => {
+        const t = clock.t;
+        const enter = Math.min(1, t / 0.08);
+        hdr.style.opacity = enter;
+        const focus = Math.max(0, Math.min(1, (t - 0.12) / 0.24));
+        const ease = 1 - Math.pow(1 - focus, 3);
+        const pulse = focus >= 1 ? Math.sin(t * Math.PI * 2) * 6 : 0;
+        hole.setAttribute("r", (380 - 190 * ease + pulse).toFixed(1));
+        dim.setAttribute("fill", "rgba(8,4,4," + (0.76 * ease).toFixed(3) + ")");
+        focal.style.transform = "translate3d(0," + (-12 * ease).toFixed(1) + "px," + (48 * ease).toFixed(1) + "px) rotateX(" + (4 * ease).toFixed(2) + "deg)";
+        const sheen = -45 + Math.max(0, Math.min(1, (t - 0.18) / 0.20)) * 190;
+        focal.style.setProperty("--sheen", sheen.toFixed(1) + "%");
+        const pillIn = Math.max(0, Math.min(1, (t - 0.25) / 0.12));
+        pill.style.opacity = pillIn;
+        pill.style.transform = "translateY(" + ((1 - pillIn) * 12).toFixed(1) + "px)";
+      }
+    }, 0);
     window.__timelines = { main: tl };
   </script>
 </div>

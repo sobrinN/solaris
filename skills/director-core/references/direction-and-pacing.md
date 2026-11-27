@@ -8,14 +8,14 @@
 2. [Turn Adjectives Into Numbers](#2-turn-adjectives-into-numbers)
 3. [Beat-Grid Tempo & Energy Arc Math](#3-beat-grid-tempo--energy-arc-math)
 4. [The 10-Point Jaw-Drop Checklist](#4-the-10-point-jaw-drop-checklist)
-5. [Pre-Edit Shotlist & Cut Plan Template](#5-pre-edit-shotlist--cut-plan-template)
+5. [Top Visual Moves Quick-Pick & Pre-Edit Shotlist Template](#5-top-visual-moves-quick-pick--pre-edit-shotlist-template)
 6. [BANNED Amateur Defaults](#6-banned-amateur-defaults)
 
 ---
 
 ## 1. Pick a Storyline Device × Camera Form
 
-Before placing a single clip, choose **one narrative device** paired with **one camera/structural form**. A sequence of plain cuts between unrelated cards feels like a slideshow; a deliberate device × form feels directed.
+Before placing a single clip, run the **3-Option `DEVICE × FORM` Discipline**: mentally test **3 structurally distinct `DEVICE × FORM` concepts** (never 3 variations of plain cuts), pick the strongest one, and name a **concrete physical medium rather than a vague mood** (e.g., *"smoked glass panes lit by one amber rim"* instead of *"dark tech vibe"*). A sequence of plain cuts between unrelated cards feels like a slideshow; a deliberate device × form feels directed.
 
 | Storyline Device | What the Viewer Sees |
 | --- | --- |
@@ -33,6 +33,8 @@ Before placing a single clip, choose **one narrative device** paired with **one 
 | **Alternating punch-in spine** | Talking-head cuts alternate `1.00× ↔ 1.08–1.12×` with `V2` B-roll cutaways every `3.0–5.0s` and J/L audio bridges. |
 | **Flight through stations** | 3–5 visual stations on a shared rail or architectural grid; each beat focuses one station while others sit back blurred. |
 | **One frame that rebuilds** | A single persistent stage/composition rearranges its cards, charts, or layers cleanly on every bar. |
+
+> **Solaris Timeline IR Transition Honesty**: Native `V1`/`V2` tracks execute **hard cuts + J/L audio bridges + `1.00× ↔ 1.08–1.12×` punch-ins** (there is no native cross-clip `xfade`/dissolve in the Timeline IR). Seamless dives, whips, disc wipes, and continuous camera rigs live *inside* multi-beat `G1` HTML/GSAP clips or via matched exit/entry states across adjacent `G1` clips.
 
 ---
 
@@ -69,6 +71,9 @@ When `manifest.beats` is populated on `A2` music—or when pacing a programmatic
   3. **Drop / Signature Moment (`45–80%`, energy `1.00`)**: Spend your boldness in ONE place—the biggest data reveal, visual transformation, or hero payoff.
   4. **Outro / End Card (`80–100%`, energy `0.45`)**: Mark lands cleanly, wordmark/CTA sweeps, holds `2.0–3.5s`.
 - **Cut on the Beat, Change Layout on the Bar**: Snap `V1`/`V2` cuts and `G1` entrances within `±0.10s` of `manifest.beats` or spoken phrase onsets.
+- **Motion Personality Lock (90/10 Rule)**: Lock **one** personality (`Playful`, `Premium`, `Corporate`, or `Energetic`) across the entire video so `90%` of cuts and entrances share one consistent physics language, reserving `10%` contrast strictly for the Drop/Signature Moment.
+- **3-Layer Motion Energy**: Orchestrate every animated beat across three tiers—**Primary (`100%`)** hero subject move, **Secondary (`30–50%`, `+50–100ms` lag)** follow-through (`--sheen` sweep, shadow lift, badge settle, shockwave ring) on a different ease, and **Ambient (`10–20%`)** subtle field drift.
+- **4-Act Micro-Story Split**: Shape key `G1` moves as **Anticipation** (quick wind-up/pre-settle) → **Action** (crisp hero arrival) → **Reaction** (`+50–100ms` secondary response) → **Resolution** (**`100–200ms` deliberate stillness** so the eye registers the landed state before the next beat).
 
 ---
 
@@ -88,7 +93,20 @@ Verify every full edit or programmatic film against these 10 criteria:
 
 ---
 
-## 5. Pre-Edit Shotlist & Cut Plan Template
+## 5. Top Visual Moves Quick-Pick & Pre-Edit Shotlist Template
+
+Name exact archetype IDs from `skill://captions-and-gfx/references/move-playbook.md` inside `scene.visual_brief` so scene builders never fall back to generic slides:
+
+| Script Beat | Exact Archetype ID(s) | Script Beat | Exact Archetype ID(s) |
+| --- | --- | --- | --- |
+| **Metrics / KPIs** | `kpi-tiles` | **Code / Diff** | `code-diff` |
+| **Rankings / Leaderboards** | `bar-race` | **Myth-Busting / Error** | `strike-correct` |
+| **Financial / Delta Bridge** | `waterfall-chart` | **Comparison / Judgment** | `verdict-card` |
+| **Feature Grid / Overview** | `bento-reveal` | **Editorial Quote / Pull** | `headline-highlight` |
+| **Product / UI Layers** | `exploded-ui` | **Numbered Step / Listicle** | `listicle-number` |
+| **Spotlight / Focus Callout** | `spotlight-dim` | **Section / Chapter Opener** | `chapter-tag` |
+| **AI Agent / Tool Pipeline** | `tool-call-trace` | **Alerts / Social Proof** | `notify-stack` |
+| **CLI / Build / Benchmark** | `terminal-run` | **Live Growth / Follower Counter** | `follower-ticker-chip` |
 
 Write this compact numbers-only plan before making timeline mutations (and pause for user confirmation during interactive sessions):
 
@@ -111,11 +129,12 @@ Write this compact numbers-only plan before making timeline mutations (and pause
 
 ## 6. BANNED Amateur Defaults
 
-Reject and fix any of these before delivering:
+Reject and fix any of these before delivering. **Growing BANNED List Discipline**: whenever QA catches one of these defaults, add it to the repair pass's explicit banned list so the fix cannot jump to a cousin default (e.g., swapping a fake progress bar for a `01 / 05` step pill):
 
 - **Empty frame 0 / slow fade-in**: Starting with black frames, dead air, or a `>0.5s` lead gap before the hook lands.
 - **Centered text on a plain gradient**: A type-only scene with no kinetic rhythm, lighting, or architectural world.
 - **Unedited dead air or static holds `>3.5s`**: Leaving pauses `>0.35s` in a talking-head spine, or holding an unchanged still (`ken_burns: false`) or static graphic with no new beat.
+- **Linear spatial motion or opacity-only major state changes**: Moving elements on `linear` / `none` ease (reads robotic) or swapping major cards/states with `opacity` alone without paired transform, clip, or secondary reaction.
 - **Everything fading and sliding up on the same ease**: Robotic uniform motion with no role-based easing (`expo.out` vs `power3.in` vs `back.out`).
 - **Breathing, floating, or pulsing loops on titles or UI**: Landed text must stay dead still; drift only the ambient field or whole camera rig as one body.
 - **Generic stock-icon slop or emoji**: Never use emoji or cheap clip-art where crisp inline SVG geometry or brand marks belong.

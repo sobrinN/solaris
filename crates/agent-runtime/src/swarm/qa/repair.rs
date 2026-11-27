@@ -220,9 +220,8 @@ async fn request_repaired_html(
          - REMOVE any unsolicited scene/step counter badges (`01 / 06`, `02/06`, `ETAPA 02`, `PASSO 1`, `STEP 2`, `Scene 1/6`) and REMOVE any useless bottom loading/progress bars unless the defect explicitly asks to keep them.\n\
          - Keep at least `16px` (`3vw`) padding inside cards/viewport so zero characters clip, keep secondary footers/disclaimers `>= 13px` at `>= 0.70` ink opacity, and never let absolute-positioned badges overlap captions or headlines.\n\
          - {brand_palette_note}\n\
-         - Keep strict Solaris sandbox rules: root `<div class=\"clip\" data-start=\"0\" data-duration=\"{:.2}\">`, full-canvas `position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;`, inline GSAP (`window.gsap`) ONLY, ZERO `<script src=...>`, ZERO `<link>`, ZERO external URLs/CDNs, ZERO `Math.random`/`Date.now`/`setInterval`/`setTimeout`/`requestAnimationFrame`/`fetch`.\n\
-         - Return ONLY a valid JSON object: {{\"inline_html\": \"<complete repaired HTML>\"}} (no markdown fences, no commentary).",
-        plan.clip.duration_sec
+         - Keep strict Solaris sandbox rules: root `<div class=\"clip\" data-start=\"0\" data-duration=\"<duration_sec from user JSON>\">`, full-canvas `position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;`, inline GSAP (`window.gsap`) ONLY, ZERO `<script src=...>`, ZERO `<link>`, ZERO external URLs/CDNs, ZERO `Math.random`/`Date.now`/`setInterval`/`setTimeout`/`requestAnimationFrame`/`fetch`.\n\
+         - Return ONLY a valid JSON object: {{\"inline_html\": \"<complete repaired HTML>\"}} (no markdown fences, no commentary)."
     );
 
     let defects_json: Vec<serde_json::Value> = plan

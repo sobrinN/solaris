@@ -46,10 +46,11 @@ Remove dead pauses while keeping delivery natural—never chop consonants or lea
 
 - **B-Roll Cutaways (`V2`)**: Insert cutaways (screen recordings, product footage, or `ken_burns: true` stills) every **`3.0–5.0s`** for **`1.5–3.0s`** each so no talking-head stretch stalls visually. Keep `V1` audio continuous underneath (authentic J/L cut momentum) and pass `gain_db: -99` on `V2` cutaways unless intentional ambience is needed.
 - **Spoken-Cue Transparent Overlays (`G1`)**: Scan the transcript and match high-value spoken beats to visual moves from `skill://captions-and-gfx/references/move-playbook.md`:
-  - Spoken number/metric → `stat-card-solar` or `kpi-tiles` / `bar-race`
+  - Spoken number/metric / growth → `stat-card-solar`, `kpi-tiles`, `bar-race`, or `follower-ticker-chip`
   - Myth busted ("everyone says X, actually Y") → `strike-correct` / `verdict-card`
-  - List point ("number three...") → `listicle-number` / `progress-bar-solar`
-  - Viewer quote / CTA ("comment GUIDE...") → `comment-bubble-solar` / `comment-keyword` / `follow-card`
+  - List point / chapter / pull-quote → `listicle-number`, `chapter-tag`, `headline-highlight`, or `progress-bar-solar`
+  - Viewer quote / alerts / CTA ("comment GUIDE...") → `notify-stack`, `comment-bubble-solar`, `comment-keyword`, or `follow-card`
+  - **Face-Safe Overlay Craft**: Keep `9:16` overlays in the **top clearance (`y: -0.22` to `-0.28`) or under-chin band**—never inside the center `40%` face band. Over live `V1`/`V2` footage, use **opaque `88–92%` card fills** (`rgba(..., 0.88–0.92)`) for instant legibility, and apply **zero full-screen vignette or grain** on transparent `G1` overlays (so the speaker's skin and exposure stay clean).
   - **Cadence & Placement Law**: Place at most **one move per idea worth seeing**, **never two floating overlays within `4.0s`**, enter cleanly from empty at `t=0` and exit in the last `0.30–0.40s`, and always offset via `timeline.set_transform(track_id="g1", y=-0.22 to -0.28)` so overlays sit clear of the face band and `T1` captions (`y: 0.20`).
 
 ## 6. BANNED Talking-Head Defaults

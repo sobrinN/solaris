@@ -28,8 +28,9 @@ Read only the files needed for the current task (progressive disclosure):
 | Faceless explainers / product demos / zero-asset films (Ken Burns stills, beat-sync, visual worlds) | `skill://faceless-explainer` |
 | Log recovery, Lift/Gamma/Gain, brand `.cube` LUTs, skin-tone & overlay-contrast checks | `skill://color-and-look` |
 | Captions, social safe zones, starter GFX, 9 Visual Worlds, GSAP motion craft, 10-category move playbook | `skill://captions-and-gfx` |
-| Motion physics, 9 Visual Worlds CSS, 12 kinetic type entrances, 3D camera/DOF/SVG choreography | `skill://captions-and-gfx/references/motion-craft.md` |
-| 10-category spoken-cue → visual-move library (266 archetypes) + lint-clean Solaris blueprints | `skill://captions-and-gfx/references/move-playbook.md` |
+| Motion physics, 12 kinetic type entrances, 3D camera/DOF/SVG choreography, Motion Personalities | `skill://captions-and-gfx/references/motion-craft.md` |
+| 9 Visual Worlds complete token, lighting, material, and typography lookbook | `skill://captions-and-gfx/references/visual-worlds.md` |
+| 10-category spoken-cue → visual-move taxonomy + 8 lint-clean Solaris blueprints | `skill://captions-and-gfx/references/move-playbook.md` |
 | `-14 LUFS` voice normalization, `-18 dB` music ducking, event-locked sound discipline, J/L cuts | `skill://audio-and-mix` |
 
 ## Mode Check: New Edit vs Refinement
@@ -53,7 +54,7 @@ Inspect existing state before creating or overwriting anything:
 
 ### Stage 2: Direction & Shotlist Gate
 
-Read [references/direction-and-pacing.md](references/direction-and-pacing.md). Choose **one Storyline Device × one Camera Form** and **one Visual World** (`glass`, `studio`, `monochrome`, `product-ui`, `logo-build`, `retro-print`, `editorial-paper`, `glass-folder`, `kinetic-type`), then build a compact, numbers-only **Cut & Look Plan** covering:
+Read [references/direction-and-pacing.md](references/direction-and-pacing.md). Choose **one Storyline Device × one Camera Form**, **one Visual World** (`glass`, `studio`, `monochrome`, `product-ui`, `logo-build`, `retro-print`, `editorial-paper`, `glass-folder`, `kinetic-type`), and **one Motion Personality** (`Playful` / `Premium` / `Corporate` / `Energetic`), then build a compact, numbers-only **Cut & Look Plan** covering:
 - **Hook (`0.0–3.0s`)**: exact first clip/source-in or frame-0 kinetic slam, first spoken word or visual payoff, and opening card/punch-in.
 - **Spine (`V1`/`A1`) or Scene Grid (`G1`)**: silence threshold (`>0.25s`), breath pad (`0.12s`), target duration, BPM/beat cadence, and 4-stage energy arc (Intro → Build → Drop signature moment → Outro hold).
 - **Visuals (`V2`/`FX`)**: B-roll cutaway timestamps (every `3.0–5.0s`), Ken Burns still moves, Log recovery + brand LUT intensity.

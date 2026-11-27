@@ -181,12 +181,16 @@ pub fn skills_for_role(role: AgentRole) -> Vec<SkillDoc> {
 /// Rust swarm roles (which cannot call MCP `resources/read`).
 pub fn skill_references_for_role(role: AgentRole) -> Vec<SkillResourceDoc> {
     let uris: &[&str] = match role {
-        AgentRole::Director => &["skill://director-core/references/direction-and-pacing.md"],
+        AgentRole::Director => &[
+            "skill://director-core/references/direction-and-pacing.md",
+            "skill://captions-and-gfx/references/visual-worlds.md",
+        ],
         AgentRole::Gfx => &[
             "skill://captions-and-gfx/references/gfx-contract.md",
             "skill://captions-and-gfx/references/starter-assets.md",
             "skill://captions-and-gfx/references/motion-craft.md",
             "skill://captions-and-gfx/references/move-playbook.md",
+            "skill://captions-and-gfx/references/visual-worlds.md",
         ],
         _ => &[],
     };
@@ -283,6 +287,7 @@ mod tests {
             "skill://captions-and-gfx/references/starter-assets.md",
             "skill://captions-and-gfx/references/motion-craft.md",
             "skill://captions-and-gfx/references/move-playbook.md",
+            "skill://captions-and-gfx/references/visual-worlds.md",
         ] {
             let res = get_skill_resource(uri).expect("missing skill reference resource");
             assert_eq!(res.uri, uri);
@@ -300,12 +305,14 @@ mod tests {
         );
         assert!(gfx_refs.iter().any(|r| r.uri.ends_with("motion-craft.md")));
         assert!(gfx_refs.iter().any(|r| r.uri.ends_with("move-playbook.md")));
+        assert!(gfx_refs.iter().any(|r| r.uri.ends_with("visual-worlds.md")));
         let dir_refs = skill_references_for_role(AgentRole::Director);
         assert!(
             dir_refs
                 .iter()
                 .any(|r| r.uri.ends_with("direction-and-pacing.md"))
         );
+        assert!(dir_refs.iter().any(|r| r.uri.ends_with("visual-worlds.md")));
     }
 
     #[test]
@@ -339,8 +346,89 @@ mod tests {
         assert!(
             paths
                 .iter()
+                .any(|p| p.ends_with("captions-and-gfx/references/visual-worlds.md"))
+        );
+        assert!(
+            paths
+                .iter()
                 .any(|p| p.ends_with("director-core/agents/openai.yaml"))
         );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn extract_html_fences(markdown: &str) -> Vec<&str> {
+        let mut blocks = Vec::new();
+        let mut rest = markdown;
+        while let Some(start) = rest.find("```html") {
+            let after_marker = &rest[start + "```html".len()..];
+            let content_start = after_marker
+                .find('\n')
+                .map(|idx| idx + 1)
+                .unwrap_or(after_marker.len());
+            let body = &after_marker[content_start..];
+            if let Some(end) = body.find("```") {
+                blocks.push(body[..end].trim());
+                rest = &body[end + 3..];
+            } else {
+                break;
+            }
+        }
+        blocks
+    }
+
+    #[test]
+    fn skill_html_blueprints_pass_gfx_lint_and_avoid_banned_patterns() {
+        let move_playbook =
+            get_skill_resource("skill://captions-and-gfx/references/move-playbook.md")
+                .expect("move-playbook.md");
+        let gfx_contract =
+            get_skill_resource("skill://captions-and-gfx/references/gfx-contract.md")
+                .expect("gfx-contract.md");
+
+        let move_blocks = extract_html_fences(&move_playbook.content);
+        assert!(
+            move_blocks.len() >= 8,
+            "expected >= 8 HTML blueprints in move-playbook.md, found {}",
+            move_blocks.len()
+        );
+
+        let gfx_contract_good = gfx_contract
+            .content
+            .split("### Bad:")
+            .next()
+            .unwrap_or(&gfx_contract.content);
+        let contract_blocks = extract_html_fences(gfx_contract_good);
+        assert!(
+            !contract_blocks.is_empty(),
+            "expected >= 1 HTML blueprint in gfx-contract.md before ### Bad:"
+        );
+
+        for (source_name, blocks) in [
+            ("move-playbook.md", move_blocks),
+            ("gfx-contract.md", contract_blocks),
+        ] {
+            for (idx, html) in blocks.into_iter().enumerate() {
+                let report = crate::lint::lint_gfx_html(html);
+                assert!(
+                    report.valid,
+                    "{source_name} blueprint #{idx} failed gfx lint: {:?}",
+                    report.errors
+                );
+                assert!(
+                    !report.descendant_svg_trap,
+                    "{source_name} blueprint #{idx} triggered descendant_svg_trap"
+                );
+                assert!(
+                    !html.contains("01 / 05") && !html.contains("02 / 05"),
+                    "{source_name} blueprint #{idx} contains banned slide counter"
+                );
+                let mixes_stroke_dashoffset = html.contains("strokeDashoffset =")
+                    && html.contains("attr: { \"stroke-dashoffset\"");
+                assert!(
+                    !mixes_stroke_dashoffset,
+                    "{source_name} blueprint #{idx} mixes strokeDashoffset = with attr: {{ \"stroke-dashoffset\""
+                );
+            }
+        }
     }
 }
