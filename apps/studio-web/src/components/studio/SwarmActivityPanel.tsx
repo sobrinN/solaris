@@ -257,11 +257,11 @@ export function SwarmActivityPanel({
             type="button"
             disabled={qaRunning}
             onClick={() => void onRunQa()}
-            title="Run quality control and auto-fix issues (frames, -14 LUFS & safe zones)"
+            title="Run quality control and repair issues (frames, -14 LUFS & safe zones)"
             className="flex items-center gap-1 rounded-full border border-areia/12 bg-void/75 px-2 py-0.5 text-[10px] font-medium text-areia/85 transition-colors hover:border-amarelo-ideias/50 hover:bg-accent disabled:opacity-45 motion-reduce:transition-none"
           >
             <ShieldCheck className="h-2.5 w-2.5 text-amarelo-ideias" />
-            <span>{qaRunning ? "Enhancing..." : "Enhance"}</span>
+            <span>{qaRunning ? "Repairing..." : "Repair"}</span>
           </button>
         </div>
       </div>

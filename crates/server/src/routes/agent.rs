@@ -7,8 +7,9 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use solaris_agent_runtime::{
     CreativePlan, CreativePlanInput, ModelRecommendation, ModelRoleKind, QaPassOptions, SkillDoc,
-    SolarisBackend, SwarmRunRequest, build_local_creative_plan, generate_creative_plan,
-    list_skills, prepare_swarm_request, run_qa_pass_with_options, run_swarm,
+    SolarisBackend, SwarmRunRequest, build_local_creative_plan, format_qa_diagnostics,
+    generate_creative_plan, list_skills, prepare_swarm_request, run_qa_pass_with_options,
+    run_swarm,
 };
 use solaris_core_ir::{
     AspectPreset, BrandPlaybook, EngineEvent, LogEntry, LogLevel, MediaAsset, QaReport,
@@ -588,6 +589,33 @@ pub async fn run_project_qa(
         },
     )
     .await;
+    let message = if let Some(diag) = format_qa_diagnostics(&report) {
+        format!(
+            "QA {}/100 ({}): {diag}",
+            report.score,
+            if report.passed { "passed" } else { "failed" }
+        )
+    } else {
+        format!(
+            "QA {}/100 (passed, {}f · {} fixed)",
+            report.score, report.frames_inspected, report.auto_fixes_applied
+        )
+    };
+    state.emit_log(LogEntry {
+        id: Uuid::new_v4().to_string(),
+        timestamp: Utc::now(),
+        level: if report.passed {
+            LogLevel::Info
+        } else {
+            LogLevel::Warn
+        },
+        source: "qa".to_string(),
+        project_id: Some(id),
+        run_id: None,
+        agent_id: Some("director-qa".to_string()),
+        message,
+        details: report.multimodal_summary.clone(),
+    });
     Ok(Json(report))
 }
 

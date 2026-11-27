@@ -1763,7 +1763,7 @@ where
     })
 }
 
-pub(crate) fn format_qa_diagnostics(qa: &QaReport) -> Option<String> {
+pub fn format_qa_diagnostics(qa: &QaReport) -> Option<String> {
     let findings: Vec<String> = qa
         .checks
         .iter()

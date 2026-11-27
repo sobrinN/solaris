@@ -28,12 +28,18 @@ pub(super) struct VisionClipFix {
     pub fix_instruction: String,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct CapturedClipFrame {
+    pub png_base64: String,
+    pub local_time_sec: f64,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct VisionQaInspection {
     pub frames_inspected: usize,
     pub multimodal_summary: Option<String>,
     pub clip_fixes: Vec<VisionClipFix>,
-    pub captured_by_clip: HashMap<String, String>,
+    pub captured_by_clip: HashMap<String, CapturedClipFrame>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,6 +130,16 @@ pub(super) fn compute_sample_timestamps(span_start: f64, span_end: f64) -> Vec<f
     sample_times
 }
 
+fn settled_scene_offset(dur: f64) -> f64 {
+    if dur >= 1.8 {
+        (dur * 0.68).clamp(1.2, dur - 0.45)
+    } else if dur >= 1.0 {
+        (dur * 0.65).clamp(0.65, dur - 0.25)
+    } else {
+        dur * 0.60
+    }
+}
+
 pub(super) fn compute_project_sample_timestamps(
     project: &Project,
     span_start: f64,
@@ -165,11 +181,7 @@ pub(super) fn compute_project_sample_timestamps(
             let mut sample_times = Vec::with_capacity(indices.len());
             for idx in indices {
                 let (s, dur) = scenes[idx];
-                let settled_offset = if dur >= 1.6 {
-                    (dur * 0.50).clamp(0.95, dur - 0.55)
-                } else {
-                    dur * 0.55
-                };
+                let settled_offset = settled_scene_offset(dur);
                 let t = (s + settled_offset).clamp(s, (s + dur - 0.02).max(s));
                 if sample_times.last().is_none_or(|prev| t > *prev + 0.02) {
                     sample_times.push(t);
@@ -209,11 +221,7 @@ pub(super) fn compute_clip_sample_timestamps(
 
     let mut sample_times = Vec::with_capacity(scenes.len());
     for (s, dur) in scenes {
-        let settled_offset = if dur >= 1.6 {
-            (dur * 0.50).clamp(0.95, dur - 0.55)
-        } else {
-            dur * 0.55
-        };
+        let settled_offset = settled_scene_offset(dur);
         let t = (s + settled_offset).clamp(s, (s + dur - 0.02).max(s));
         if sample_times.last().is_none_or(|prev| t > *prev + 0.02) {
             sample_times.push(t);
@@ -222,12 +230,12 @@ pub(super) fn compute_clip_sample_timestamps(
     sample_times
 }
 
-fn active_g1_clip_at(project: &Project, ts: f64) -> Option<(String, String)> {
+fn active_g1_clip_at(project: &Project, ts: f64) -> Option<(String, String, f64, f64)> {
     let g1 = project.tracks.iter().find(|t| t.id == "g1" && !t.muted)?;
     g1.clips
         .iter()
         .find(|c| ts >= c.start_sec - 0.01 && ts <= c.start_sec + c.duration_sec + 0.01)
-        .map(|c| (c.id.clone(), c.label.clone()))
+        .map(|c| (c.id.clone(), c.label.clone(), c.start_sec, c.duration_sec))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -262,7 +270,7 @@ pub(super) async fn inspect_playback_frames(
     }
 
     let mut captured = Vec::new();
-    let mut captured_by_clip: HashMap<String, String> = HashMap::new();
+    let mut captured_by_clip: HashMap<String, CapturedClipFrame> = HashMap::new();
     let mut frame_manifest = Vec::new();
 
     for ts in sample_times {
@@ -274,16 +282,29 @@ pub(super) async fn inspect_playback_frames(
             .await;
         if let Ok(frame) = backend.capture_preview_frame(&project.id, ts).await {
             let g1_meta = active_g1_clip_at(project, ts);
-            if let Some((ref cid, _)) = g1_meta {
-                captured_by_clip
-                    .entry(cid.clone())
-                    .or_insert_with(|| frame.png_base64.clone());
-            }
+            let timeline_time_sec = (ts * 100.0).round() / 100.0;
+            let (local_time_sec, clip_duration_sec) =
+                if let Some((ref cid, _, start_sec, duration_sec)) = g1_meta {
+                    let local_t =
+                        ((ts - start_sec).clamp(0.0, duration_sec) * 100.0).round() / 100.0;
+                    let dur_rounded = (duration_sec * 100.0).round() / 100.0;
+                    captured_by_clip
+                        .entry(cid.clone())
+                        .or_insert_with(|| CapturedClipFrame {
+                            png_base64: frame.png_base64.clone(),
+                            local_time_sec: local_t,
+                        });
+                    (Some(local_t), Some(dur_rounded))
+                } else {
+                    (None, None)
+                };
             frame_manifest.push(json!({
                 "frame_index": captured.len() + 1,
-                "time_sec": (ts * 100.0).round() / 100.0,
-                "clip_id": g1_meta.as_ref().map(|(id, _)| id.as_str()),
-                "label": g1_meta.as_ref().map(|(_, lbl)| lbl.as_str()),
+                "time_sec": timeline_time_sec,
+                "local_time_sec": local_time_sec,
+                "clip_duration_sec": clip_duration_sec,
+                "clip_id": g1_meta.as_ref().map(|(id, _, _, _)| id.as_str()),
+                "label": g1_meta.as_ref().map(|(_, lbl, _, _)| lbl.as_str()),
             }));
             captured.push(frame);
         }
@@ -621,6 +642,17 @@ mod tests {
 
         let target: HashSet<String> = ["c3".to_string(), "c1".to_string()].into_iter().collect();
         let times = compute_clip_sample_timestamps(&proj, &target);
-        assert_eq!(times, vec![2.0, 10.0]);
+        assert_eq!(times.len(), 2);
+        assert!((times[0] - 2.72).abs() < 1e-6, "got {}", times[0]);
+        assert!((times[1] - 10.72).abs() < 1e-6, "got {}", times[1]);
+    }
+
+    #[test]
+    fn settled_scene_offset_samples_past_entrance_across_durations() {
+        assert!((settled_scene_offset(0.5) - 0.30).abs() < 1e-6);
+        assert!((settled_scene_offset(1.2) - 0.78).abs() < 1e-6);
+        assert!((settled_scene_offset(3.5) - 2.38).abs() < 1e-6);
+        assert!((settled_scene_offset(4.0) - 2.72).abs() < 1e-6);
+        assert!((settled_scene_offset(6.0) - 4.08).abs() < 1e-6);
     }
 }

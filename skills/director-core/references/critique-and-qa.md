@@ -85,6 +85,7 @@ When one of these real-world defects appears on a captured frame, stop tweaking 
 | **"SVG node/dot covers text or labels collide with strokes/shield"** | Hand-placed `<text>` or dots overlap SVG geometry or enclosing outlines. | Move multi-word labels/cards to CSS Flex/Grid containers outside the SVG, offset short SVG labels outside circle radii (`>= 16px`), remove dots over text, and keep `>= 32px` padding inside enclosing shields/rings. |
 | **"Empty placeholder node rings with orphan labels"** | Hollow `<circle>` nodes drawn without icons or inner cores. | Populate every node circle with a crisp linear icon or solid glowing core dot and center-align its label cleanly below/above the ring. |
 | **"Scene freezes dead for > 3s after entrance"** | Timeline ends all tweens at `t=1.0s` on a `5–7s` clip. | Add continuous GSAP mid-scene motion (`stroke-dashoffset` edge pulses, slow orbital drift, or pulsing alert rings) spanning `t=0.8s..duration` while keeping headlines still. |
+| **"Empty space inside card or blank lower stage even though DOM elements exist"** | Delayed GSAP entrances still at `opacity: 0` at the sampled timestamp (e.g. starting at `2.15s–2.75s` on a `4.0s` clip). | Overlap/tighten GSAP start times so all core + footer elements finish entering by `<= 45%` of `duration_sec` (max `~1.8s`) instead of stretching card height. |
 
 ---
 

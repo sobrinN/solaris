@@ -29,8 +29,8 @@ pub use skills::{
 };
 pub use stt::transcribe_audio_openrouter;
 pub use swarm::{
-    QaPassOptions, SwarmRunRequest, prepare_swarm_request, run_qa_pass, run_qa_pass_with_options,
-    run_swarm,
+    QaPassOptions, SwarmRunRequest, format_qa_diagnostics, prepare_swarm_request, run_qa_pass,
+    run_qa_pass_with_options, run_swarm,
 };
 pub use tools::{
     ToolAnnotations, ToolOutput, ToolSpec, all_tools, execute_tool, is_mutating_tool,

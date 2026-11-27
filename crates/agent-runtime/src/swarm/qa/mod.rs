@@ -221,7 +221,7 @@ pub async fn run_qa_pass_with_options(
         report_progress(0.60, "Director reviewing Vision QA findings");
     }
 
-    // 6. Closed-loop visual auto-repair: when Enhance/auto_fix is enabled and Vision QA
+    // 6. Closed-loop visual auto-repair: when Repair/auto_fix is enabled and Vision QA
     // identified fixable G1 clips, patch their HTML in place and re-verify ONLY the repaired
     // clips (up to 2 rounds: round 1 fixes all reported defects; round 2 retries ONLY remaining
     // critical "issue" clips with an escalated structural-fix prompt).
@@ -300,8 +300,8 @@ pub async fn run_qa_pass_with_options(
             .await;
 
             total_frames_inspected = total_frames_inspected.max(verified.frames_inspected);
-            for (cid, b64) in verified.captured_by_clip {
-                vision_res.captured_by_clip.insert(cid, b64);
+            for (cid, frame) in verified.captured_by_clip {
+                vision_res.captured_by_clip.insert(cid, frame);
             }
 
             let mut untouched_fixes = Vec::new();

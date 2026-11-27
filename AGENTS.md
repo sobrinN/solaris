@@ -37,7 +37,7 @@ Read this file before modifying any code inside `video/solaris/`.
 - **Typography**: Use bundled `@fontsource-variable/sora` (`300–700`) with `tabular-nums` for timecodes, durations, and LUFS metrics. Do **not** add external Google Fonts `<link>` tags or monospace UI chrome.
 - **Motion & Performance**: **Zero `framer-motion`**. Use pure CSS compositor animations (`transform`, `opacity`, `scaleX`) only. Never use `transition-all` or transition layout properties. Always respect `@media (prefers-reduced-motion: reduce)`.
 - **Contrast**: Never use `Vermelho Foco` (`#C31818`) as bare body text on dark surfaces (use as fill, dot, or border with `Areia` text). `--accent` is strictly a dark hover surface tint.
-- **Aspect-Aware Studio Layout & Director Panel**: Keep the Program Monitor column dynamically sized to the project's aspect ratio (`9:16`, `1:1`, `16:9`) so portrait/square canvases don't waste horizontal space on empty black bars. Keep the Director & Swarm panel streamlined with a single `Enhance` (QA auto-fix) header button and automatic refine-in-place behavior when timeline clips exist (no `Fresh cut` toggle—users create a new project to start from zero).
+- **Aspect-Aware Studio Layout & Director Panel**: Keep the Program Monitor column dynamically sized to the project's aspect ratio (`9:16`, `1:1`, `16:9`) so portrait/square canvases don't waste horizontal space on empty black bars. Keep the Director & Swarm panel streamlined with a single `Repair` (QA auto-fix) header button and automatic refine-in-place behavior when timeline clips exist (no `Fresh cut` toggle—users create a new project to start from zero).
 
 ---
 

@@ -785,7 +785,7 @@ export function InspectorPanel({
             [
               ["temp", "Temp", -1, 1, 0.02, 0],
               ["tint", "Tint", -1, 1, 0.02, 0],
-              ["contrast", "Contrast", 0.5, 1.6, 0.02, 1],
+              ["contrast", "Contrast", 0.4, 1.6, 0.02, 1],
               ["saturation", "Saturation", 0, 2, 0.02, 1],
               ["exposure", "Exposure", -1, 1, 0.02, 0],
             ] as const

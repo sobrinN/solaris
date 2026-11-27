@@ -20,7 +20,7 @@ use crate::openrouter::{
 use crate::swarm::llm::{route_models, strip_json_fence};
 
 use super::apply_locked_op;
-use super::vision::VisionClipFix;
+use super::vision::{CapturedClipFrame, VisionClipFix};
 
 const MAX_REPAIR_CLIPS_PER_PASS: usize = 7;
 const REPAIR_MAX_TOKENS: u32 = 8192;
@@ -36,7 +36,7 @@ struct ClipRepairPlan {
     clip: Clip,
     current_html: String,
     defects: Vec<VisionClipFix>,
-    frame_png_b64: Option<String>,
+    captured_frame: Option<CapturedClipFrame>,
 }
 
 pub(super) fn filter_remaining_issue_fixes(clip_fixes: &[VisionClipFix]) -> Vec<VisionClipFix> {
@@ -50,7 +50,7 @@ pub(super) fn filter_remaining_issue_fixes(clip_fixes: &[VisionClipFix]) -> Vec<
 fn group_actionable_fixes(
     project: &Project,
     clip_fixes: &[VisionClipFix],
-    captured_by_clip: &HashMap<String, String>,
+    captured_by_clip: &HashMap<String, CapturedClipFrame>,
 ) -> Vec<ClipRepairPlan> {
     let Some(g1) = project
         .tracks
@@ -92,7 +92,7 @@ fn group_actionable_fixes(
             clip: clip.clone(),
             current_html: html.to_string(),
             defects,
-            frame_png_b64: captured_by_clip.get(&cid).cloned(),
+            captured_frame: captured_by_clip.get(&cid).cloned(),
         });
     }
 
@@ -212,7 +212,8 @@ async fn request_repaired_html(
         "You are Solaris Visual QA Repair Specialist. Fix ONLY the reported visual defects on this single G1 HTML/CSS/SVG/GSAP scene while preserving its language, core message, timing (`data-duration`), and visual cohesion.\n\
          RULES:\n\
          - Fix every reported overlap, clipped label, edge cutoff, layout imbalance, bottom void, empty node ring, low-contrast disclaimer, or redundant copy.\n\
-         - {layout_band_rule} When fixing a bottom-half void without T1 captions, switch the stage container to a 3-zone CSS Grid (`display:grid;grid-template-rows:auto 1fr auto;align-items:center;padding:7vh 5vw 9vh;box-sizing:border-box;`) so Header, Hero (`1fr`), and Bottom Callout/Legend fill the frame evenly.\n\
+         - {layout_band_rule} When fixing a bottom-half void without T1 captions, switch the stage container to a 3-zone CSS Grid (`display:grid;grid-template-rows:auto 1fr auto;row-gap:2vh;align-items:center;padding:7vh 5vw 9vh;box-sizing:border-box;`) so Header, Hero (`1fr`), and Bottom Callout/Legend fill the frame evenly with `>= 18px` vertical clearance between `header`/`.sub` and `.hero`. NEVER force `height:100%` stretch on tall `.hero` cards or apply `scale > 1.0` to a full-height card (which pushes the card upward into `header`/`.sub`).\n\
+         - GSAP ENTRANCE TIMING VS. EMPTY SPACE (CRITICAL): The attached screenshot was captured at `captured_local_time_sec` (local time inside `data-duration`). Whenever the screenshot shows empty space inside a card or a blank lower stage even though DOM elements exist in `current_inline_html` (output panels, checkmarks, pills, footers), inspect their GSAP entrance timestamps FIRST. If any core/footer element is still at `opacity: 0` at `captured_local_time_sec` (e.g. starting at `2.15s..2.75s` on a `4.0s` clip), tighten and overlap the GSAP timeline so ALL core + footer elements finish entering by `<= 45%` of `duration_sec` (max `~1.8s`) instead of stretching the card height or adding redundant DOM blocks.\n\
          - CSS SCOPING FOR BACKGROUND SVGs (CRITICAL): NEVER write a descendant selector like `.funnel svg {{ position: absolute; inset: 0; width: 100%; height: 100%; }}` when nested icon `<svg>` elements exist inside that container — GSAP transforms make child cards containing blocks and stretch every icon `<svg>` directly over the card text! ALWAYS target backdrop SVGs with a direct-child selector (`.funnel > svg`) or an explicit class (`.funnel-bg`).\n\
          - FLOW-POSITIONED BADGES & SEALS: NEVER hang a circular seal or badge off a giant headline with `position: absolute` and negative `right`/`top` offsets in 9:16 portrait — place badges in normal Flex/Grid flow (above the headline in the eyebrow row or inline with explicit `gap`) so headline-badge collision is impossible. Keep decorative rings/radars behind foreground pills subtle (`opacity <= 0.35`) and remove high-contrast accent dots that touch pill/card edges.\n\
          - SVG & DIAGRAM ANTI-COLLISION & CENTERING: NEVER leave a cyan/accent dot or circle sitting on top of text (like a central panel title). Move multi-word labels, risk cards, or callouts into clean HTML CSS Flex/Grid containers rather than cramped `<text x y>` over dense SVG paths. Keep short SVG labels cleanly outside node radii (`>= 16px` clearance), center hero diagrams symmetrically at `(W/2, H/2)`, and keep `>= 32px` inner padding inside enclosing shields/rings so labels never cross outlines. Whenever GSAP animates `rotation` or `scale` on an SVG element, ALWAYS specify explicit `svgOrigin: \"<cx> <cy>\"` matching the `viewBox` center so rotating globes/rings never swing off-center. Populate any empty placeholder node circle with a crisp linear icon or solid glowing core dot.\n\
@@ -240,6 +241,7 @@ async fn request_repaired_html(
         "clip_id": plan.clip.id,
         "label": plan.clip.label,
         "duration_sec": plan.clip.duration_sec,
+        "captured_local_time_sec": plan.captured_frame.as_ref().map(|f| f.local_time_sec),
         "canvas": project.canvas,
         "has_active_captions": has_captions,
         "brand_tokens": brand.map(|b| &b.tokens),
@@ -252,16 +254,16 @@ async fn request_repaired_html(
     {
         obj.insert(
             "escalation_note".to_string(),
-            json!("RETRY ROUND 2 (CRITICAL): A previous repair pass STILL left the defect(s) shown in the attached screenshot. Do NOT make tiny pixel nudges (such as shifting right:-14vw to right:-17vw). Apply a structural CSS/HTML fix: convert any colliding position:absolute badge/seal into normal CSS Flex/Grid flow, replace any descendant .container svg backdrop selector with .container > svg or an explicit class, and remove or fade decorative SVG dots that touch card/pill edges."),
+            json!("RETRY ROUND 2 (CRITICAL): A previous repair pass STILL left the defect(s) shown in the attached screenshot. Do NOT make tiny pixel nudges (such as shifting right:-14vw to right:-17vw). Apply a structural CSS/HTML/GSAP fix: pull any late GSAP entrance start times earlier so all core and footer elements are visible by <= 1.6s, remove height:100% / scale > 1 on overflowing cards, convert any colliding position:absolute badge/seal into normal CSS Flex/Grid flow, replace any descendant .container svg backdrop selector with .container > svg or an explicit class, and remove or fade decorative SVG dots that touch card/pill edges."),
         );
     }
     let payload = payload_obj.to_string();
 
     let mut parts = vec![ContentPart::text(payload)];
-    if let Some(ref b64) = plan.frame_png_b64 {
+    if let Some(ref frame) = plan.captured_frame {
         parts.push(ContentPart::ImageUrl {
             image_url: MediaUrlRef {
-                url: format!("data:image/png;base64,{b64}"),
+                url: format!("data:image/png;base64,{}", frame.png_base64),
             },
         });
     }
@@ -311,7 +313,7 @@ pub(super) async fn repair_gfx_clips_from_vision(
     project: &Project,
     brand: Option<&BrandPlaybook>,
     clip_fixes: &[VisionClipFix],
-    captured_by_clip: &HashMap<String, String>,
+    captured_by_clip: &HashMap<String, CapturedClipFrame>,
     repair_round: usize,
     cancel: &CancellationToken,
     ops_counter: Option<&AtomicU32>,
@@ -335,7 +337,7 @@ pub(super) async fn repair_gfx_clips_from_vision(
             AgentRole::Director,
             "timeline.track.g1",
             &format!(
-                "enhancing {} GFX scene(s) (pass {repair_round})",
+                "repairing {} GFX scene(s) (pass {repair_round})",
                 plans.len()
             ),
         )
@@ -446,9 +448,9 @@ pub(super) async fn repair_gfx_clips_from_vision(
     }
 
     let summary = if ready_plans.len() == 1 {
-        format!("QA enhanced GFX '{}'", ready_plans[0].clip.label)
+        format!("QA repaired GFX '{}'", ready_plans[0].clip.label)
     } else {
-        format!("QA enhanced {} GFX scenes", ready_plans.len())
+        format!("QA repaired {} GFX scenes", ready_plans.len())
     };
     let batch = TimelineCommand::Batch {
         commands: batch_commands,

@@ -52,4 +52,13 @@ describe("colorLooks", () => {
     assert.ok(contrast.includes("100.00%"));
     assert.ok(contrast.includes("45.45%"));
   });
+
+  it("centers contrast neutral 1.00 at 50.00% on symmetric [0.4, 1.6] range", () => {
+    const neutral = sliderTrackGradient(1, 0.4, 1.6, 1, "#F05A00");
+    assert.ok(neutral.includes("50.00%"));
+
+    const clampedMax = sliderTrackGradient(2.5, 0.4, 1.6, 1, "#F05A00");
+    assert.ok(clampedMax.includes("50.00%"));
+    assert.ok(clampedMax.includes("100.00%"));
+  });
 });
